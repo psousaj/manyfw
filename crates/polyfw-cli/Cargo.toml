@@ -1,0 +1,10 @@
+[package]
+name = "polyfw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+polyfw-core = { path = "../polyfw-core" }

@@ -1,0 +1,16 @@
+version = 1
+
+[zones.lan]
+interfaces = ["eth0", "enp*"]
+subnets = ["192.168.10.0/24"]
+
+[zones.tailscale]
+interfaces = ["tailscale0"]
+
+[services.postgres]
+target = "docker:postgres"
+allow = ["tailscale", "lan"]
+
+[services.vaultwarden]
+target = "docker:vaultwarden"
+allow = ["tailscale"]
