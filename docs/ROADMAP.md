@@ -5,7 +5,7 @@
 - [x] TOML parser, simple validation and unit tests
 - [x] `check`, policy-summary `plan`, CI baseline
 - [ ] CI confirmed green on GitHub
-- [ ] Cargo.lock checked in after reproducible build
+- [x] Cargo.lock checked in after reproducible build
 
 ## v0.2.0 — Discovery and audit
 - [ ] Observe Docker publishers, host listeners, interfaces, IPv4/IPv6

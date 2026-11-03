@@ -18,6 +18,21 @@ cargo test --workspace
 
 `plan` currently prints a **policy summary**, not a safe executable kernel ruleset. There is intentionally no `apply` command yet.
 
+## Supported build environment
+
+The reproducible-build baseline currently supports Linux `x86_64-unknown-linux-gnu`.
+The minimum supported Rust version (MSRV) is 1.85.0. CI verifies the MSRV and the
+latest stable Rust toolchain. Other targets are not verified yet.
+
+Run the same checks locally as CI:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace
+```
+
 ## Direction
 
 - Linux host + Docker-published services + VPN/LAN zones

@@ -43,23 +43,33 @@ pub fn parse_and_validate(input: &str) -> Result<Config, PolicyError> {
 
 pub fn validate(cfg: &Config) -> Result<(), PolicyError> {
     if cfg.version != 1 {
-        return Err(PolicyError::Validation("only schema version 1 is supported".into()));
+        return Err(PolicyError::Validation(
+            "only schema version 1 is supported".into(),
+        ));
     }
     for (name, zone) in &cfg.zones {
         if zone.interfaces.is_empty() || zone.interfaces.iter().any(|s| s.trim().is_empty()) {
-            return Err(PolicyError::Validation(format!("zone {name}: interfaces must be nonempty")));
+            return Err(PolicyError::Validation(format!(
+                "zone {name}: interfaces must be nonempty"
+            )));
         }
     }
     for (name, service) in &cfg.services {
         if service.target.trim().is_empty() || !service.target.starts_with("docker:") {
-            return Err(PolicyError::Validation(format!("service {name}: target must start with docker:")));
+            return Err(PolicyError::Validation(format!(
+                "service {name}: target must start with docker:"
+            )));
         }
         if service.allow.is_empty() {
-            return Err(PolicyError::Validation(format!("service {name}: allow must not be empty")));
+            return Err(PolicyError::Validation(format!(
+                "service {name}: allow must not be empty"
+            )));
         }
         for source in &service.allow {
             if !cfg.zones.contains_key(source) {
-                return Err(PolicyError::Validation(format!("service {name}: unknown zone {source}")));
+                return Err(PolicyError::Validation(format!(
+                    "service {name}: unknown zone {source}"
+                )));
             }
         }
     }
@@ -76,7 +86,12 @@ mod tests {
     }
     #[test]
     fn rejects_unknown_zone() {
-        assert!(parse_and_validate("version = 1\n[services.db]\ntarget = \"docker:postgres\"\nallow = [\"missing\"]").is_err());
+        assert!(
+            parse_and_validate(
+                "version = 1\n[services.db]\ntarget = \"docker:postgres\"\nallow = [\"missing\"]"
+            )
+            .is_err()
+        );
     }
     #[test]
     fn rejects_unsupported_schema() {
