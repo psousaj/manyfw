@@ -1,11 +1,10 @@
 [package]
-name = "polyfw-core"
+name = "manyfw"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+manyfw-core = { path = "../manyfw-core" }

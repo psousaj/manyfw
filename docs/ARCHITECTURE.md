@@ -1,6 +1,6 @@
 # Architecture
 
-PolyFW is a **policy coordination tool**, not a replacement for the Linux kernel firewall.
+ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel firewall.
 
 ## Initial components
 

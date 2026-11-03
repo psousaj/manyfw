@@ -1,10 +1,10 @@
 # Agent implementation guide
 
-This file defines how a coding agent should implement PolyFW safely and incrementally.
+This file defines how a coding agent should implement ManyFW safely and incrementally.
 
 ## Mission
 
-PolyFW is a Rust workspace producing **one CLI executable**, with independently testable library components. Its purpose is to coordinate and explain Linux/container/private-network firewall policy while respecting ownership of rules managed by Docker, UFW, firewalld and other software.
+ManyFW is a Rust workspace producing **one CLI executable**, with independently testable library components. Its purpose is to coordinate and explain Linux/container/private-network firewall policy while respecting ownership of rules managed by Docker, UFW, firewalld and other software.
 
 **Current code is a read-only prototype. Never claim it protects a host.**
 
@@ -20,10 +20,10 @@ If docs and requested code disagree, document the discrepancy and open or update
 
 ## Execution order
 
-- **M0 — Foundations**: [#1](https://github.com/psousaj/polyfw/issues/1), then [#2](https://github.com/psousaj/polyfw/issues/2).
-- **M1 — Safe discovery**: [#3](https://github.com/psousaj/polyfw/issues/3) and [#4](https://github.com/psousaj/polyfw/issues/4) can run in parallel once interfaces are settled; [#5](https://github.com/psousaj/polyfw/issues/5) follows both; [#6](https://github.com/psousaj/polyfw/issues/6) follows audit.
-- **M2 — Planning**: [#7](https://github.com/psousaj/polyfw/issues/7).
-- **M3 — Enforcement**: [#8](https://github.com/psousaj/polyfw/issues/8) only after a reviewed safety gate.
+- **M0 — Foundations**: [#1](https://github.com/psousaj/manyfw/issues/1), then [#2](https://github.com/psousaj/manyfw/issues/2).
+- **M1 — Safe discovery**: [#3](https://github.com/psousaj/manyfw/issues/3) and [#4](https://github.com/psousaj/manyfw/issues/4) can run in parallel once interfaces are settled; [#5](https://github.com/psousaj/manyfw/issues/5) follows both; [#6](https://github.com/psousaj/manyfw/issues/6) follows audit.
+- **M2 — Planning**: [#7](https://github.com/psousaj/manyfw/issues/7).
+- **M3 — Enforcement**: [#8](https://github.com/psousaj/manyfw/issues/8) only after a reviewed safety gate.
 
 These are **documented release milestones**, not currently GitHub native milestone objects.
 
@@ -55,8 +55,8 @@ Keep the core independent of Docker and kernel modules. Separate **observation**
 
 ## First task for an agent
 
-Start with [issue #1](https://github.com/psousaj/polyfw/issues/1). Verify the current scaffold actually compiles; it has not been runtime-verified at initial publication. Fix build and tests and commit Cargo.lock before opening feature work. Do **not** implement `apply` prematurely.
+Start with [issue #1](https://github.com/psousaj/manyfw/issues/1). Verify the current scaffold actually compiles; it has not been runtime-verified at initial publication. Fix build and tests and commit Cargo.lock before opening feature work. Do **not** implement `apply` prematurely.
 
 ## Example handoff prompt
 
-> Implement the next unblocked issue in psousaj/polyfw, starting at #1. Read AGENTS.md and docs/{SECURITY,ARCHITECTURE,SPECIFICATION,ROADMAP}.md first. Create a feature branch and PR, include tests and documentation, and do not modify host firewall rules. Treat unsupported or unknown network reachability as unknown, not safe.
+> Implement the next unblocked issue in psousaj/manyfw, starting at #1. Read AGENTS.md and docs/{SECURITY,ARCHITECTURE,SPECIFICATION,ROADMAP}.md first. Create a feature branch and PR, include tests and documentation, and do not modify host firewall rules. Treat unsupported or unknown network reachability as unknown, not safe.

@@ -1,6 +1,6 @@
 # Contributing
 
-PolyFW is an early-stage Rust/Linux infrastructure project. Do not use it to protect production systems.
+ManyFW is an early-stage Rust/Linux infrastructure project. Do not use it to protect production systems.
 
 1. File a focused issue describing the scenario, Linux distribution, Docker networking mode and firewall manager.
 2. Keep policy-core code pure and independent of privileged integrations.

@@ -1,6 +1,6 @@
 # Configuration and CLI (experimental)
 
-Current schema is **TOML version 1**. Unknown fields are rejected. The example is validated with `polyfw check --file examples/polyfw.toml`.
+Current schema is **TOML version 1**. Unknown fields are rejected. The example is validated with `manyfw check --file examples/manyfw.toml`.
 
 ```toml
 version = 1
@@ -17,8 +17,8 @@ Current validation: schema version must be 1, every zone has nonempty interfaces
 
 ## Implemented
 
-- `polyfw check --file <path>`: validate, nonzero exit on error.
-- `polyfw plan --file <path>`: policy summary only, **not executable rules**.
+- `manyfw check --file <path>`: validate, nonzero exit on error.
+- `manyfw plan --file <path>`: policy summary only, **not executable rules**.
 
 ## Proposed, not implemented
 
