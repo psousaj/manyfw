@@ -44,7 +44,7 @@ pub struct Provenance {
     pub operation: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Limitation {
     NetlinkUnavailable,
     SocketDiagnosticsUnavailable,
@@ -413,8 +413,22 @@ impl HostDiscovery {
             .records
             .iter()
             .any(|observation| matches!(observation.state, TailscaleState::Absent));
-        if (has_tailscale_interface && (tailscale_absent || result.tailscale.records.is_empty()))
-            || (!has_tailscale_interface && tailscale_present)
+        let tailscale_partial =
+            result.tailscale.records.iter().any(|observation| {
+                matches!(observation.state, TailscaleState::PartiallyObservable)
+            });
+        if tailscale_partial {
+            result.tailscale.completeness = Completeness::Partial;
+            result.tailscale.outcome = CollectionOutcome::Partial;
+        }
+        let interfaces_can_confirm_absence =
+            result.interfaces.completeness == Completeness::Complete;
+        let tailscale_has_no_explicit_state = result.tailscale.completeness
+            == Completeness::Complete
+            && result.tailscale.records.is_empty();
+        if interfaces_can_confirm_absence
+            && ((has_tailscale_interface && (tailscale_absent || tailscale_has_no_explicit_state))
+                || (!has_tailscale_interface && tailscale_present))
         {
             result.diagnostics.push(DiscoveryDiagnostic {
                 code: DiagnosticCode::SourceDivergence,
@@ -435,26 +449,27 @@ impl HostDiscovery {
             .routes
             .limitations
             .push(Limitation::PolicyRoutingIncomplete);
-        if result.addresses.records.iter().any(|address| {
-            !result
-                .interfaces
-                .records
-                .iter()
-                .any(|interface| Some(interface.index) == address.interface_index)
-        }) {
-            result.diagnostics.push(DiscoveryDiagnostic {
-                code: DiagnosticCode::SourceDivergence,
-                message: "address source references an interface absent from the interface source"
-                    .into(),
-                dimension: Dimension::Addresses,
-            });
-            result.addresses.completeness = Completeness::Partial;
-            result.addresses.outcome = CollectionOutcome::Partial;
-            result
-                .addresses
-                .limitations
-                .push(Limitation::SourceDivergence);
-        }
+        reconcile_interface_references(
+            &result.interfaces,
+            &mut result.addresses,
+            Dimension::Addresses,
+            "address",
+            &mut result.diagnostics,
+        );
+        reconcile_interface_references(
+            &result.interfaces,
+            &mut result.listeners,
+            Dimension::Listeners,
+            "listener",
+            &mut result.diagnostics,
+        );
+        reconcile_interface_references(
+            &result.interfaces,
+            &mut result.routes,
+            Dimension::Routes,
+            "route",
+            &mut result.diagnostics,
+        );
         let all_temporal = finished_at < started_at;
         let temporal = |interval: &CollectionInterval| {
             all_temporal
@@ -484,9 +499,15 @@ impl HostDiscovery {
                 }
             }
         }
+        normalize_dimension_metadata(&mut result.interfaces);
+        normalize_dimension_metadata(&mut result.addresses);
+        normalize_dimension_metadata(&mut result.listeners);
+        normalize_dimension_metadata(&mut result.routes);
+        normalize_dimension_metadata(&mut result.tailscale);
         result.diagnostics.sort_by(|a, b| {
             (a.dimension, a.code, &a.message).cmp(&(b.dimension, b.code, &b.message))
         });
+        result.diagnostics.dedup();
         result
     }
 
@@ -930,15 +951,21 @@ impl TailscaleSource for LinuxTailscaleSource {
                 let index = fs::read_to_string(path.join("ifindex"))
                     .ok()
                     .and_then(|v| v.trim().parse().ok());
-                Ok(linux_data(
+                let state = if index.is_some() {
+                    TailscaleState::Present
+                } else {
+                    TailscaleState::PartiallyObservable
+                };
+                Ok(linux_data_with_partial(
                     vec![TailscaleObservation {
-                        state: TailscaleState::Present,
+                        state,
                         interface_index: index,
                         interface_name: Some("tailscale0".into()),
                         addresses: Vec::new(),
                     }],
                     "sysfs",
                     "detect /sys/class/net/tailscale0",
+                    index.is_none(),
                 ))
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(linux_data(
@@ -972,6 +999,73 @@ fn add_namespace_limitation<T>(dimension: &mut DimensionObservation<T>, verified
     } else {
         Limitation::NamespaceNotVerified
     });
+}
+
+fn reconcile_interface_references<T>(
+    interfaces: &DimensionObservation<NetworkInterface>,
+    dimension: &mut DimensionObservation<T>,
+    kind: Dimension,
+    label: &str,
+    diagnostics: &mut Vec<DiscoveryDiagnostic>,
+) where
+    T: InterfaceReference,
+{
+    if interfaces.completeness == Completeness::Complete
+        && dimension.records.iter().any(|record| {
+            let (index, name) = record.interface_reference();
+            (index.is_some() || name.is_some())
+                && !interfaces.records.iter().any(|interface| {
+                    index.is_none_or(|value| value == interface.index)
+                        && name.is_none_or(|value| value == interface.name)
+                })
+        })
+    {
+        diagnostics.push(DiscoveryDiagnostic {
+            code: DiagnosticCode::SourceDivergence,
+            message: format!(
+                "{label} source references an interface absent from the interface source"
+            ),
+            dimension: kind,
+        });
+        dimension.completeness = Completeness::Partial;
+        dimension.outcome = CollectionOutcome::Partial;
+        dimension.limitations.push(Limitation::SourceDivergence);
+    }
+}
+
+trait InterfaceReference {
+    fn interface_reference(&self) -> (Option<u32>, Option<&str>);
+}
+
+impl InterfaceReference for InterfaceAddress {
+    fn interface_reference(&self) -> (Option<u32>, Option<&str>) {
+        (self.interface_index, self.interface_name.as_deref())
+    }
+}
+
+impl InterfaceReference for SocketListener {
+    fn interface_reference(&self) -> (Option<u32>, Option<&str>) {
+        (self.interface_index, self.interface_name.as_deref())
+    }
+}
+
+impl InterfaceReference for NetworkRoute {
+    fn interface_reference(&self) -> (Option<u32>, Option<&str>) {
+        (self.interface_index, self.interface_name.as_deref())
+    }
+}
+
+fn normalize_dimension_metadata<T>(dimension: &mut DimensionObservation<T>) {
+    dimension
+        .provenance
+        .sort_by(|a, b| (&a.source, &a.operation).cmp(&(&b.source, &b.operation)));
+    dimension.provenance.dedup();
+    dimension
+        .alternative_provenance
+        .sort_by(|a, b| (&a.source, &a.operation).cmp(&(&b.source, &b.operation)));
+    dimension.alternative_provenance.dedup();
+    dimension.limitations.sort();
+    dimension.limitations.dedup();
 }
 
 impl<I, A, L, R, T> From<(I, A, L, R, T)> for HostSources
@@ -1456,5 +1550,234 @@ mod tests {
                 .limitations
                 .contains(&Limitation::SourceDivergence)
         );
+    }
+
+    #[test]
+    fn reconciliation_covers_listeners_routes_and_tailscale_partial_state() {
+        let sources = (
+            Fake {
+                value: data(vec![NetworkInterface {
+                    index: 1,
+                    name: "lo".into(),
+                    administrative_state: InterfaceState::Up,
+                    operational_state: InterfaceState::Up,
+                }]),
+            },
+            Fake {
+                value: data(Vec::<InterfaceAddress>::new()),
+            },
+            Fake {
+                value: data(vec![SocketListener {
+                    protocol: TransportProtocol::Tcp,
+                    family: IpFamily::Ipv4,
+                    address: "192.0.2.1".parse().unwrap(),
+                    wildcard: false,
+                    port: 443,
+                    interface_index: Some(9),
+                    interface_name: Some("gone".into()),
+                    owner: SocketOwner::Unknown,
+                }]),
+            },
+            Fake {
+                value: data(vec![NetworkRoute {
+                    family: IpFamily::Ipv4,
+                    destination: "192.0.2.0".parse().unwrap(),
+                    prefix_length: 24,
+                    gateway: None,
+                    interface_index: Some(9),
+                    interface_name: Some("gone".into()),
+                    table: Some(100),
+                    metric: Some(10),
+                    route_type: RouteType::Unicast,
+                }]),
+            },
+            Fake {
+                value: data(vec![TailscaleObservation {
+                    state: TailscaleState::PartiallyObservable,
+                    interface_index: Some(1),
+                    interface_name: Some("tailscale0".into()),
+                    addresses: vec![],
+                }]),
+            },
+        );
+        let result = HostDiscovery::new(sources, Time).collect();
+        assert_eq!(result.listeners.completeness, Completeness::Partial);
+        assert_eq!(result.routes.completeness, Completeness::Partial);
+        assert_eq!(result.tailscale.completeness, Completeness::Partial);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.dimension == Dimension::Listeners)
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.dimension == Dimension::Routes)
+        );
+    }
+
+    #[test]
+    fn tailscale_absence_is_not_inferred_when_interface_observation_is_unavailable() {
+        let unavailable = || Fake::<NetworkInterface> {
+            value: Err(HostSourceError::Unavailable),
+        };
+        let sources = (
+            unavailable(),
+            Fake {
+                value: data(Vec::<InterfaceAddress>::new()),
+            },
+            Fake {
+                value: data(Vec::<SocketListener>::new()),
+            },
+            Fake {
+                value: data(Vec::<NetworkRoute>::new()),
+            },
+            Fake {
+                value: data(vec![TailscaleObservation {
+                    state: TailscaleState::Absent,
+                    interface_index: None,
+                    interface_name: None,
+                    addresses: vec![],
+                }]),
+            },
+        );
+        let result = HostDiscovery::new(sources, Time).collect();
+        assert_eq!(result.interfaces.completeness, Completeness::Unavailable);
+        assert_eq!(result.tailscale.completeness, Completeness::Complete);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.dimension == Dimension::Tailscale
+                    && diagnostic.code == DiagnosticCode::SourceDivergence)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_fixture_preserves_ipv4_ipv6_wildcards_loopback_transports_and_routes() {
+        use std::fs::{create_dir_all, remove_dir_all, write};
+
+        let root = std::env::temp_dir().join(format!(
+            "manyfw-host-fixture-{}-{}",
+            std::process::id(),
+            SystemClock.now()
+        ));
+        let sys = root.join("sys/class/net");
+        let proc_net = root.join("proc/net");
+        create_dir_all(sys.join("lo")).unwrap();
+        create_dir_all(sys.join("eth0")).unwrap();
+        create_dir_all(&proc_net).unwrap();
+        write(sys.join("lo/ifindex"), "1\n").unwrap();
+        write(sys.join("lo/flags"), "0x1\n").unwrap();
+        write(sys.join("lo/operstate"), "unknown\n").unwrap();
+        write(sys.join("eth0/ifindex"), "2\n").unwrap();
+        write(sys.join("eth0/flags"), "0x1\n").unwrap();
+        write(sys.join("eth0/operstate"), "up\n").unwrap();
+        write(
+            proc_net.join("if_inet6"),
+            "00000000000000000000000000000001 01 0080 0010 80 lo\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("fib_trie"),
+            "Main:\n |-- 127.0.0.0\n    |-- 127.0.0.1\n       /32 host LOCAL\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("tcp"),
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000:01BB 00000000:0000 0A 0 0 0 0 0 0\n 1: 0100007F:1F90 00000000:0000 0A 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("tcp6"),
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("udp"),
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000:0035 00000000:0000 07 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("udp6"),
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000000000000000000000000001:0035 00000000000000000000000000000000:0000 07 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("route"),
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\neth0 00000000 0101A8C0 0003 0 0 10 00000000 1500 0 0\n",
+        )
+        .unwrap();
+        write(
+            proc_net.join("ipv6_route"),
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 0000000 0 0 1 lo\n",
+        )
+        .unwrap();
+
+        let sources = LinuxHostSources {
+            sys_class_net: root.join("sys/class/net"),
+            proc_net: root.join("proc/net"),
+        };
+        let result = HostDiscovery::new(sources, Time).collect();
+        assert!(
+            result
+                .addresses
+                .records
+                .iter()
+                .any(|value| value.address == "127.0.0.1".parse::<IpAddr>().unwrap())
+        );
+        assert!(
+            result
+                .addresses
+                .records
+                .iter()
+                .any(|value| value.address == "::1".parse::<IpAddr>().unwrap())
+        );
+        assert!(
+            result
+                .listeners
+                .records
+                .iter()
+                .any(|value| value.wildcard && value.family == IpFamily::Ipv4)
+        );
+        assert!(
+            result
+                .listeners
+                .records
+                .iter()
+                .any(|value| value.wildcard && value.family == IpFamily::Ipv6)
+        );
+        assert!(
+            result
+                .listeners
+                .records
+                .iter()
+                .any(|value| value.protocol == TransportProtocol::Tcp && value.port == 8080)
+        );
+        assert!(
+            result
+                .listeners
+                .records
+                .iter()
+                .any(|value| value.protocol == TransportProtocol::Udp && value.port == 53)
+        );
+        assert!(
+            result
+                .routes
+                .records
+                .iter()
+                .any(|value| value.family == IpFamily::Ipv4)
+        );
+        assert!(
+            result
+                .routes
+                .records
+                .iter()
+                .any(|value| value.family == IpFamily::Ipv6)
+        );
+        remove_dir_all(root).unwrap();
     }
 }
