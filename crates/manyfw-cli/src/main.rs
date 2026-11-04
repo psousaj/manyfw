@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod docker_engine;
+
 #[derive(Parser)]
 #[command(
     name = "manyfw",
@@ -48,6 +50,12 @@ enum Command {
         #[arg(long, default_value = "human")]
         format: String,
     },
+    /// Collect a read-only Docker/host observation snapshot.
+    Discover {
+        /// Write JSON to this file, or `-` for stdout.
+        #[arg(short, long, default_value = "-")]
+        output: PathBuf,
+    },
 }
 
 fn main() {
@@ -59,11 +67,16 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if let Command::Discover { output } = &cli.command {
+        return run_discover(output);
+    }
+
     let file = match &cli.command {
         Command::Check { file }
         | Command::Plan { file }
         | Command::Audit { file, .. }
         | Command::Explain { file, .. } => file,
+        Command::Discover { .. } => unreachable!("discovery is handled before policy loading"),
     };
     let input = std::fs::read_to_string(file)?;
     let report = manyfw_core::parse_and_normalize(&input)?;
@@ -132,8 +145,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Discover { .. } => unreachable!("discovery is handled before policy loading"),
     }
     Ok(())
+}
+
+fn run_discover(output: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        let docker = manyfw_core::docker::DockerDiscovery::new(
+            docker_engine::local_docker_transport(),
+            DiscoveryClock,
+        )
+        .collect();
+        let host = manyfw_core::host::HostDiscovery::linux().collect();
+        let snapshot = manyfw_core::snapshot::ObservationSnapshot::compose(docker, host);
+        let rendered = serde_json::to_string_pretty(&snapshot)?;
+        if output == std::path::Path::new("-") {
+            println!("{rendered}");
+        } else {
+            std::fs::write(output, rendered)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = output;
+        Err("live discovery is supported on Linux only".into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct DiscoveryClock;
+
+#[cfg(target_os = "linux")]
+impl manyfw_core::docker::Clock for DiscoveryClock {
+    fn now(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as u64)
+    }
 }
 
 fn print_diagnostics(diagnostics: &[manyfw_core::Diagnostic]) {

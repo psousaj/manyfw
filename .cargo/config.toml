@@ -1,0 +1,3 @@
+[resolver]
+# Keep lockfile resolution compatible with the workspace MSRV.
+incompatible-rust-versions = "fallback"

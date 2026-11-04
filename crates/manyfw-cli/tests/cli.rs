@@ -178,3 +178,24 @@ fn explain_rejects_unknown_format() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported explain format"));
 }
+
+#[test]
+fn discover_writes_a_versioned_snapshot_json() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args(["discover", "--output", "-"])
+        .output()
+        .expect("run manyfw discover");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshot: manyfw_core::snapshot::ObservationSnapshot =
+        serde_json::from_slice(&output.stdout).expect("valid observation snapshot JSON");
+    assert_eq!(
+        snapshot.version(),
+        manyfw_core::snapshot::OBSERVATION_SNAPSHOT_VERSION
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Safe"));
+}

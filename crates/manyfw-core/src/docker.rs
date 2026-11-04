@@ -243,7 +243,17 @@ pub struct ContainerList {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectionFailure {
     pub instance_id: String,
-    pub message: String,
+    pub kind: InspectionFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectionFailureKind {
+    Failed,
+    Unavailable,
+    PermissionDenied,
+    Interrupted,
+    Timeout,
+    Malformed,
 }
 
 pub trait DockerTransport: Send + Sync {
@@ -362,9 +372,35 @@ impl DockerDiscovery {
                 .is_some_and(|at| at < started_at || at > finished_at || at < list.collected_at);
         let inspection_failures = list.inspection_failures;
         for failure in inspection_failures {
+            let (code, message) = match failure.kind {
+                InspectionFailureKind::Failed => (
+                    DiagnosticCode::InspectionFailed,
+                    "Docker inspection failed for an allowlisted instance",
+                ),
+                InspectionFailureKind::Unavailable => (
+                    DiagnosticCode::InspectionFailed,
+                    "Docker Engine became unavailable during container inspection",
+                ),
+                InspectionFailureKind::PermissionDenied => (
+                    DiagnosticCode::InspectionFailed,
+                    "permission denied while inspecting a Docker container",
+                ),
+                InspectionFailureKind::Interrupted => (
+                    DiagnosticCode::InspectionFailed,
+                    "Docker container inspection was interrupted",
+                ),
+                InspectionFailureKind::Timeout => (
+                    DiagnosticCode::InspectionFailed,
+                    "Docker container inspection timed out",
+                ),
+                InspectionFailureKind::Malformed => (
+                    DiagnosticCode::MalformedContainer,
+                    "Docker returned malformed data for an allowlisted instance",
+                ),
+            };
             diagnostics.push(DiscoveryDiagnostic {
-                code: DiagnosticCode::InspectionFailed,
-                message: "Docker inspection failed for an allowlisted instance".into(),
+                code,
+                message: message.into(),
                 instance_id: Some(sanitize_token(&failure.instance_id)),
             });
         }
@@ -1091,7 +1127,7 @@ mod tests {
                     containers: vec![value],
                     inspection_failures: vec![InspectionFailure {
                         instance_id: "other".into(),
-                        message: "secret\nerror".into(),
+                        kind: InspectionFailureKind::Failed,
                     }],
                     inspected_at: Some(10),
                 }),
@@ -1101,7 +1137,35 @@ mod tests {
         .collect();
         assert_eq!(result.outcome, CollectionOutcome::Partial);
         assert_eq!(result.containers.len(), 1);
-        assert!(!result.diagnostics[0].message.contains('\n'));
+        assert_eq!(
+            result.diagnostics[0].message,
+            "Docker inspection failed for an allowlisted instance"
+        );
+    }
+
+    #[test]
+    fn malformed_inspection_failure_is_not_downgraded_to_partial() {
+        let result = DockerDiscovery::new(
+            Fake {
+                result: Ok(ContainerList {
+                    collected_at: 10,
+                    containers: Vec::new(),
+                    inspection_failures: vec![InspectionFailure {
+                        instance_id: "container".into(),
+                        kind: InspectionFailureKind::Malformed,
+                    }],
+                    inspected_at: Some(10),
+                }),
+            },
+            T(10),
+        )
+        .collect();
+        assert_eq!(result.outcome, CollectionOutcome::Malformed);
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::MalformedContainer
+                && diagnostic.message
+                    == "Docker returned malformed data for an allowlisted instance"
+        }));
     }
 
     #[test]
