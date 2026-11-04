@@ -7,9 +7,11 @@ use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
 pub mod audit;
+pub mod backend;
 pub mod docker;
 pub mod explain;
 pub mod host;
+pub mod planner;
 pub mod snapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
