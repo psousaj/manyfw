@@ -412,6 +412,34 @@ mod tests {
         .unwrap()
     }
 
+    fn protocol_inspection(id: &str, network_mode: &str) -> ContainerInspectResponse {
+        serde_json::from_value(json!({
+            "Id": id,
+            "State": {"Status": "running"},
+            "HostConfig": {"NetworkMode": network_mode},
+            "Config": {
+                "Labels": {"com.manyfw.service-id": "inventory/postgres"},
+                "ExposedPorts": {
+                    "5432/tcp": {},
+                    "5432/udp": {},
+                    "5433/udp": {}
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {
+                    "5432/tcp": [
+                        {"HostIp": "127.0.0.1", "HostPort": "15432"}
+                    ],
+                    "5432/udp": [
+                        {"HostIp": "::", "HostPort": "15433"}
+                    ],
+                    "5433/udp": null
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn discovery_projects_allowlisted_engine_data_and_preserves_dual_stack_bindings() {
         let api = FakeApi {
@@ -450,6 +478,100 @@ mod tests {
         )));
         let serialized = serde_json::to_string(&result).unwrap();
         assert!(!serialized.contains("not-allowlisted"));
+    }
+
+    #[test]
+    fn configured_ports_and_observed_tcp_udp_endpoints_remain_distinct() {
+        let api = FakeApi {
+            summaries: vec![summary("container-1")],
+            inspections: HashMap::from([(
+                "container-1".into(),
+                Ok(protocol_inspection("container-1", "custom-overlay")),
+            )]),
+            ..Default::default()
+        };
+        let result = DockerDiscovery::new(DockerEngineTransport::new(api), SystemClock).collect();
+        let container = &result.containers[0];
+
+        assert_eq!(container.configured_publications.len(), 3);
+        assert_eq!(container.observed_endpoints.len(), 2);
+        assert_eq!(
+            container.network_mode,
+            NetworkMode::Custom("custom-overlay".into())
+        );
+        assert!(
+            container
+                .configured_publications
+                .iter()
+                .any(|configured| configured.container_port == 5433)
+        );
+        assert!(
+            !container
+                .observed_endpoints
+                .iter()
+                .any(|endpoint| endpoint.container_port == 5433)
+        );
+
+        let tcp = container
+            .observed_endpoints
+            .iter()
+            .find(|endpoint| endpoint.protocol == docker::TransportProtocol::Tcp)
+            .unwrap();
+        assert_eq!(tcp.family, docker::IpFamily::Ipv4);
+        assert_eq!(tcp.host.address, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(tcp.host.port, 15432);
+        assert_eq!(
+            tcp.mechanism,
+            docker::PublicationMechanism::Unknown("unknown".into())
+        );
+        assert_eq!(tcp.provenance, docker::FieldProvenance::PortBinding);
+
+        let udp = container
+            .observed_endpoints
+            .iter()
+            .find(|endpoint| endpoint.protocol == docker::TransportProtocol::Udp)
+            .unwrap();
+        assert_eq!(udp.family, docker::IpFamily::Ipv6);
+        assert_eq!(udp.host.address, None);
+        assert_eq!(udp.host.port, 15433);
+        assert_eq!(
+            udp.mechanism,
+            docker::PublicationMechanism::Unknown("unknown".into())
+        );
+        assert_eq!(udp.provenance, docker::FieldProvenance::PortBinding);
+        assert_eq!(tcp.container_port, 5432);
+        assert_eq!(udp.container_port, 5432);
+    }
+
+    #[test]
+    fn host_network_configuration_does_not_invent_published_endpoints() {
+        let inspection: ContainerInspectResponse = serde_json::from_value(json!({
+            "Id": "container-1",
+            "State": {"Status": "running"},
+            "HostConfig": {"NetworkMode": "host"},
+            "Config": {
+                "Labels": {"com.manyfw.service-id": "inventory/postgres"},
+                "ExposedPorts": {"5432/tcp": {}}
+            },
+            "NetworkSettings": {"Ports": {}}
+        }))
+        .unwrap();
+        let api = FakeApi {
+            summaries: vec![summary("container-1")],
+            inspections: HashMap::from([("container-1".into(), Ok(inspection))]),
+            ..Default::default()
+        };
+        let result = DockerDiscovery::new(DockerEngineTransport::new(api), SystemClock).collect();
+        let container = &result.containers[0];
+
+        assert_eq!(container.network_mode, NetworkMode::Host);
+        assert_eq!(container.configured_publications.len(), 1);
+        assert!(container.observed_endpoints.is_empty());
+        assert!(
+            result
+                .limitations
+                .contains(&docker::Limitation::HostNetworkRequiresHostDiscovery)
+        );
     }
 
     #[test]
