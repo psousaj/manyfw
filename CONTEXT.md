@@ -86,3 +86,32 @@ _Avoid_: Runtime finding, enforcement result
 The specific network policy boundary ManyFW is authorized and able to reason
 about; it is never assumed to be the whole host firewall.
 _Avoid_: Global firewall policy
+
+## Observation and evidence
+
+**Observation snapshot**:
+An immutable, time-bounded collection of read-only observations from discovery
+sources, including completeness, provenance, consistency limits, and known
+unknowns.
+_Avoid_: Live state, firewall snapshot
+
+**Completeness**:
+The stated coverage of an observation source or dimension: complete, partial,
+unknown, or unavailable.
+_Avoid_: Confidence, safety verdict
+
+**Evidence**:
+A traceable fact supporting an audit finding or explanation, with a source,
+resource reference, collection interval, and limitations.
+_Avoid_: Proof of reachability
+
+**Audit finding**:
+An evaluation derived from observations and policy that describes an observed
+condition, severity, evidence, and limitations without claiming unverified
+external reachability.
+_Avoid_: Vulnerability, SAFE verdict
+
+**Explanation**:
+A human- or machine-readable account of how observations, policy, and unknowns
+lead to an audit result or hypothetical policy outcome.
+_Avoid_: Enforcement result, reachability proof
