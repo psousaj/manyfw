@@ -145,6 +145,7 @@ pub enum NetworkMode {
 pub struct ConfiguredPublication {
     pub container_port: u16,
     pub protocol: TransportProtocol,
+    pub network_mode: NetworkMode,
     pub provenance: FieldProvenance,
 }
 
@@ -155,11 +156,12 @@ pub struct ObservedPublishedEndpoint {
     pub container_port: u16,
     pub protocol: TransportProtocol,
     pub family: IpFamily,
+    pub network_mode: NetworkMode,
     pub mechanism: PublicationMechanism,
     pub provenance: FieldProvenance,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PublicationMechanism {
     Nat,
     UserlandProxy,
@@ -362,7 +364,7 @@ impl DockerDiscovery {
         for failure in inspection_failures {
             diagnostics.push(DiscoveryDiagnostic {
                 code: DiagnosticCode::InspectionFailed,
-                message: sanitize_message(&failure.message),
+                message: "Docker inspection failed for an allowlisted instance".into(),
                 instance_id: Some(sanitize_token(&failure.instance_id)),
             });
         }
@@ -539,7 +541,7 @@ fn project(
     let mut configured_publications = record
         .configured_ports
         .into_iter()
-        .filter_map(configured)
+        .filter_map(|port| configured(port, &network_mode))
         .collect::<Vec<_>>();
     configured_publications.sort_by_key(|publication| {
         (
@@ -551,7 +553,7 @@ fn project(
     let mut observed_endpoints = record
         .bindings
         .into_iter()
-        .filter_map(|binding| endpoint(&record.id, binding))
+        .filter_map(|binding| endpoint(&record.id, binding, &network_mode))
         .collect::<Vec<_>>();
     observed_endpoints.sort_by_key(endpoint_key);
     observed_endpoints.dedup();
@@ -655,17 +657,25 @@ fn network_mode(value: &str) -> NetworkMode {
         value => NetworkMode::Unknown(sanitize_token(value)),
     }
 }
-fn configured(value: ConfiguredPortRecord) -> Option<ConfiguredPublication> {
+fn configured(
+    value: ConfiguredPortRecord,
+    network_mode: &NetworkMode,
+) -> Option<ConfiguredPublication> {
     if value.container_port == 0 {
         return None;
     }
     Some(ConfiguredPublication {
         container_port: value.container_port,
         protocol: protocol(&value.protocol)?,
+        network_mode: network_mode.clone(),
         provenance: FieldProvenance::ContainerConfiguration,
     })
 }
-fn endpoint(instance_id: &str, value: BindingRecord) -> Option<ObservedPublishedEndpoint> {
+fn endpoint(
+    instance_id: &str,
+    value: BindingRecord,
+    network_mode: &NetworkMode,
+) -> Option<ObservedPublishedEndpoint> {
     if !binding_is_valid(&value) {
         return None;
     }
@@ -703,6 +713,7 @@ fn endpoint(instance_id: &str, value: BindingRecord) -> Option<ObservedPublished
         container_port: value.container_port,
         protocol: protocol(&value.protocol)?,
         family,
+        network_mode: network_mode.clone(),
         mechanism: publication_mechanism(&value.mechanism),
         provenance: FieldProvenance::PortBinding,
     })
@@ -750,13 +761,16 @@ fn protocol_key(value: TransportProtocol) -> u8 {
         TransportProtocol::Udp => 1,
     }
 }
-fn endpoint_key(value: &ObservedPublishedEndpoint) -> (u16, u16, u8, IpFamily, Option<IpAddr>) {
+fn endpoint_key(
+    value: &ObservedPublishedEndpoint,
+) -> (u16, u16, u8, IpFamily, Option<IpAddr>, PublicationMechanism) {
     (
         value.host.port,
         value.container_port,
         protocol_key(value.protocol),
         value.family,
         value.host.address,
+        value.mechanism.clone(),
     )
 }
 fn observation_key(value: &ContainerObservation) -> (String, String) {
@@ -804,14 +818,6 @@ fn sanitize_token(value: &str) -> String {
             character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | ':')
         })
         .take(128)
-        .collect()
-}
-
-fn sanitize_message(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(256)
         .collect()
 }
 
@@ -962,8 +968,22 @@ mod tests {
         let endpoints = &discovery(vec![value]).collect().containers[0].observed_endpoints;
         assert_eq!(endpoints[0].family, IpFamily::Ipv4);
         assert_eq!(endpoints[0].protocol, TransportProtocol::Tcp);
+        assert_eq!(endpoints[0].network_mode, NetworkMode::Bridge);
+        assert_eq!(endpoints[0].mechanism, PublicationMechanism::Nat);
         assert_eq!(endpoints[1].family, IpFamily::Ipv6);
         assert_eq!(endpoints[1].protocol, TransportProtocol::Udp);
+        assert_eq!(endpoints[1].mechanism, PublicationMechanism::UserlandProxy);
+
+        let mut duplicate = record("id", &[("com.manyfw.service-id", "svc")]);
+        duplicate.bindings.push(BindingRecord {
+            host_address: Some("127.0.0.1".into()),
+            host_port: 18080,
+            container_port: 8080,
+            protocol: "tcp".into(),
+            mechanism: "proxy".into(),
+        });
+        let endpoints = &discovery(vec![duplicate]).collect().containers[0].observed_endpoints;
+        assert_eq!(endpoints.len(), 2);
     }
 
     #[test]
