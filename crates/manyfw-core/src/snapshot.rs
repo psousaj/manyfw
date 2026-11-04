@@ -70,6 +70,8 @@ pub enum CorrelationNode {
         host_address: Option<IpAddr>,
         host_port: u16,
         container_port: u16,
+        #[serde(default)]
+        container_addresses: Vec<docker::ContainerAddress>,
         protocol: docker::TransportProtocol,
         family: docker::IpFamily,
         network_mode: docker::NetworkMode,
@@ -205,6 +207,7 @@ impl CorrelationGraph {
                     host_address: endpoint.host.address,
                     host_port: endpoint.host.port,
                     container_port: endpoint.container_port,
+                    container_addresses: endpoint.container_addresses.clone(),
                     protocol: endpoint.protocol,
                     family: endpoint.family,
                     network_mode: endpoint.network_mode.clone(),
@@ -726,12 +729,18 @@ mod tests {
 
     #[test]
     fn exact_endpoint_and_listener_are_confirmed_without_reachability_verdict() {
+        let mut endpoint = endpoint(
+            Some("127.0.0.1"),
+            docker::IpFamily::Ipv4,
+            docker::TransportProtocol::Tcp,
+        );
+        endpoint.container_addresses.push(docker::ContainerAddress {
+            network: "bridge".into(),
+            address: "172.17.0.2".parse().unwrap(),
+            provenance: docker::FieldProvenance::DockerInspection,
+        });
         let snapshot = ObservationSnapshot::compose(
-            docker_result(endpoint(
-                Some("127.0.0.1"),
-                docker::IpFamily::Ipv4,
-                docker::TransportProtocol::Tcp,
-            )),
+            docker_result(endpoint),
             host_result(
                 vec![listener(
                     IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -749,6 +758,10 @@ mod tests {
                 .iter()
                 .any(|edge| edge.status == CorrelationEdgeStatus::Confirmed)
         );
+        assert!(snapshot.correlations.edges.iter().any(|edge| {
+            matches!(&edge.source, CorrelationNode::DockerEndpoint { container_addresses, .. }
+                if container_addresses.iter().any(|address| address.address == "172.17.0.2".parse::<IpAddr>().unwrap()))
+        }));
         assert!(
             snapshot
                 .limitations
