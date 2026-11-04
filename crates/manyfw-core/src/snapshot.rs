@@ -759,6 +759,55 @@ mod tests {
     }
 
     #[test]
+    fn composed_snapshot_preserves_source_metadata_and_exposes_only_owned_copies() {
+        let endpoint = endpoint(
+            Some("192.0.2.10"),
+            docker::IpFamily::Ipv4,
+            docker::TransportProtocol::Tcp,
+        );
+        let mut host = host_result(Vec::new(), Vec::new(), Vec::new());
+        host.interfaces.completeness = host::Completeness::Partial;
+        host.interfaces.outcome = host::CollectionOutcome::Partial;
+        host.interfaces.limitations = vec![host::Limitation::NetlinkUnavailable];
+        host.interfaces.provenance[0].source = "sysfs-fallback".into();
+        let snapshot = ObservationSnapshot::compose(docker_result(endpoint), host);
+
+        assert_eq!(snapshot.version(), OBSERVATION_SNAPSHOT_VERSION);
+        assert_eq!(
+            snapshot.collected_at(),
+            ObservationInterval {
+                started_at: 10,
+                finished_at: 20
+            }
+        );
+        assert_eq!(snapshot.docker().provenance.source, "fixture");
+        let normalized_host = snapshot.host();
+        assert_eq!(
+            normalized_host.interfaces.completeness,
+            host::Completeness::Partial
+        );
+        assert_eq!(
+            normalized_host.interfaces.provenance[0].source,
+            "sysfs-fallback"
+        );
+        assert!(
+            normalized_host
+                .interfaces
+                .limitations
+                .contains(&host::Limitation::NetlinkUnavailable)
+        );
+
+        let mut detached_copy = snapshot.host();
+        detached_copy.interfaces.provenance.clear();
+        assert_eq!(snapshot.host().interfaces.provenance.len(), 1);
+        assert!(
+            snapshot
+                .limitations()
+                .contains(&SnapshotLimitation::NoReachabilityProbe)
+        );
+    }
+
+    #[test]
     fn family_and_protocol_mismatches_are_not_correlations() {
         let snapshot = ObservationSnapshot::compose(
             docker_result(endpoint(
