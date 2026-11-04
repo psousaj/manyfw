@@ -49,6 +49,7 @@ pub enum Limitation {
     SourceDivergence,
     InconsistentSnapshot,
     CurrentNamespaceOnly,
+    InterfaceAssociationUnavailable,
     PolicyRoutingIncomplete,
     ProcessOwnershipUnknown,
     TailscaleDaemonNotQueried,
