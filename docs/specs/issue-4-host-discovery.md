@@ -42,10 +42,17 @@ source limitations, temporal inconsistencies, and unknown process ownership.
 - Prefer Socket Diagnostics for TCP/UDP socket observations and use dedicated
   `/proc/net/tcp*` and `/proc/net/udp*` parsers as explicitly identified
   alternatives.
+- Procfs listener fallback reports TCP `LISTEN` rows and unconnected UDP bound
+  rows only; other UDP states are not presented as listeners.
 - Procfs address and route fallbacks retain valid records but mark their own
   dimension partial when an optional family file is unavailable or any row is
   malformed; an empty fallback result must not imply complete coverage after
   a source could not be read or parsed.
+- IPv4 addresses recovered from `fib_trie` retain their reported prefix and
+  scope, but explicitly mark interface association unavailable because that
+  source does not identify an interface. Procfs route fallbacks always expose
+  incomplete policy-routing coverage rather than presenting these tables as
+  the complete Linux routing policy.
 - Do not execute external commands in the MVP. No shell, `ip`, `ss`, `route`,
   or `netstat` fallback is part of this issue.
 - Keep `NetworkInterface`, `InterfaceAddress`, `SocketListener`,
