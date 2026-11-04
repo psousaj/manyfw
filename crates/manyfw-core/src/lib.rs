@@ -7,6 +7,7 @@ use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
 pub mod docker;
+pub mod host;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
