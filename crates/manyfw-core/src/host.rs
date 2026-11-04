@@ -1167,4 +1167,30 @@ mod tests {
                     && diagnostic.code == DiagnosticCode::SourceDivergence)
         );
     }
+
+    #[test]
+    fn tailscale_states_are_normalized_deterministically_without_peer_claims() {
+        let observation = |state, name: Option<&str>| TailscaleObservation {
+            state,
+            interface_index: name.map(|_| 7),
+            interface_name: name.map(str::to_owned),
+            addresses: Vec::new(),
+        };
+        let input = vec![
+            observation(TailscaleState::PartiallyObservable, Some("tailscale0")),
+            observation(TailscaleState::Absent, None),
+            observation(TailscaleState::Present, Some("tailscale0")),
+        ];
+        let mut records = input.clone();
+        let mut reversed = input.into_iter().rev().collect::<Vec<_>>();
+
+        sort_tailscale(&mut records);
+        sort_tailscale(&mut reversed);
+
+        assert_eq!(records, reversed);
+        assert_eq!(records[0].state, TailscaleState::Absent);
+        assert_eq!(records[1].state, TailscaleState::PartiallyObservable);
+        assert_eq!(records[2].state, TailscaleState::Present);
+        assert!(records.iter().all(|record| record.addresses.is_empty()));
+    }
 }
