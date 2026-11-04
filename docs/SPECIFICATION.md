@@ -268,6 +268,11 @@ Implemented commands:
   snapshot. It performs no live or privileged collection. A valid complete or
   partial report exits zero; file, parsing, unsupported-version, or rendering
   failures exit nonzero. Findings are not safety or reachability verdicts.
+- `manyfw explain <service> --file <policy> --snapshot <snapshot.json> [--format human|json]`
+  resolves a stable identity (or a unique short Docker selector) and renders a
+  versioned explanation from the snapshot. Ambiguous and unresolved selectors
+  are explicit outcomes; the command performs no live collection and never
+  claims external reachability or effective firewall enforcement.
 
 The CLI must present diagnostic codes and actionable messages. Diagnostic data
 must remain suitable for future JSON output and CI automation.

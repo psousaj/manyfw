@@ -136,3 +136,45 @@ fn audit_snapshot_failure_is_a_command_error() {
         .expect("run manyfw audit");
     assert!(!output.status.success());
 }
+
+#[test]
+fn explain_unresolved_service_is_explicit_and_versioned() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "explain",
+            "missing",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/empty-snapshot.json",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run manyfw explain");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"version\": 1"));
+    assert!(stdout.contains("\"outcome\": \"unresolved_identity\""));
+    assert!(stdout.contains("external reachability"));
+    assert!(!stdout.contains("SAFE"));
+}
+
+#[test]
+fn explain_rejects_unknown_format() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "explain",
+            "missing",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/empty-snapshot.json",
+            "--format",
+            "yaml",
+        ])
+        .output()
+        .expect("run manyfw explain");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported explain format"));
+}

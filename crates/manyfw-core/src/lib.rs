@@ -8,6 +8,7 @@ use std::net::IpAddr;
 
 pub mod audit;
 pub mod docker;
+pub mod explain;
 pub mod host;
 pub mod snapshot;
 
