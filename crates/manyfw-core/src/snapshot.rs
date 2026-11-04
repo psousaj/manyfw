@@ -10,6 +10,10 @@ use std::net::IpAddr;
 
 pub const OBSERVATION_SNAPSHOT_VERSION: u32 = 1;
 
+fn default_route_type() -> host::RouteType {
+    host::RouteType::Other
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationSnapshot {
     version: u32,
@@ -92,9 +96,13 @@ pub enum CorrelationNode {
         family: host::IpFamily,
         destination: IpAddr,
         prefix_length: u8,
+        #[serde(default)]
+        gateway: Option<IpAddr>,
         interface_name: Option<String>,
         table: Option<u32>,
         metric: Option<u32>,
+        #[serde(default = "default_route_type")]
+        route_type: host::RouteType,
     },
 }
 
@@ -497,9 +505,11 @@ fn route_node(route: &host::NetworkRoute) -> CorrelationNode {
         family: route.family,
         destination: route.destination,
         prefix_length: route.prefix_length,
+        gateway: route.gateway,
         interface_name: route.interface_name.clone(),
         table: route.table,
         metric: route.metric,
+        route_type: route.route_type,
     }
 }
 
