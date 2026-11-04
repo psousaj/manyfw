@@ -12,8 +12,10 @@ workflows:
 The optional issue #24 recovery and candidate-evidence gate are consolidated
 into `compatibility.yml` rather than maintained as additional workflows. A
 normal compatibility run never needs a self-hosted runner; the privileged path
-is selected only when trusted kernel/initrd/controller inputs are supplied and
-uses the dedicated `manyfw-qemu` label.
+is selected only when trusted kernel/initrd inputs are supplied and uses the
+dedicated `manyfw-qemu` label. The external recovery controller is a fixed
+executable provisioned in that runner's service environment; it is not a
+dispatcher-supplied path.
 
 ## Evidence vocabulary
 
@@ -88,6 +90,7 @@ Not yet validated locally:
 - GitHub-hosted ARM64 runners
 - Docker execution of every distro image
 - GitHub Actions workflow execution
+- Per-target and per-distribution status artifacts on GitHub Actions
 - Tagged GitHub Release publication
 - Privileged kernel/VM recovery scenarios from issue #24
 
