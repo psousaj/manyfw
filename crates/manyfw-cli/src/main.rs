@@ -41,15 +41,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let input = std::fs::read_to_string(file)?;
     let report = manyfw_core::parse_and_normalize(&input)?;
     let policy = report.policy;
+    let diagnostics = report.diagnostics;
     match cli.command {
-        Command::Check { .. } => println!(
-            "Valid schema v{}: {} zones, {} rules",
-            policy.version,
-            policy.zones.len(),
-            policy.rules.len()
-        ),
+        Command::Check { .. } => {
+            println!(
+                "Valid schema v{}: {} zones, {} rules",
+                policy.version,
+                policy.zones.len(),
+                policy.rules.len()
+            );
+            print_diagnostics(&diagnostics);
+        }
         Command::Plan { .. } => {
             println!("PREVIEW ONLY — not a kernel firewall plan; no rules will be applied");
+            print_diagnostics(&diagnostics);
             for rule in policy.rules {
                 println!(
                     "rule {}: {:?} -> {:?} {:?} {:?}",
@@ -59,4 +64,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn print_diagnostics(diagnostics: &[manyfw_core::Diagnostic]) {
+    for diagnostic in diagnostics {
+        println!(
+            "{:?} {:?}: {}{}{}",
+            diagnostic.severity,
+            diagnostic.code,
+            diagnostic.message,
+            diagnostic
+                .location
+                .as_ref()
+                .map(|location| format!(" ({location})"))
+                .unwrap_or_default(),
+            if diagnostic.rule_ids.is_empty() {
+                String::new()
+            } else {
+                format!(" [rules: {}]", diagnostic.rule_ids.join(", "))
+            }
+        );
+    }
 }
