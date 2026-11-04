@@ -8,6 +8,7 @@ use std::net::IpAddr;
 
 pub mod docker;
 pub mod host;
+pub mod snapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
