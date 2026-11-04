@@ -1,0 +1,4 @@
+# The privileged issue #24 path uses a repository-managed self-hosted runner.
+self-hosted-runner:
+  labels:
+    - manyfw-qemu

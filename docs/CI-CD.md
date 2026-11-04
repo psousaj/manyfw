@@ -1,6 +1,6 @@
 # CI/CD and compatibility policy
 
-ManyFW is Linux-specific. The CI/CD surface intentionally has only three
+ManyFW is Linux-specific. The CI/CD surface intentionally has four
 workflows:
 
 | Workflow | Responsibility | Fast PR path? |
@@ -8,6 +8,7 @@ workflows:
 | `ci.yml` | fmt, clippy, workspace tests, docs, fixtures, dependency audit | Yes |
 | `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro and binary smoke tests | Main, scheduled, manual, relevant PRs |
 | `release.yml` | Tagged release packaging, checksums, final smoke tests, GitHub Release | Tags only |
+| `enforcement-gate.yml` | Candidate-SHA-bound privileged recovery evidence | Explicit gate only |
 
 The optional issue #24 recovery invocation is consolidated into
 `compatibility.yml` rather than maintained as a fourth workflow. A normal
@@ -81,6 +82,7 @@ Passed locally:
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - shell syntax validation for `scripts/run-qemu-recovery.sh`
+- candidate-bound recovery report validation with all critical scenarios
 
 Not yet validated locally:
 
@@ -89,3 +91,13 @@ Not yet validated locally:
 - GitHub Actions workflow execution
 - Tagged GitHub Release publication
 - Privileged kernel/VM recovery scenarios from issue #24
+
+## Scope boundary
+
+The repository contains policy parsing, discovery, audit, explanation, planning,
+backend capability, and transaction components from the staged roadmap. The
+conventional CI workflows exercise the read-only and fixture paths together;
+they do not present the privileged transaction paths as host or VM enforcement
+validation. The privileged evidence contract is isolated in the explicit gate,
+and remains unavailable until its external controller and runner isolation are
+reviewed.

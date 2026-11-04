@@ -8,6 +8,7 @@ use crate::backend::{DiagnosticPlan, Ownership, PlanApplicability, PlanOperation
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -474,7 +475,11 @@ impl TokenSource for OsTokenSource {
             fs::File::open("/dev/urandom").map_err(|e| TransactionError::Token(e.to_string()))?;
         std::io::Read::read_exact(&mut file, &mut bytes)
             .map_err(|e| TransactionError::Token(e.to_string()))?;
-        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        let mut token = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = write!(token, "{byte:02x}");
+        }
+        Ok(token)
     }
 }
 
@@ -1151,7 +1156,11 @@ fn safe_file_component(value: &str) -> String {
     if value.is_empty() {
         return "transaction".into();
     }
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 #[cfg(test)]

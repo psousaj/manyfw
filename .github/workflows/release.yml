@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate release source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - name: Match tag to Cargo workspace version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_version="${TAG#v}"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
+          test -n "$cargo_version"
+          test "$tag_version" = "$cargo_version"
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  build:
+    name: package ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package and smoke test final artifact
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          binary="target/$TARGET/release/manyfw"
+          test -x "$binary"
+          test "$("$binary" --version)" = "manyfw $version"
+          stage="dist/manyfw-$TARGET-$version"
+          mkdir -p "$stage"
+          install -m 0755 "$binary" "$stage/manyfw"
+          install -m 0644 README.md LICENSE "$stage/"
+          tarball="manyfw-$TARGET-$version.tar.gz"
+          tar -C "dist/manyfw-$TARGET-$version" -czf "$tarball" .
+          sha256sum "$tarball" > "$tarball.sha256"
+          mkdir -p dist/smoke
+          tar -xzf "$tarball" -C dist/smoke
+          test "$(dist/smoke/manyfw --version)" = "manyfw $version"
+          sha256sum -c "$tarball.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            manyfw-${{ matrix.target }}-*.tar.gz
+            manyfw-${{ matrix.target }}-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify every release checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          checksums=(dist/*.sha256)
+          test "${#checksums[@]}" -eq 4
+          for checksum in "${checksums[@]}"; do
+            (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+      - name: Smoke test every release artifact
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          for tarball in dist/*.tar.gz; do
+            dir="$(mktemp -d)"
+            tar -xzf "$tarball" -C "$dir"
+            test "$("$dir/manyfw" --version)" = "manyfw $version"
+            rm -rf "$dir"
+          done
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
