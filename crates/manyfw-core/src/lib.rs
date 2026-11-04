@@ -13,6 +13,7 @@ pub mod explain;
 pub mod host;
 pub mod planner;
 pub mod snapshot;
+pub mod transaction;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
