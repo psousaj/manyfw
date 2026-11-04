@@ -35,12 +35,23 @@ modify the development host or simulate a production backend.
 
 ## Disposable VM execution
 
-`scripts/run-qemu-recovery.sh` is the intentionally conservative runner. It
-requires `qemu-system-x86_64`, `MANYFW_QEMU_KERNEL`, and
-`MANYFW_QEMU_INITRD`; it uses `-snapshot` and `-no-reboot`. A CI or lab guest
-must run the privileged matrix and shut down with a success/failure status.
-Missing artifacts produce `NotApplicable` with exit code 77. The runner never
-downloads an image implicitly.
+`scripts/run-qemu-recovery.sh` is only an evidence-contract validator. It
+requires `qemu-system-x86_64`, `MANYFW_QEMU_KERNEL`, `MANYFW_QEMU_INITRD`, and
+an executable `MANYFW_RECOVERY_CONTROLLER`. The controller is outside the
+guest and must start a fresh `-snapshot` VM for every scenario, observe SSH
+loss/reboot events externally, inspect effective firewall state before and
+after the operation, and tear the guest down. Serial output is diagnostic
+only; a log line cannot make a scenario pass.
+
+For each scenario the controller is called as
+`controller <scenario> <evidence.json>`. The JSON must contain the exact
+scenario and candidate SHA, `status: "Passed"`, positive `guest_boots`, a
+scenario-appropriate `reboot_count`, `ssh_loss_observed`, non-empty effective
+`firewall_before`/`firewall_after` state, `supervisor_independent`, a
+`postcondition`, and `teardown_complete`. Set
+`MANYFW_RECOVERY_EXPECTED_SHA` to bind evidence to the candidate under test.
+Missing infrastructure produces `NotApplicable` with exit code 77; malformed
+or failed evidence is `Failed`. The runner never downloads an image implicitly.
 
 Example:
 
@@ -53,8 +64,10 @@ MANYFW_RECOVERY_REPORT=artifacts/recovery-status.txt \
 
 ## Release gate
 
-The manual `Privileged recovery release gate` workflow collects the report and
-fails when VM artifacts are missing or any required marker is absent. It must
-not be treated as a successful enforcement gate until the report contains
-`Passed` for every critical scenario listed above. No workflow in this
-repository applies host firewall rules by default.
+The recovery runner is not currently connected to the read-only release
+workflow. No enforcement artifact may use its output until an isolated
+self-hosted runner, controller, and per-scenario evidence have been reviewed.
+Any future enforcement gate must bind the report to the candidate SHA and
+fail closed when any critical scenario is `Failed`, `Skipped`, or
+`NotApplicable`. No workflow in this repository applies host firewall rules by
+default.
