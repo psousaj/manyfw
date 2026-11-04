@@ -1,0 +1,46 @@
+name: Enforcement candidate gate
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
+      recovery_run_id:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Candidate commit SHA tested by the recovery run
+        required: true
+        type: string
+      recovery_run_id:
+        description: Completed recovery workflow run containing the evidence artifact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    name: verify candidate-bound recovery evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: recovery-evidence
+          path: recovery-evidence
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+      - name: Require every critical scenario to be Passed
+        run: |
+          python3 scripts/validate-recovery-report.py \
+            '${{ inputs.candidate_sha }}' \
+            recovery-evidence/recovery-status.txt \
+            recovery-evidence/evidence
