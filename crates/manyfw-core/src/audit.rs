@@ -445,7 +445,7 @@ pub fn evaluate(
     Ok(report)
 }
 
-fn matching_rules(
+pub(crate) fn matching_rules(
     policy: &NormalizedPolicy,
     identity: &str,
     protocol: crate::docker::TransportProtocol,
