@@ -74,14 +74,16 @@ struct ProcfsListenerSource(PathBuf);
 impl ListenerSource for ProcfsListenerSource {
     fn listeners(&self) -> Result<host::SourceData<SocketListener>, HostSourceError> {
         let started_at = now_millis();
-        let (records, partial) = listeners(&self.0)?;
-        Ok(source_data(
-            records,
+        let parsed = listeners(&self.0)?;
+        let mut data = source_data(
+            parsed.records,
             "procfs",
             "read tcp/udp tables fallback",
-            partial,
+            !parsed.limitations.is_empty(),
             interval(started_at),
-        ))
+        );
+        data.limitations = parsed.limitations;
+        Ok(data)
     }
 }
 
@@ -443,9 +445,9 @@ fn is_fib_section_header(line: &str) -> bool {
             .is_some_and(|value| value.parse::<u32>().is_ok())
 }
 
-pub(crate) fn listeners(proc_root: &Path) -> Result<(Vec<SocketListener>, bool), HostSourceError> {
+fn listeners(proc_root: &Path) -> Result<FallbackRecords<SocketListener>, HostSourceError> {
     let mut records = Vec::new();
-    let mut partial = false;
+    let mut limitations = Vec::new();
     for (file, protocol, ipv6, listen_only) in [
         ("tcp", TransportProtocol::Tcp, false, true),
         ("tcp6", TransportProtocol::Tcp, true, true),
@@ -454,34 +456,42 @@ pub(crate) fn listeners(proc_root: &Path) -> Result<(Vec<SocketListener>, bool),
     ] {
         let text = match read(&proc_root.join(file)) {
             Ok(value) => value,
-            Err(HostSourceError::Unavailable) => {
-                partial = true;
+            Err(error) => {
+                limitations.push(limitation_for_procfs_error(&error));
                 continue;
             }
-            Err(error) => return Err(error),
         };
-        for line in text.lines().skip(1) {
+        let mut lines = text.lines();
+        let header = lines
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        if header.get(..4) != Some(["sl", "local_address", "rem_address", "st"].as_slice()) {
+            limitations.push(Limitation::MalformedSource);
+        }
+        for line in lines {
             let fields: Vec<_> = line.split_whitespace().collect();
             if fields.len() < 4 {
-                partial = true;
+                limitations.push(Limitation::MalformedSource);
                 continue;
             }
             if listen_only && fields[3] != "0A" {
                 continue;
             }
             let Some((raw_address, raw_port)) = fields[1].split_once(':') else {
-                partial = true;
+                limitations.push(Limitation::MalformedSource);
                 continue;
             };
             let Ok(port) = u16::from_str_radix(raw_port, 16) else {
-                partial = true;
+                limitations.push(Limitation::MalformedSource);
                 continue;
             };
             let address = if ipv6 {
                 match parse_proc_ipv6(raw_address) {
                     Ok(address) => IpAddr::V6(address),
                     Err(_) => {
-                        partial = true;
+                        limitations.push(Limitation::MalformedSource);
                         continue;
                     }
                 }
@@ -489,7 +499,7 @@ pub(crate) fn listeners(proc_root: &Path) -> Result<(Vec<SocketListener>, bool),
                 match u32::from_str_radix(raw_address, 16) {
                     Ok(address) => IpAddr::V4(Ipv4Addr::from(address.to_le_bytes())),
                     Err(_) => {
-                        partial = true;
+                        limitations.push(Limitation::MalformedSource);
                         continue;
                     }
                 }
@@ -506,7 +516,12 @@ pub(crate) fn listeners(proc_root: &Path) -> Result<(Vec<SocketListener>, bool),
             });
         }
     }
-    Ok((records, partial))
+    let mut result = FallbackRecords {
+        records,
+        limitations,
+    };
+    result.normalize_limitations();
+    Ok(result)
 }
 
 pub(crate) fn tailscale(sys_root: &Path) -> Result<Vec<TailscaleObservation>, HostSourceError> {
@@ -671,7 +686,7 @@ mod tests {
 
         let observed_interfaces = interfaces(&sys_root).unwrap();
         let observed_addresses = addresses(&proc_root).unwrap();
-        let (observed_listeners, _) = listeners(&proc_root).unwrap();
+        let observed_listeners = listeners(&proc_root).unwrap().records;
         let observed_routes = routes(&proc_root, &sys_root).unwrap();
         let observed_tailscale = tailscale(&sys_root).unwrap();
 
@@ -860,6 +875,105 @@ mod tests {
         assert!(routes.records.is_empty());
         assert!(!routes.partial);
         assert!(routes.limitations.is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn listener_fallback_keeps_valid_tables_when_another_table_cannot_be_read() {
+        struct FixedClock;
+        impl host::Clock for FixedClock {
+            fn now(&self) -> u64 {
+                10
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("manyfw-procfs-listener-partial-{}", now_millis()));
+        let proc_root = root.join("proc/net");
+        let sys_root = root.join("sys/class/net");
+        fs::create_dir_all(proc_root.join("tcp6")).unwrap();
+        fs::create_dir_all(&sys_root).unwrap();
+        fs::write(
+            proc_root.join("tcp"),
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 0100007F:1F90 00000000:0000 0A 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join("udp"),
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 0100007F:0035 00000000:0000 07 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+
+        let source = ProcfsListenerSource(proc_root.clone()).listeners().unwrap();
+        assert!(source.partial);
+        assert!(source.limitations.contains(&Limitation::ProcfsUnavailable));
+        assert!(source.records.iter().any(|listener| {
+            listener.protocol == TransportProtocol::Tcp
+                && listener.address == "127.0.0.1".parse::<IpAddr>().unwrap()
+                && listener.port == 8080
+        }));
+        assert!(source.records.iter().any(|listener| {
+            listener.protocol == TransportProtocol::Udp
+                && listener.address == "127.0.0.1".parse::<IpAddr>().unwrap()
+                && listener.port == 53
+        }));
+        assert_eq!(
+            limitation_for_procfs_error(&HostSourceError::PermissionDenied),
+            Limitation::PermissionDenied
+        );
+        assert_eq!(
+            limitation_for_procfs_error(&HostSourceError::Interrupted),
+            Limitation::CollectionInterrupted
+        );
+
+        let sources: HostSources = ProcfsHostSources::new(sys_root, proc_root).into();
+        let observation = host::HostDiscovery::new(sources, FixedClock).collect();
+        assert_eq!(
+            observation.listeners.completeness,
+            host::Completeness::Partial
+        );
+        assert!(
+            observation
+                .listeners
+                .limitations
+                .contains(&Limitation::ProcfsUnavailable)
+        );
+        assert!(observation.listeners.records.iter().any(|listener| {
+            listener.protocol == TransportProtocol::Tcp
+                && listener.address == "127.0.0.1".parse::<IpAddr>().unwrap()
+        }));
+        assert!(observation.listeners.records.iter().any(|listener| {
+            listener.protocol == TransportProtocol::Udp && listener.port == 53
+        }));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_listener_table_header_marks_coverage_partial_and_keeps_rows() {
+        let root =
+            std::env::temp_dir().join(format!("manyfw-procfs-listener-header-{}", now_millis()));
+        let proc_root = root.join("proc/net");
+        fs::create_dir_all(&proc_root).unwrap();
+        fs::write(
+            proc_root.join("tcp"),
+            "malformed header\n 0: 0100007F:1F90 00000000:0000 0A 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        let valid_header =
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n";
+        for table in ["tcp6", "udp", "udp6"] {
+            fs::write(proc_root.join(table), valid_header).unwrap();
+        }
+
+        let source = ProcfsListenerSource(proc_root.clone()).listeners().unwrap();
+        assert!(source.partial);
+        assert!(source.limitations.contains(&Limitation::MalformedSource));
+        assert!(source.records.iter().any(|listener| {
+            listener.protocol == TransportProtocol::Tcp
+                && listener.address == "127.0.0.1".parse::<IpAddr>().unwrap()
+        }));
 
         fs::remove_dir_all(root).unwrap();
     }
