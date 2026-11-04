@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
+pub mod docker;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
     pub policy: NormalizedPolicy,
