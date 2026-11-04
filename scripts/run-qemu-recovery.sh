@@ -64,6 +64,8 @@ try:
         evidence = json.load(stream)
 except (OSError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid evidence: {error}")
+if not isinstance(evidence, dict):
+    raise SystemExit("evidence must be a JSON object")
 
 required = {
     "scenario", "status", "candidate_sha", "guest_boots", "reboot_count",
@@ -80,12 +82,14 @@ if not isinstance(evidence["candidate_sha"], str) or not evidence["candidate_sha
 expected_sha = os.environ.get("MANYFW_RECOVERY_EXPECTED_SHA")
 if expected_sha and evidence["candidate_sha"] != expected_sha:
     raise SystemExit("candidate_sha does not match the candidate under test")
-if not isinstance(evidence["guest_boots"], int) or evidence["guest_boots"] < 1:
+if type(evidence["guest_boots"]) is not int or evidence["guest_boots"] < 1:
     raise SystemExit("guest_boots must be positive")
-if not isinstance(evidence["reboot_count"], int) or evidence["reboot_count"] < 0:
+if type(evidence["reboot_count"]) is not int or evidence["reboot_count"] < 0:
     raise SystemExit("reboot_count must be non-negative")
 if scenario.startswith("reboot_") and evidence["reboot_count"] < 1:
     raise SystemExit("reboot_count must be positive for reboot scenarios")
+if type(evidence["ssh_loss_observed"]) is not bool:
+    raise SystemExit("ssh_loss_observed must be boolean")
 if scenario == "ssh_loss" and evidence["ssh_loss_observed"] is not True:
     raise SystemExit("ssh_loss_observed must be true for ssh_loss")
 if not all(isinstance(evidence[field], str) and evidence[field]

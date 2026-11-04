@@ -235,7 +235,7 @@ jobs:
     env:
       MANYFW_QEMU_KERNEL: ${{ inputs.qemu_kernel }}
       MANYFW_QEMU_INITRD: ${{ inputs.qemu_initrd }}
-      MANYFW_RECOVERY_EXPECTED_SHA: ${{ github.sha }}
+      MANYFW_RECOVERY_EXPECTED_SHA: ${{ inputs.candidate_sha || github.sha }}
       MANYFW_RECOVERY_REPORT: recovery-evidence/recovery-status.txt
       MANYFW_RECOVERY_EVIDENCE_DIR: recovery-evidence/evidence
     steps:

@@ -9,6 +9,7 @@ on:
       - "Cargo.lock"
       - "crates/**"
       - "examples/**"
+      - "scripts/**"
       - "docs/**"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
@@ -97,6 +98,8 @@ jobs:
           done
       - name: Validate warning fixtures remain non-fatal
         run: cargo run -p manyfw -- check --file examples/warnings/broad-ports.toml
+      - name: Validate recovery evidence contract
+        run: python3 -m unittest scripts/test_validate_recovery_report.py
 
   dependency-audit:
     name: dependency audit

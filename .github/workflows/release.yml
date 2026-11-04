@@ -77,6 +77,7 @@ jobs:
           mkdir -p dist/smoke
           tar -xzf "$tarball" -C dist/smoke
           test "$(dist/smoke/manyfw --version)" = "manyfw $version"
+          dist/smoke/manyfw check --file examples/manyfw.toml
           sha256sum -c "$tarball.sha256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
         with:
@@ -120,6 +121,7 @@ jobs:
             dir="$(mktemp -d)"
             tar -xzf "$tarball" -C "$dir"
             test "$("$dir/manyfw" --version)" = "manyfw $version"
+            "$dir/manyfw" check --file examples/manyfw.toml
             rm -rf "$dir"
           done
       - name: Create GitHub Release

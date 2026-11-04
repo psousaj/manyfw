@@ -25,6 +25,8 @@ def main() -> None:
     if len(sys.argv) != 4:
         fail("usage: validate-recovery-report.py <sha> <report> <evidence-dir>")
     expected_sha, report_name, evidence_name = sys.argv[1:]
+    if not expected_sha:
+        fail("candidate SHA must be non-empty")
     report = pathlib.Path(report_name)
     evidence_dir = pathlib.Path(evidence_name)
     try:
@@ -50,12 +52,39 @@ def main() -> None:
             evidence = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             fail(f"{scenario}: invalid evidence ({error})")
+        if not isinstance(evidence, dict):
+            fail(f"{scenario}: evidence must be a JSON object")
+        required = {
+            "scenario", "status", "candidate_sha", "guest_boots", "reboot_count",
+            "ssh_loss_observed", "firewall_before", "firewall_after",
+            "supervisor_independent", "postcondition", "teardown_complete",
+        }
+        missing = sorted(required - evidence.keys())
+        if missing:
+            fail(f"{scenario}: missing evidence fields: {', '.join(missing)}")
         if evidence.get("scenario") != scenario:
             fail(f"{scenario}: evidence identity mismatch")
         if evidence.get("status") != "Passed":
             fail(f"{scenario}: evidence is not Passed")
         if evidence.get("candidate_sha") != expected_sha:
             fail(f"{scenario}: candidate SHA mismatch")
+        if type(evidence.get("guest_boots")) is not int or evidence["guest_boots"] < 1:
+            fail(f"{scenario}: guest_boots must be positive")
+        if type(evidence.get("reboot_count")) is not int or evidence["reboot_count"] < 0:
+            fail(f"{scenario}: reboot_count must be non-negative")
+        if scenario.startswith("reboot_") and evidence["reboot_count"] < 1:
+            fail(f"{scenario}: reboot_count must be positive")
+        if type(evidence.get("ssh_loss_observed")) is not bool:
+            fail(f"{scenario}: ssh_loss_observed must be boolean")
+        if scenario == "ssh_loss" and evidence["ssh_loss_observed"] is not True:
+            fail(f"{scenario}: SSH loss was not observed")
+        if not all(
+            isinstance(evidence.get(field), str) and evidence[field]
+            for field in ("firewall_before", "firewall_after", "postcondition")
+        ):
+            fail(f"{scenario}: firewall state and postcondition evidence are required")
+        if evidence.get("supervisor_independent") is not True:
+            fail(f"{scenario}: independent supervisor evidence is required")
         if evidence.get("teardown_complete") is not True:
             fail(f"{scenario}: teardown is not complete")
 
