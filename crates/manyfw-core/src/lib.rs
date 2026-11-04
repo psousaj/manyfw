@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
+pub mod audit;
 pub mod docker;
 pub mod host;
 pub mod snapshot;

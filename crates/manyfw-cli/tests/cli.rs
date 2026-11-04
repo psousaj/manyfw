@@ -101,3 +101,38 @@ fn check_reports_missing_default_unknown_fields_and_conflicts() {
         assert!(stderr.contains(code), "{file}: {stderr}");
     }
 }
+
+#[test]
+fn audit_emits_a_valid_report_and_exits_zero() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "audit",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/empty-snapshot.json",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run manyfw audit");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"version\": 1"));
+    assert!(!stdout.contains("Safe"));
+}
+
+#[test]
+fn audit_snapshot_failure_is_a_command_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "audit",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/does-not-exist.json",
+        ])
+        .output()
+        .expect("run manyfw audit");
+    assert!(!output.status.success());
+}

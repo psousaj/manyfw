@@ -13,6 +13,7 @@ Rust workspace with a **single CLI binary** (`manyfw`) and a pure core library. 
 ```sh
 cargo run -p manyfw -- check --file examples/manyfw.toml
 cargo run -p manyfw -- plan --file examples/manyfw.toml
+cargo run -p manyfw -- audit --file examples/manyfw.toml --snapshot snapshot.json
 cargo test --workspace
 ```
 

@@ -263,6 +263,11 @@ Implemented commands:
   warnings. It exits nonzero for any `PolicyError`.
 - `manyfw plan --file <path>` remains a read-only policy summary and is not an
   executable kernel ruleset.
+- `manyfw audit --file <policy> --snapshot <snapshot.json> [--format human|json]`
+  evaluates a policy against a previously collected, sanitized observation
+  snapshot. It performs no live or privileged collection. A valid complete or
+  partial report exits zero; file, parsing, unsupported-version, or rendering
+  failures exit nonzero. Findings are not safety or reachability verdicts.
 
 The CLI must present diagnostic codes and actionable messages. Diagnostic data
 must remain suitable for future JSON output and CI automation.

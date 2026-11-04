@@ -24,6 +24,17 @@ enum Command {
         #[arg(short, long, default_value = "examples/manyfw.toml")]
         file: PathBuf,
     },
+    /// Evaluate a normalized policy against a read-only observation snapshot.
+    Audit {
+        #[arg(short, long, default_value = "examples/manyfw.toml")]
+        file: PathBuf,
+        /// JSON snapshot produced by discovery; no live collection is performed.
+        #[arg(short, long)]
+        snapshot: PathBuf,
+        /// Output format: human or json.
+        #[arg(long, default_value = "human")]
+        format: String,
+    },
 }
 
 fn main() {
@@ -36,7 +47,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let file = match &cli.command {
-        Command::Check { file } | Command::Plan { file } => file,
+        Command::Check { file } | Command::Plan { file } | Command::Audit { file, .. } => file,
     };
     let input = std::fs::read_to_string(file)?;
     let report = manyfw_core::parse_and_normalize(&input)?;
@@ -66,6 +77,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     rule.ports,
                     rule.action
                 );
+            }
+        }
+        Command::Audit {
+            snapshot, format, ..
+        } => {
+            let snapshot_input = std::fs::read_to_string(snapshot)?;
+            let snapshot: manyfw_core::snapshot::ObservationSnapshot =
+                serde_json::from_str(&snapshot_input)?;
+            let report = manyfw_core::audit::evaluate(&policy, &snapshot)?;
+            match format.as_str() {
+                "human" => print!("{}", report.human()),
+                "json" => print!("{}", report.json()?),
+                other => {
+                    return Err(
+                        format!("unsupported audit format {other:?}; use human or json").into(),
+                    );
+                }
             }
         }
     }
