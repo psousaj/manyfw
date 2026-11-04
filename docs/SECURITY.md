@@ -1,6 +1,8 @@
 # Security model
 
-**No privileged enforcement exists in v0.1.0.** The only implemented commands read local TOML and emit diagnostics.
+**No privileged enforcement exists in v0.1.0.** The CLI validates local policy
+and analyzes supplied observation snapshots; it does not collect live Docker or
+firewall state and does not modify firewall rules.
 
 ## Threat boundaries
 

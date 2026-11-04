@@ -7,7 +7,7 @@ workflows:
 | --- | --- | --- |
 | `ci.yml` | fmt, clippy, workspace tests, docs, fixtures, dependency audit | Yes |
 | `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro and binary smoke tests | Main, scheduled, manual, relevant PRs |
-| `release.yml` | Tagged release packaging, checksums, final smoke tests, GitHub Release | Tags only |
+| `release.yml` | Detect unpublished Cargo workspace versions, package/checksum/smoke artifacts, create an annotated tag and GitHub Release | Version/lock/workflow changes on `main`, or manual dispatch from `main` |
 
 The optional issue #24 recovery and candidate-evidence gate are consolidated
 into `compatibility.yml` rather than maintained as additional workflows. A
@@ -63,13 +63,33 @@ compatibility coverage is required.
 
 ## Release process
 
-1. Ensure CI is green on the intended commit.
-2. Ensure compatibility builds, binary smoke tests, and distro smoke tests are
-   green for that commit.
-3. Create an annotated `vX.Y.Z` tag matching the workspace Cargo version.
-4. `release.yml` builds all four Linux targets, packages the final binaries,
-   verifies SHA-256 files, extracts each archive, and executes each packaged
-   binary on its native runner before publishing a GitHub Release.
+1. Change `[workspace.package].version` in the root `Cargo.toml`; both crates
+   inherit this version. Update and commit `Cargo.lock` with the change.
+2. Open and merge the version bump through the normal PR checks. The release
+   workflow only publishes commits that have reached `main`.
+3. On a matching push to `main` (or a manual dispatch from `main`),
+   `release.yml` reads the workspace version. If its
+   matching `vX.Y.Z` tag/release is absent, it validates the workspace and runs
+   the full four-target Linux build and artifact smoke matrix.
+4. Only after all builds, checksums, and native-runner smoke tests pass does the
+   workflow create an annotated `vX.Y.Z` tag at that exact commit and publish
+   the GitHub Release with the archives and SHA-256 files.
+
+The first successful run publishes the current version (`0.1.0`); subsequent
+releases are triggered by bumping the workspace version and merging it. A push
+at an already released version is a no-op. The tag and release are created in
+the same workflow run so publication does not depend on a tag-push event from
+`GITHUB_TOKEN` (which would not trigger another workflow). The workflow rejects
+stale main-branch commits, non-increasing versions, and attempts to move an
+existing tag. Version numbers must use stable `X.Y.Z` form; prereleases are not
+published by this workflow.
+
+The release installer at `scripts/install.sh` detects Linux architecture and
+GNU versus musl libc, selects the matching release archive, verifies its
+SHA-256 checksum and binary version, then installs `manyfw` into
+`/usr/local/bin` (using `sudo` only when needed). It fails closed for unsupported
+platforms or missing release assets. The installer does not perform firewall
+operations.
 
 The release workflow has `contents: write` only on its publish job. It does
 not publish an artifact if a build, checksum, or final smoke test fails.
