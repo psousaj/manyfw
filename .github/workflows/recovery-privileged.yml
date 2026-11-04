@@ -1,0 +1,56 @@
+name: Privileged recovery release gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      qemu_kernel:
+        description: Path to the trusted guest kernel on the self-hosted runner
+        required: true
+        type: string
+      qemu_initrd:
+        description: Path to the trusted recovery initrd on the self-hosted runner
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      qemu_kernel:
+        required: true
+        type: string
+      qemu_initrd:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qemu-recovery:
+    # Dedicated infrastructure supplies trusted kernel/initrd artifacts and
+    # must be labeled manyfw-qemu. GitHub-hosted runners are not sufficient.
+    runs-on: [self-hosted, manyfw-qemu]
+    env:
+      MANYFW_QEMU_KERNEL: ${{ inputs.qemu_kernel }}
+      MANYFW_QEMU_INITRD: ${{ inputs.qemu_initrd }}
+      MANYFW_QEMU_LOG: qemu-recovery.log
+    # This job is evidence collection only.  Release approval must additionally
+    # require a non-skipped report from the configured disposable guest.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run disposable VM matrix
+        shell: bash
+        run: |
+          ./scripts/run-qemu-recovery.sh
+      - name: Upload recovery status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-status
+          path: recovery-status.txt
+          if-no-files-found: error
+      - name: Upload QEMU serial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-recovery-log
+          path: qemu-recovery.log
+          if-no-files-found: error

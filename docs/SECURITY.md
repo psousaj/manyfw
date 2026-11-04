@@ -21,4 +21,8 @@ Privileged implementation must only ship after network namespace/VM integration 
 5. No unapproved opening of new ingress; reject partial backend support.
 6. Tests for remote SSH, Docker legacy and native nftables, Tailscale changes, IPv6 and concurrent rule modifications.
 
+The recovery matrix is tracked in [`TEST-MATRIX.md`](TEST-MATRIX.md). Local
+fixture coverage may proceed without privileges, but missing VM or privileged
+scenarios remain `NotApplicable` and block enforcement release approval.
+
 Report vulnerabilities privately using GitHub security advisories once enabled; avoid posting exploitable details in public issues.
