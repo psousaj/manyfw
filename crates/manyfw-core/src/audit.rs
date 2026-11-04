@@ -290,7 +290,12 @@ pub fn evaluate(
                     )
                     .collect(),
                 limitations: limitations.clone(),
-                coverage: coverage(&docker.completeness, &docker.limitations, &host),
+                coverage: coverage(
+                    &docker.completeness,
+                    docker.outcome,
+                    &docker.limitations,
+                    &host,
+                ),
             });
             if unexpected || mismatch {
                 let category = if unexpected {
@@ -312,7 +317,12 @@ pub fn evaluate(
                         }))
                         .collect(),
                     limitations,
-                    coverage: coverage(&docker.completeness, &docker.limitations, &host),
+                    coverage: coverage(
+                        &docker.completeness,
+                        docker.outcome,
+                        &docker.limitations,
+                        &host,
+                    ),
                 });
             }
         }
@@ -353,26 +363,16 @@ pub fn evaluate(
             ),
             subject: resource,
             category: "HostListener".into(),
-            assessment: if listener_uncertain {
-                Assessment::Unknown
-            } else {
-                Assessment::ObservedExposure
-            },
+            // A listener proves a local bind, not a compatible publication or
+            // an externally reachable path. Keep exposure unresolved here.
+            assessment: Assessment::Unknown,
             severity: if listener_uncertain || listener.wildcard {
                 AuditSeverity::Medium
             } else {
                 AuditSeverity::Low
             },
             severity_factors: SeverityFactors {
-                exposure: format!(
-                    "{:?}",
-                    if listener_uncertain {
-                        Assessment::Unknown
-                    } else {
-                        Assessment::ObservedExposure
-                    }
-                )
-                .to_lowercase(),
+                exposure: format!("{:?}", Assessment::Unknown).to_lowercase(),
                 coverage: if limitations.is_empty() {
                     "observed".into()
                 } else {
@@ -385,27 +385,29 @@ pub fn evaluate(
             policy: policy_context(declared, matching),
             evidence: vec![evidence_id],
             limitations,
-            coverage: coverage(&docker.completeness, &docker.limitations, &host),
+            coverage: coverage(
+                &docker.completeness,
+                docker.outcome,
+                &docker.limitations,
+                &host,
+            ),
         });
     }
 
-    if docker.containers.is_empty() && docker.completeness != crate::docker::Completeness::Complete
-    {
+    let docker_status = docker_coverage_status(docker.completeness, docker.outcome);
+    if docker_status != "complete" {
         let evidence_id = format!("evidence-{}", stable_key("incomplete:docker"));
         evidence.push(Evidence {
             id: evidence_id.clone(),
             source: "docker_observation".into(),
             resource: "docker:collection".into(),
             interval: observation.collected_at(),
-            limitations: vec![format!("coverage is {:?}", docker.completeness)],
+            limitations: vec![format!("coverage is {docker_status}")],
         });
-        findings.push(incomplete_finding(
-            "docker",
-            format!("{:?}", docker.completeness),
-            evidence_id,
-        ));
+        findings.push(incomplete_finding("docker", docker_status, evidence_id));
     }
-    if host.listeners.completeness != crate::host::Completeness::Complete {
+    let listener_status = host_coverage_status(host.listeners.completeness, host.listeners.outcome);
+    if listener_status != "complete" {
         let evidence_id = format!("evidence-{}", stable_key("incomplete:host_listeners"));
         evidence.push(Evidence {
             id: evidence_id.clone(),
@@ -421,7 +423,7 @@ pub fn evaluate(
         });
         findings.push(incomplete_finding(
             "host_listeners",
-            format!("{:?}", host.listeners.completeness),
+            listener_status.into(),
             evidence_id,
         ));
     }
@@ -586,13 +588,14 @@ fn endpoint_limitations(
 
 fn coverage(
     docker: &crate::docker::Completeness,
+    docker_outcome: crate::docker::CollectionOutcome,
     docker_limitations: &[crate::docker::Limitation],
     host: &crate::host::HostNetworkObservation,
 ) -> Vec<Coverage> {
     let mut coverage = vec![
         Coverage {
             dimension: "docker_publications".into(),
-            status: format!("{docker:?}").to_lowercase(),
+            status: docker_coverage_status(*docker, docker_outcome),
             limitations: docker_limitations
                 .iter()
                 .map(|limitation| sanitize(&format!("{limitation:?}")))
@@ -600,7 +603,8 @@ fn coverage(
         },
         Coverage {
             dimension: "host_listeners".into(),
-            status: format!("{:?}", host.listeners.completeness).to_lowercase(),
+            status: host_coverage_status(host.listeners.completeness, host.listeners.outcome)
+                .into(),
             limitations: host
                 .listeners
                 .limitations
@@ -612,21 +616,25 @@ fn coverage(
     coverage.push(dimension_coverage(
         "host_interfaces",
         host.interfaces.completeness,
+        host.interfaces.outcome,
         &host.interfaces.limitations,
     ));
     coverage.push(dimension_coverage(
         "host_addresses",
         host.addresses.completeness,
+        host.addresses.outcome,
         &host.addresses.limitations,
     ));
     coverage.push(dimension_coverage(
         "host_routes",
         host.routes.completeness,
+        host.routes.outcome,
         &host.routes.limitations,
     ));
     coverage.push(dimension_coverage(
         "tailscale",
         host.tailscale.completeness,
+        host.tailscale.outcome,
         &host.tailscale.limitations,
     ));
     for family in ["ipv4", "ipv6"] {
@@ -639,7 +647,9 @@ fn coverage(
                 .any(|address| (family == "ipv4") == address.address.is_ipv4())
             {
                 "observed"
-            } else if host.addresses.completeness == crate::host::Completeness::Complete {
+            } else if host_coverage_status(host.addresses.completeness, host.addresses.outcome)
+                == "complete"
+            {
                 "no_observation"
             } else {
                 "unknown"
@@ -663,7 +673,9 @@ fn coverage(
                 .any(|listener| format!("{:?}", listener.protocol).to_lowercase() == protocol)
             {
                 "observed"
-            } else if host.listeners.completeness == crate::host::Completeness::Complete {
+            } else if host_coverage_status(host.listeners.completeness, host.listeners.outcome)
+                == "complete"
+            {
                 "no_observation"
             } else {
                 "unknown"
@@ -683,15 +695,46 @@ fn coverage(
 fn dimension_coverage(
     dimension: &str,
     completeness: crate::host::Completeness,
+    outcome: crate::host::CollectionOutcome,
     limitations: &[crate::host::Limitation],
 ) -> Coverage {
     Coverage {
         dimension: dimension.into(),
-        status: format!("{completeness:?}").to_lowercase(),
+        status: host_coverage_status(completeness, outcome).into(),
         limitations: limitations
             .iter()
             .map(|limitation| sanitize(&format!("{limitation:?}")))
             .collect(),
+    }
+}
+
+fn host_coverage_status(
+    completeness: crate::host::Completeness,
+    outcome: crate::host::CollectionOutcome,
+) -> &'static str {
+    use crate::host::{CollectionOutcome as Outcome, Completeness};
+    match (completeness, outcome) {
+        (Completeness::Complete, Outcome::Complete) => "complete",
+        (Completeness::Unavailable, _) | (_, Outcome::Unavailable | Outcome::PermissionDenied) => {
+            "unavailable"
+        }
+        (Completeness::Unknown, _) => "unknown",
+        _ => "partial",
+    }
+}
+
+fn docker_coverage_status(
+    completeness: crate::docker::Completeness,
+    outcome: crate::docker::CollectionOutcome,
+) -> String {
+    use crate::docker::{CollectionOutcome as Outcome, Completeness};
+    match (completeness, outcome) {
+        (Completeness::Complete, Outcome::Complete) => "complete".into(),
+        (Completeness::Unavailable, _) | (_, Outcome::Unavailable | Outcome::PermissionDenied) => {
+            "unavailable".into()
+        }
+        (Completeness::Unknown, _) => "unknown".into(),
+        _ => "partial".into(),
     }
 }
 
@@ -889,6 +932,83 @@ mod tests {
             .expect("incomplete finding");
         assert_eq!(finding.assessment, Assessment::Unknown);
         assert_eq!(finding.severity, AuditSeverity::Medium);
+    }
+
+    #[test]
+    fn standalone_host_listener_is_not_reported_as_observed_exposure() {
+        let listener = host::SocketListener {
+            protocol: host::TransportProtocol::Tcp,
+            family: host::IpFamily::Ipv4,
+            address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            wildcard: true,
+            port: 8080,
+            interface_index: None,
+            interface_name: None,
+            owner: host::SocketOwner::Unknown,
+        };
+        let report = evaluate(
+            &policy(),
+            &snapshot::ObservationSnapshot::compose(
+                docker(docker::CollectionOutcome::Complete),
+                host(vec![listener]),
+            ),
+        )
+        .unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.category == "HostListener")
+            .unwrap();
+
+        assert_eq!(finding.assessment, Assessment::Unknown);
+        assert!(
+            finding
+                .severity_factors
+                .justification
+                .contains("not proof of external reachability")
+        );
+    }
+
+    #[test]
+    fn failed_collection_outcome_cannot_be_reported_as_complete_coverage() {
+        let mut host_observation = host(Vec::new());
+        host_observation.listeners.outcome = host::CollectionOutcome::Unavailable;
+        let mut docker_observation = docker(docker::CollectionOutcome::Complete);
+        docker_observation.outcome = docker::CollectionOutcome::PermissionDenied;
+        docker_observation
+            .containers
+            .push(docker::ContainerObservation {
+                logical_identity: None,
+                instance: docker::ContainerInstance {
+                    id: "retained-instance".into(),
+                    replica_key: "retained-instance".into(),
+                },
+                lifecycle: docker::LifecycleState::Running,
+                operational_status: docker::OperationalStatus::Running,
+                network_mode: docker::NetworkMode::Bridge,
+                configured_publications: Vec::new(),
+                observed_endpoints: Vec::new(),
+            });
+
+        let report = evaluate(
+            &policy(),
+            &snapshot::ObservationSnapshot::compose(docker_observation, host_observation),
+        )
+        .unwrap();
+
+        let coverage = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.category == "IncompleteObservation" && finding.subject == "host_listeners"
+            })
+            .unwrap();
+        assert_eq!(coverage.coverage[0].status, "unavailable");
+        assert!(report.findings.iter().any(|finding| {
+            finding.category == "IncompleteObservation"
+                && finding.subject == "docker"
+                && finding.coverage[0].status == "unavailable"
+        }));
     }
 
     #[test]
