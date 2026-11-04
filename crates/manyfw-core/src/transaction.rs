@@ -4,6 +4,7 @@
 //! injected capability and tests can provide a typed simulator.  The runner
 //! persists every safety decision before moving on to the next stage.
 
+use crate::backend::{DiagnosticPlan, Ownership, PlanApplicability, PlanOperation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +25,65 @@ pub struct TransactionPlan {
     pub preconditions: Vec<String>,
     pub ownership_fingerprint: String,
     pub deadline_seconds: u64,
+}
+
+impl TransactionPlan {
+    /// Convert an applicable, ownership-scoped planner result into the guarded
+    /// transaction boundary.  The fingerprint is supplied by the caller's
+    /// fresh observation; it is never inferred from a diagnostic plan.
+    pub fn from_diagnostic_plan(
+        plan: &DiagnosticPlan,
+        transaction_id: String,
+        ownership_domain: String,
+        ownership_fingerprint: String,
+        deadline_seconds: u64,
+    ) -> Result<Self> {
+        if !matches!(plan.applicability, PlanApplicability::Applicable)
+            || ownership_domain.is_empty()
+            || ownership_fingerprint.is_empty()
+            || !plan.unknowns.is_empty()
+            || plan.ownership.is_empty()
+        {
+            return Err(TransactionError::InvalidState);
+        }
+        for operation in &plan.operations {
+            if let PlanOperation::EnsureRule { rule_id, .. } = operation {
+                let matching = plan
+                    .ownership
+                    .iter()
+                    .filter(|boundary| boundary.resource == *rule_id)
+                    .collect::<Vec<_>>();
+                if matching.len() != 1 || matching[0].owner != Ownership::Manyfw {
+                    return Err(TransactionError::OwnershipChanged);
+                }
+            }
+        }
+        let operations = plan
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                PlanOperation::EnsureRule { rule_id, .. } => Ok(Operation {
+                    resource: rule_id.clone(),
+                    description: "ensure planned ManyFW-owned rule".into(),
+                }),
+                PlanOperation::Diagnostic { detail, .. } => {
+                    Err(TransactionError::Backend(detail.clone()))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let preconditions = vec![
+            serde_json::to_string(&plan.preconditions)
+                .map_err(|error| TransactionError::Backend(error.to_string()))?,
+        ];
+        Ok(Self {
+            transaction_id,
+            ownership_domain,
+            operations,
+            preconditions,
+            ownership_fingerprint,
+            deadline_seconds,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1175,6 +1235,60 @@ mod tests {
             ownership_fingerprint: "before".into(),
             deadline_seconds: 100,
         }
+    }
+
+    #[test]
+    fn planner_conversion_refuses_blocked_or_foreign_plans() {
+        let preconditions = crate::backend::Preconditions {
+            observation_generation: 1,
+            backend_identity: "test".into(),
+            backend_version: None,
+            required_hooks: Vec::new(),
+            required_priorities: Vec::new(),
+            policy_priorities: Vec::new(),
+            backend: crate::backend::BackendKind::Nftables,
+            mode: crate::backend::BackendMode::NativeNftables,
+        };
+        let blocked = DiagnosticPlan {
+            version: 1,
+            applicability: PlanApplicability::Blocked {
+                reasons: Vec::new(),
+            },
+            operations: Vec::new(),
+            preconditions: preconditions.clone(),
+            ownership: Vec::new(),
+            unknowns: Vec::new(),
+            explanations: Vec::new(),
+        };
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &blocked,
+                "tx".into(),
+                "domain".into(),
+                "fingerprint".into(),
+                10,
+            )
+            .is_err()
+        );
+        let foreign = DiagnosticPlan {
+            applicability: PlanApplicability::Applicable,
+            ownership: vec![crate::backend::OwnershipBoundary {
+                resource: "foreign".into(),
+                owner: Ownership::Foreign,
+                reason: "test".into(),
+            }],
+            ..blocked
+        };
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &foreign,
+                "tx".into(),
+                "domain".into(),
+                "fingerprint".into(),
+                10,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

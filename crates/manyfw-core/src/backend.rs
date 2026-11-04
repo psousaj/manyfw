@@ -633,6 +633,20 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
         });
         unknowns.push("backend ownership target is not observed".into());
     }
+    for operation in &operations {
+        if let PlanOperation::EnsureRule { rule_id, .. } = operation {
+            if !ownership
+                .iter()
+                .any(|boundary| boundary.resource == *rule_id)
+            {
+                ownership.push(OwnershipBoundary {
+                    resource: rule_id.clone(),
+                    owner: Ownership::Manyfw,
+                    reason: "planned operation is scoped to the ManyFW ownership boundary".into(),
+                });
+            }
+        }
+    }
     let mut observed_priorities = BTreeSet::new();
     for hook in &backend.observation.hooks {
         if let Some(priority) = hook.priority {
