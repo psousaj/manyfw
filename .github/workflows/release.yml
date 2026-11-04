@@ -89,7 +89,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -110,21 +110,56 @@ jobs:
           for checksum in "${checksums[@]}"; do
             (cd dist && sha256sum -c "$(basename "$checksum")")
           done
-      - name: Smoke test every release artifact
+      - name: Extract every release artifact
         shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="${VERSION#v}"
           for tarball in dist/*.tar.gz; do
             dir="$(mktemp -d)"
             tar -xzf "$tarball" -C "$dir"
-            test "$("$dir/manyfw" --version)" = "manyfw $version"
-            "$dir/manyfw" check --file examples/manyfw.toml
+            test -x "$dir/manyfw"
             rm -rf "$dir"
           done
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+
+  smoke:
+    name: smoke packaged ${{ matrix.target }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist
+      - name: Smoke test packaged artifact
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          tarball="dist/manyfw-$TARGET-$version.tar.gz"
+          checksum="dist/manyfw-$TARGET-$version.tar.gz.sha256"
+          (cd dist && sha256sum -c "$(basename "$checksum")")
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+          tar -xzf "$tarball" -C "$dir"
+          test "$("$dir/manyfw" --version)" = "manyfw $version"
+          "$dir/manyfw" check --file examples/manyfw.toml

@@ -68,8 +68,8 @@ compatibility coverage is required.
    green for that commit.
 3. Create an annotated `vX.Y.Z` tag matching the workspace Cargo version.
 4. `release.yml` builds all four Linux targets, packages the final binaries,
-   verifies SHA-256 files, extracts each archive, and executes the packaged
-   binary before publishing a GitHub Release.
+   verifies SHA-256 files, extracts each archive, and executes each packaged
+   binary on its native runner before publishing a GitHub Release.
 
 The release workflow has `contents: write` only on its publish job. It does
 not publish an artifact if a build, checksum, or final smoke test fails.
