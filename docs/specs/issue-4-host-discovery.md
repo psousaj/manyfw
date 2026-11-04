@@ -42,6 +42,10 @@ source limitations, temporal inconsistencies, and unknown process ownership.
 - Prefer Socket Diagnostics for TCP/UDP socket observations and use dedicated
   `/proc/net/tcp*` and `/proc/net/udp*` parsers as explicitly identified
   alternatives.
+- Procfs address and route fallbacks retain valid records but mark their own
+  dimension partial when an optional family file is unavailable or any row is
+  malformed; an empty fallback result must not imply complete coverage after
+  a source could not be read or parsed.
 - Do not execute external commands in the MVP. No shell, `ip`, `ss`, `route`,
   or `netstat` fallback is part of this issue.
 - Keep `NetworkInterface`, `InterfaceAddress`, `SocketListener`,
