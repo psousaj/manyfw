@@ -4,7 +4,7 @@ use crate::{Action, NormalizedPolicy, docker, snapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const EXPLANATION_VERSION: u32 = 2;
+pub const EXPLANATION_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Explanation {
@@ -55,6 +55,8 @@ pub struct ObservedPath {
     pub instance_id: String,
     pub family: String,
     pub protocol: String,
+    pub host_binding: docker::HostBinding,
+    pub container_addresses: Vec<docker::ContainerAddress>,
     pub host_port: u16,
     pub container_port: u16,
     pub lifecycle: String,
@@ -283,20 +285,19 @@ pub fn explain(
                 edges.sort_by_key(|edge| format!("{edge:?}"));
                 let mut steps = Vec::new();
                 let docker_id = evidence_ids.next();
+                let host_binding = format_host_binding(endpoint);
+                let container_targets = endpoint
+                    .container_addresses
+                    .iter()
+                    .map(|address| format!("{}:{}", address.network, address.address))
+                    .collect::<Vec<_>>();
                 add_evidence(
                     &mut evidence,
                     &docker_id,
                     "docker_publication",
                     format!(
-                        "endpoint:{:?}/{}->{}:{:?}",
-                        if endpoint.host.address.is_some() {
-                            "bound"
-                        } else {
-                            "unspecified"
-                        },
-                        endpoint.host.port,
-                        endpoint.container_port,
-                        endpoint.protocol
+                        "endpoint:{host_binding}->container:{container_targets:?}/{}:{:?}",
+                        endpoint.container_port, endpoint.protocol
                     ),
                     Some(docker_interval(docker.collected_at)),
                     endpoint_limitations(&docker, observation),
@@ -305,8 +306,8 @@ pub fn explain(
                     kind: PathStepKind::DockerPublication,
                     status: StepStatus::Observed,
                     detail: format!(
-                        "published {:?} port {}",
-                        endpoint.protocol, endpoint.container_port
+                        "published {} to container port {} ({:?})",
+                        host_binding, endpoint.container_port, endpoint.protocol
                     ),
                     evidence: vec![docker_id.clone()],
                 });
@@ -370,24 +371,26 @@ pub fn explain(
                     let (kind, detail) = match &edge.target {
                         Some(snapshot::CorrelationNode::HostListener { address, port, .. }) => (
                             PathStepKind::HostListener,
-                            format!(
-                                "listener port {port} ({})",
-                                if address.is_ipv4() { "ipv4" } else { "ipv6" }
-                            ),
+                            format!("listener {address}:{port}"),
                         ),
-                        Some(snapshot::CorrelationNode::HostInterface { .. }) => (
+                        Some(snapshot::CorrelationNode::HostInterface { index, name }) => (
                             PathStepKind::Interface,
-                            "interface observation correlated".into(),
+                            format!("interface {name} (index {index})"),
                         ),
                         Some(snapshot::CorrelationNode::HostRoute {
+                            family,
+                            destination,
+                            prefix_length,
                             interface_name,
                             table,
                             metric,
                             ..
-                        }) => (PathStepKind::Route, {
-                            let _ = (interface_name, table, metric);
-                            "route observation correlated".into()
-                        }),
+                        }) => (
+                            PathStepKind::Route,
+                            format!(
+                                "route {destination}/{prefix_length} ({family:?}) via {interface_name:?} table={table:?} metric={metric:?}"
+                            ),
+                        ),
                         None | Some(snapshot::CorrelationNode::DockerEndpoint { .. }) => (
                             PathStepKind::UnknownMechanism,
                             "correlation target unavailable".into(),
@@ -451,6 +454,8 @@ pub fn explain(
                     instance_id: format!("replica-{}", replica_index + 1),
                     family,
                     protocol: format!("{:?}", endpoint.protocol).to_lowercase(),
+                    host_binding: endpoint.host.clone(),
+                    container_addresses: endpoint.container_addresses.clone(),
                     host_port: endpoint.host.port,
                     container_port: endpoint.container_port,
                     lifecycle: format!("{:?}", container.lifecycle).to_lowercase(),
@@ -551,13 +556,14 @@ impl Explanation {
         ));
         for path in &self.paths {
             out.push_str(&format!(
-                "path {}: {:?} {} {}:{}->{}, lifecycle={} operational={}, {} steps evidence={}\n",
+                "path {}: {:?} {} family={} binding={} target_port={} container_addresses={:?}, lifecycle={} operational={}, {} steps evidence={}\n",
                 path.id,
                 path.conclusion,
                 path.protocol,
                 path.family,
-                path.host_port,
+                format_host_binding_parts(path.host_binding.address, path.family.as_str(), path.host_binding.port),
                 path.container_port,
+                path.container_addresses,
                 path.lifecycle,
                 path.operational_status,
                 path.steps.len(),
@@ -627,15 +633,37 @@ fn same_endpoint(
 
 fn endpoint_key(endpoint: &docker::ObservedPublishedEndpoint) -> String {
     format!(
-        "{}:{:?}:{}:{:?}:{:?}:{:?}:{:?}",
+        "{}:{:?}:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
         stable_key(&endpoint.instance_id),
         endpoint.host.address,
         endpoint.host.port,
         endpoint.container_port,
         endpoint.protocol,
         endpoint.family,
-        endpoint.mechanism
+        endpoint.mechanism,
+        endpoint.container_addresses
     )
+}
+
+fn format_host_binding(endpoint: &docker::ObservedPublishedEndpoint) -> String {
+    let family = match endpoint.family {
+        docker::IpFamily::Ipv4 => "ipv4",
+        docker::IpFamily::Ipv6 => "ipv6",
+        docker::IpFamily::Unspecified => "unspecified",
+    };
+    format_host_binding_parts(endpoint.host.address, family, endpoint.host.port)
+}
+
+fn format_host_binding_parts(address: Option<std::net::IpAddr>, family: &str, port: u16) -> String {
+    let address = address.map_or_else(
+        || match family {
+            "ipv4" => "0.0.0.0".into(),
+            "ipv6" => "::".into(),
+            _ => "unspecified".into(),
+        },
+        |address| address.to_string(),
+    );
+    format!("{address}:{port}")
 }
 
 fn stable_key(value: &str) -> String {
@@ -964,6 +992,11 @@ mod tests {
                 instance_id: "replica-1".into(),
                 family: "ipv4".into(),
                 protocol: "tcp".into(),
+                host_binding: docker::HostBinding {
+                    address: Some("192.0.2.1".parse().unwrap()),
+                    port: 8080,
+                },
+                container_addresses: Vec::new(),
                 host_port: 8080,
                 container_port: 80,
                 lifecycle: "running".into(),
@@ -1055,6 +1088,11 @@ mod tests {
             instance_id: "instance-1".into(),
             family: "ipv4".into(),
             protocol: "tcp".into(),
+            host_binding: docker::HostBinding {
+                address: Some("192.0.2.1".parse().unwrap()),
+                port: 8080,
+            },
+            container_addresses: Vec::new(),
             host_port: 8080,
             container_port: 80,
             lifecycle: "running".into(),

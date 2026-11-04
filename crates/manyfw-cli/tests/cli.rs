@@ -154,7 +154,7 @@ fn explain_unresolved_service_is_explicit_and_versioned() {
         .expect("run manyfw explain");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"version\": 2"));
+    assert!(stdout.contains("\"version\": 3"));
     assert!(stdout.contains("\"outcome\": \"unresolved_identity\""));
     assert!(stdout.contains("external reachability"));
     assert!(!stdout.contains("SAFE"));
