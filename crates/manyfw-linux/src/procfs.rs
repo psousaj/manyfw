@@ -259,17 +259,19 @@ fn addresses(proc_root: &Path) -> Result<FallbackRecords<InterfaceAddress>, Host
                     }
                     if line.contains("host LOCAL") {
                         if let Some(address) = pending.take() {
+                            let prefix_length = prefix.unwrap();
                             records.push(InterfaceAddress {
                                 interface_index: None,
                                 interface_name: None,
                                 address: IpAddr::V4(address),
-                                prefix_length: None,
+                                prefix_length: Some(prefix_length),
                                 scope: if address.is_loopback() {
                                     AddressScope::Host
                                 } else {
                                     AddressScope::Unknown
                                 },
                             });
+                            limitations.push(Limitation::InterfaceAssociationUnavailable);
                         } else {
                             limitations.push(Limitation::MalformedSource);
                         }
@@ -299,7 +301,7 @@ fn routes(
     sys_root: &Path,
 ) -> Result<FallbackRecords<NetworkRoute>, HostSourceError> {
     let mut records = Vec::new();
-    let mut limitations = Vec::new();
+    let mut limitations = vec![Limitation::PolicyRoutingIncomplete];
     match read(&proc_root.join("route")) {
         Ok(ipv4) => {
             let mut lines = ipv4.lines();
@@ -476,8 +478,22 @@ fn listeners(proc_root: &Path) -> Result<FallbackRecords<SocketListener>, HostSo
                 limitations.push(Limitation::MalformedSource);
                 continue;
             }
-            if listen_only && fields[3] != "0A" {
-                continue;
+            if listen_only {
+                if fields[3] != "0A" {
+                    continue;
+                }
+            } else {
+                if fields[3] != "07" {
+                    continue;
+                }
+                match is_unconnected_udp_endpoint(fields[2]) {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => {
+                        limitations.push(Limitation::MalformedSource);
+                        continue;
+                    }
+                }
             }
             let Some((raw_address, raw_port)) = fields[1].split_once(':') else {
                 limitations.push(Limitation::MalformedSource);
@@ -522,6 +538,15 @@ fn listeners(proc_root: &Path) -> Result<FallbackRecords<SocketListener>, HostSo
     };
     result.normalize_limitations();
     Ok(result)
+}
+
+fn is_unconnected_udp_endpoint(value: &str) -> Option<bool> {
+    let (address, port) = value.split_once(':')?;
+    if address.is_empty() || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let port = u16::from_str_radix(port, 16).ok()?;
+    Some(port == 0 && address.bytes().all(|byte| byte == b'0'))
 }
 
 pub(crate) fn tailscale(sys_root: &Path) -> Result<Vec<TailscaleObservation>, HostSourceError> {
@@ -665,7 +690,7 @@ mod tests {
         .unwrap();
         fs::write(
             proc_root.join("udp"),
-            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000:0035 00000000:0000 07 0 0 0 0 0 0\n",
+            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000:0035 00000000:0000 07 0 0 0 0 0 0\n 1: 0100007F:3039 0100007F:0035 01 0 0 0 0 0 0\n",
         )
         .unwrap();
         fs::write(
@@ -686,7 +711,9 @@ mod tests {
 
         let observed_interfaces = interfaces(&sys_root).unwrap();
         let observed_addresses = addresses(&proc_root).unwrap();
-        let observed_listeners = listeners(&proc_root).unwrap().records;
+        let listener_dump = listeners(&proc_root).unwrap();
+        assert!(listener_dump.limitations.is_empty());
+        let observed_listeners = listener_dump.records;
         let observed_routes = routes(&proc_root, &sys_root).unwrap();
         let observed_tailscale = tailscale(&sys_root).unwrap();
 
@@ -703,6 +730,12 @@ mod tests {
                 .iter()
                 .any(|value| { value.address == "::1".parse::<IpAddr>().unwrap() })
         );
+        assert!(observed_addresses.records.iter().any(|address| {
+            address.address == "127.0.0.1".parse::<IpAddr>().unwrap()
+                && address.prefix_length == Some(32)
+                && address.interface_index.is_none()
+                && address.interface_name.is_none()
+        }));
         assert!(observed_listeners.iter().any(|value| {
             value.wildcard
                 && value.family == IpFamily::Ipv4
@@ -717,6 +750,11 @@ mod tests {
             observed_listeners
                 .iter()
                 .any(|value| { value.protocol == TransportProtocol::Udp && value.port == 53 })
+        );
+        assert!(
+            !observed_listeners
+                .iter()
+                .any(|listener| listener.port == 12345)
         );
         assert!(
             observed_routes
@@ -737,8 +775,16 @@ mod tests {
                 .any(|route| { route.family == IpFamily::Ipv4 && route.prefix_length == 24 })
         );
         assert_eq!(observed_tailscale[0].state, TailscaleState::Present);
-        assert!(observed_addresses.limitations.is_empty());
-        assert!(observed_routes.limitations.is_empty());
+        assert!(
+            observed_addresses
+                .limitations
+                .contains(&Limitation::InterfaceAssociationUnavailable)
+        );
+        assert!(
+            observed_routes
+                .limitations
+                .contains(&Limitation::PolicyRoutingIncomplete)
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -852,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_empty_address_and_route_tables_remain_complete() {
+    fn empty_address_tables_remain_complete_and_routes_report_policy_limitations() {
         let root = std::env::temp_dir().join(format!("manyfw-procfs-empty-{}", now_millis()));
         let proc_root = root.join("proc/net");
         let sys_root = root.join("sys/class/net");
@@ -873,8 +919,12 @@ mod tests {
         assert!(!addresses.partial);
         assert!(addresses.limitations.is_empty());
         assert!(routes.records.is_empty());
-        assert!(!routes.partial);
-        assert!(routes.limitations.is_empty());
+        assert!(routes.partial);
+        assert!(
+            routes
+                .limitations
+                .contains(&Limitation::PolicyRoutingIncomplete)
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
