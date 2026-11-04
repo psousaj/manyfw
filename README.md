@@ -2,7 +2,7 @@
 
 **Policy-first firewall coordination for Linux, containers and private networks.**
 
-> **Status: early design / read-only CLI.** The CLI does not collect live Docker or firewall state and does not enforce firewall rules. Never rely on it for network protection.
+> **Status: early design / read-only CLI.** `discover` reads Docker and host network observations, but ManyFW does not inspect firewall state or enforce firewall rules. Never rely on it for network protection.
 
 ManyFW aims to provide one declarative policy model, a comprehensible `explain`/`audit` experience, and safe integration with existing firewall managers. It is **not** intended to overwrite Docker, UFW or firewalld rules.
 
@@ -13,11 +13,16 @@ Rust workspace with a **single CLI binary** (`manyfw`) and a pure core library. 
 ```sh
 cargo run -p manyfw -- check --file examples/manyfw.toml
 cargo run -p manyfw -- plan --file examples/manyfw.toml
+cargo run -p manyfw -- discover --output snapshot.json
 cargo run -p manyfw -- audit --file examples/manyfw.toml --snapshot snapshot.json
 cargo test --workspace
 ```
 
-`plan` currently prints a **policy summary**, not a safe executable kernel ruleset. There is intentionally no `apply` command yet.
+`discover` reads the local Docker Engine through its Unix socket and host network
+sources in the current namespace, then writes a sanitized, versioned snapshot.
+`audit` and `explain` analyze a saved snapshot; neither performs live collection.
+`plan` currently prints a **policy summary**, not a safe executable kernel
+ruleset. There is intentionally no `apply` command yet.
 
 ## Supported build environment
 

@@ -14,10 +14,10 @@ The highest completed roadmap milestone is **v0.1.0**. The workspace remains at
 - [ ] End-to-end observation of Docker publishers and host network state
   - [x] Read-only host interfaces, addresses, listeners, and routes for the current namespace
   - [x] Docker observation DTOs, stable metadata identity, and endpoint normalization
-  - [ ] Concrete read-only Docker API transport and CLI collection path (currently only an injected interface/fake transport)
+  - [x] Concrete read-only Docker API transport and CLI snapshot collection
 - [x] Resolve Docker service identity from explicit/Compose metadata in the observation boundary
 - [x] Explain uncertainty and audit coverage explicitly
-- [x] No privileged firewall writes; CLI audit/explain use supplied snapshots
+- [x] No privileged firewall writes; discovery reads only and audit/explain use snapshots
 
 ## v0.3.0 — Real planner (implementation present; release gate not complete)
 - [x] Backend capability interface and nftables/iptables feasibility checks

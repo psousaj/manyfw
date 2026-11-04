@@ -273,6 +273,12 @@ Implemented commands:
   versioned explanation from the snapshot. Ambiguous and unresolved selectors
   are explicit outcomes; the command performs no live collection and never
   claims external reachability or effective firewall enforcement.
+- `manyfw discover [--output <path|->]` performs read-only collection from the
+  local Docker Engine Unix socket and the current Linux network namespace,
+  composes a sanitized versioned observation snapshot, and writes JSON to the
+  requested file or stdout (`-`). Docker socket, permission, and partial-source
+  failures remain represented in the snapshot; discovery never reads or writes
+  firewall rules.
 
 The CLI must present diagnostic codes and actionable messages. Diagnostic data
 must remain suitable for future JSON output and CI automation.
@@ -294,9 +300,9 @@ stable.
 
 ## Not implemented in this issue
 
-- Docker API or Docker event discovery.
-- Host interface, route, listener, or firewall inspection.
-- Identity or host resolution.
+- Docker event discovery.
+- Firewall-state inspection.
+- Host resource identity resolution beyond observed host records.
 - Runtime expansion of interface globs.
 - ICMP type/code filters.
 - nftables or iptables translation.
