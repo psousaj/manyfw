@@ -51,6 +51,16 @@ it does not validate a different host kernel. nftables, iptables, Docker
 networking, IPv4/IPv6, and Tailscale privileged behavior remain system/VM
 coverage and are not claimed by this workflow.
 
+Pull requests use a reduced fast path with x86_64 GNU and musl builds and
+smoke tests. The complete four-target architecture matrix and five-distribution
+smoke matrix run on `main`, schedule, or manual dispatch; the reduced PR path
+does not imply ARM64 coverage.
+
+Manual dispatches that provide the optional recovery or candidate-gate inputs
+select the specialized issue #24 path and intentionally suppress the normal
+matrix jobs. Run a separate manual dispatch without those inputs when full
+compatibility coverage is required.
+
 ## Release process
 
 1. Ensure CI is green on the intended commit.
