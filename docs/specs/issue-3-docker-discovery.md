@@ -57,6 +57,9 @@ limitations without making security conclusions.
   port, container endpoint and port, protocol, and IP family.
 - Distinguish `ConfiguredPublication`, `ObservedPublishedEndpoint`, and
   `OperationalStatus`. Configured or exposed ports are not active endpoints.
+- Preserve host bindings from Docker `HostConfig.PortBindings` only as configured
+  publication metadata, separately from observed `NetworkSettings.Ports`; retain
+  network-scoped container IPv4/IPv6 addresses on observed endpoints when present.
 - Preserve `bridge`, `host`, `none`, `container:<id>`, custom, and unknown
   network modes without coercion.
 - Preserve unknown publication mechanisms rather than inferring DNAT or proxy
