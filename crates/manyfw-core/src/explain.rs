@@ -381,14 +381,16 @@ pub fn explain(
                             family,
                             destination,
                             prefix_length,
+                            gateway,
                             interface_name,
                             table,
                             metric,
+                            route_type,
                             ..
                         }) => (
                             PathStepKind::Route,
                             format!(
-                                "route {destination}/{prefix_length} ({family:?}) via {interface_name:?} table={table:?} metric={metric:?}"
+                                "route {destination}/{prefix_length} ({family:?}) gateway={gateway:?} via {interface_name:?} table={table:?} metric={metric:?} type={route_type:?}"
                             ),
                         ),
                         None | Some(snapshot::CorrelationNode::DockerEndpoint { .. }) => (
