@@ -1,0 +1,312 @@
+name: Linux compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "examples/**"
+      - "scripts/**"
+      - ".github/workflows/compatibility.yml"
+  workflow_dispatch:
+    inputs:
+      qemu_kernel:
+        description: Path to the trusted guest kernel for the optional #24 recovery run
+        required: false
+        type: string
+      qemu_initrd:
+        description: Path to the trusted guest initrd for the optional #24 recovery run
+        required: false
+        type: string
+      candidate_sha:
+        description: Candidate commit SHA for validating an existing recovery run
+        required: false
+        type: string
+      recovery_run_id:
+        description: Completed recovery run containing the recovery-evidence artifact
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      qemu_kernel:
+        required: true
+        type: string
+      qemu_initrd:
+        required: true
+        type: string
+      candidate_sha:
+        required: false
+        type: string
+      recovery_run_id:
+        required: false
+        type: string
+  schedule:
+    - cron: "23 3 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-inputs:
+    name: validate compatibility inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete specialized input pairs
+        env:
+          QEMU_KERNEL: ${{ inputs.qemu_kernel }}
+          QEMU_INITRD: ${{ inputs.qemu_initrd }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$QEMU_KERNEL" && -z "$QEMU_INITRD" ]] ||
+             [[ -z "$QEMU_KERNEL" && -n "$QEMU_INITRD" ]]; then
+            echo 'qemu_kernel and qemu_initrd must be supplied together' >&2
+            exit 1
+          fi
+          if [[ -n "$CANDIDATE_SHA" && -z "$RECOVERY_RUN_ID" ]] ||
+             [[ -z "$CANDIDATE_SHA" && -n "$RECOVERY_RUN_ID" ]]; then
+            echo 'candidate_sha and recovery_run_id must be supplied together' >&2
+            exit 1
+          fi
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: validate-inputs
+    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Validate compiled binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          status_file="status/$TARGET.txt"
+          status=Failed
+          trap 'mkdir -p status; printf "${status}: build $TARGET\n" > "$status_file"' EXIT
+          binary="target/$TARGET/release/manyfw"
+          test -x "$binary"
+          file "$binary"
+          "$binary" --version
+          "$binary" check --file examples/manyfw.toml
+          mkdir -p dist
+          cp "$binary" "dist/manyfw-$TARGET"
+          (cd dist && sha256sum "manyfw-$TARGET" > "manyfw-$TARGET.sha256")
+          status=Passed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        if: always()
+        with:
+          name: manyfw-${{ matrix.target }}
+          path: |
+            dist/manyfw-${{ matrix.target }}*
+            status/${{ matrix.target }}.txt
+          if-no-files-found: error
+
+  pull-request-build:
+    name: PR build ${{ matrix.target }}
+    needs: validate-inputs
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke test PR binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/manyfw"
+          test -x "$binary"
+          "$binary" --version
+          "$binary" check --file examples/manyfw.toml
+
+  distro-smoke:
+    name: smoke ${{ matrix.distribution }}
+    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    needs: [validate-inputs, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: ubuntu
+            image: ubuntu:24.04
+            artifact: x86_64-unknown-linux-gnu
+          - distribution: debian
+            image: debian:bookworm-slim
+            artifact: x86_64-unknown-linux-gnu
+          - distribution: fedora
+            image: fedora:latest
+            artifact: x86_64-unknown-linux-gnu
+          - distribution: alpine
+            image: alpine:latest
+            artifact: x86_64-unknown-linux-musl
+          - distribution: arch
+            image: archlinux:base
+            artifact: x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: manyfw-${{ matrix.artifact }}
+          path: .
+      - name: Verify checksum and smoke test artifact
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARTIFACT: manyfw-${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          status_file="status/${IMAGE%%:*}.txt"
+          status=Failed
+          trap 'mkdir -p status; printf "${status}: smoke $IMAGE\n" > "$status_file"' EXIT
+          (cd dist && sha256sum -c "$ARTIFACT.sha256")
+          chmod +x "dist/$ARTIFACT"
+          docker run --rm \
+            -v "$PWD/dist/$ARTIFACT:/usr/local/bin/manyfw:ro" \
+            -v "$PWD:/src:ro" \
+            "$IMAGE" /usr/local/bin/manyfw --version
+          docker run --rm \
+            -v "$PWD/dist/$ARTIFACT:/usr/local/bin/manyfw:ro" \
+            -v "$PWD:/src:ro" \
+            "$IMAGE" /usr/local/bin/manyfw check --file /src/examples/manyfw.toml
+          status=Passed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        if: always()
+        with:
+          name: compatibility-status-${{ matrix.distribution }}
+          path: status/*.txt
+          if-no-files-found: error
+
+  integration-contracts:
+    name: integration and recovery contracts
+    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    needs: [validate-inputs, build, distro-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - run: cargo test -p manyfw-core --test recovery_matrix -- --nocapture
+      - run: cargo test -p manyfw --test cli
+      - name: Record integration status
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          mkdir -p status
+          if [[ "$JOB_STATUS" == success ]]; then state=Passed; else state=Failed; fi
+          {
+            printf '%s: read-only recovery fixture contracts\n' "$state"
+            printf 'NotApplicable: destructive firewall mutation and kernel/VM recovery tests (issue #24)\n'
+            printf 'NotApplicable: Docker nftables/iptables integration requiring privileged isolation\n'
+          } > status/integration.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        if: always()
+        with:
+          name: compatibility-status-integration
+          path: status/integration.txt
+          if-no-files-found: error
+
+  privileged-recovery:
+    name: issue #24 privileged recovery evidence
+    needs: validate-inputs
+    if: inputs.qemu_kernel != ''
+    runs-on: [self-hosted, manyfw-qemu]
+    permissions:
+      contents: read
+    env:
+      MANYFW_QEMU_KERNEL: ${{ inputs.qemu_kernel }}
+      MANYFW_QEMU_INITRD: ${{ inputs.qemu_initrd }}
+      MANYFW_RECOVERY_EXPECTED_SHA: ${{ inputs.candidate_sha || github.sha }}
+      MANYFW_RECOVERY_REPORT: recovery-evidence/recovery-status.txt
+      MANYFW_RECOVERY_EVIDENCE_DIR: recovery-evidence/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        # The privileged runner executes only the reviewed default-branch
+        # recovery harness, never workflow code from an arbitrary dispatch ref.
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Run disposable VM recovery matrix
+        shell: bash
+        run: ./scripts/run-qemu-recovery.sh
+      - name: Upload candidate-bound recovery evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        with:
+          name: recovery-evidence
+          path: recovery-evidence
+          if-no-files-found: error
+
+  candidate-gate:
+    name: verify candidate-bound recovery evidence
+    needs: validate-inputs
+    if: inputs.candidate_sha != '' && inputs.recovery_run_id != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          # Use the reviewed default-branch validator; candidate SHA is data only.
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: recovery-evidence
+          path: recovery-evidence
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+      - name: Require every critical scenario to be Passed
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          python3 scripts/validate-recovery-report.py \
+            "$CANDIDATE_SHA" \
+            recovery-evidence/recovery-status.txt \
+            recovery-evidence/evidence

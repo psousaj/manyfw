@@ -1,0 +1,23 @@
+version = 1
+default_action = "deny"
+
+[zones.vpn]
+interfaces = ["tailscale0"]
+
+[[rules]]
+id = "allow-db"
+source = "zone:vpn"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "allow"
+priority = 100
+
+[[rules]]
+id = "deny-db"
+source = "zone:vpn"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "deny"
+priority = 100

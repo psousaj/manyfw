@@ -1,4 +1,5 @@
 version = 1
+default_action = "deny"
 
 [zones.lan]
 interfaces = ["eth0", "enp*"]
@@ -7,10 +8,29 @@ subnets = ["192.168.10.0/24"]
 [zones.tailscale]
 interfaces = ["tailscale0"]
 
-[services.postgres]
-target = "docker:postgres"
-allow = ["tailscale", "lan"]
+[[rules]]
+id = "postgres-tailscale"
+source = "zone:tailscale"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "allow"
+priority = 100
 
-[services.vaultwarden]
-target = "docker:vaultwarden"
-allow = ["tailscale"]
+[[rules]]
+id = "postgres-lan"
+source = "zone:lan"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "allow"
+priority = 100
+
+[[rules]]
+id = "vaultwarden-tailscale"
+source = "zone:tailscale"
+destination = "docker:homelab/vaultwarden"
+ports = [8443]
+protocol = "tcp"
+action = "allow"
+priority = 100

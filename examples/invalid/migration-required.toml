@@ -1,0 +1,9 @@
+version = 1
+default_action = "deny"
+
+[zones.vpn]
+interfaces = ["tailscale0"]
+
+[services.admin]
+target = "docker:homelab/admin"
+allow = ["vpn"]

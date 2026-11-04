@@ -1,6 +1,8 @@
 # Security model
 
-**No privileged enforcement exists in v0.1.0.** The only implemented commands read local TOML and emit diagnostics.
+**No privileged enforcement exists in v0.1.0.** The CLI validates local policy
+and analyzes supplied observation snapshots; it does not collect live Docker or
+firewall state and does not modify firewall rules.
 
 ## Threat boundaries
 
@@ -20,5 +22,9 @@ Privileged implementation must only ship after network namespace/VM integration 
 4. Atomic updates within backend guarantees; no promise of global atomicity across managers.
 5. No unapproved opening of new ingress; reject partial backend support.
 6. Tests for remote SSH, Docker legacy and native nftables, Tailscale changes, IPv6 and concurrent rule modifications.
+
+The recovery matrix is tracked in [`TEST-MATRIX.md`](TEST-MATRIX.md). Local
+fixture coverage may proceed without privileges, but missing VM or privileged
+scenarios remain `NotApplicable` and block enforcement release approval.
 
 Report vulnerabilities privately using GitHub security advisories once enabled; avoid posting exploitable details in public issues.

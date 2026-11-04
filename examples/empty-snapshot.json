@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "collected_at": { "started_at": 1, "finished_at": 2 },
+  "docker": {
+    "collected_at": { "started_at": 1, "finished_at": 2 },
+    "outcome": "Complete",
+    "completeness": "Complete",
+    "containers": [],
+    "diagnostics": [],
+    "provenance": { "source": "fixture", "operation": "empty" },
+    "limitations": []
+  },
+  "host": {
+    "namespace": { "kind": "CurrentNetworkNamespace", "description": "fixture" },
+    "collected_at": { "started_at": 1, "finished_at": 2 },
+    "interfaces": { "records": [], "alternative_records": [], "completeness": "Complete", "outcome": "Complete", "interval": { "started_at": 1, "finished_at": 2 }, "provenance": [], "alternative_provenance": [], "limitations": [] },
+    "addresses": { "records": [], "alternative_records": [], "completeness": "Complete", "outcome": "Complete", "interval": { "started_at": 1, "finished_at": 2 }, "provenance": [], "alternative_provenance": [], "limitations": [] },
+    "listeners": { "records": [], "alternative_records": [], "completeness": "Complete", "outcome": "Complete", "interval": { "started_at": 1, "finished_at": 2 }, "provenance": [], "alternative_provenance": [], "limitations": [] },
+    "routes": { "records": [], "alternative_records": [], "completeness": "Complete", "outcome": "Complete", "interval": { "started_at": 1, "finished_at": 2 }, "provenance": [], "alternative_provenance": [], "limitations": [] },
+    "tailscale": { "records": [], "alternative_records": [], "completeness": "Complete", "outcome": "Complete", "interval": { "started_at": 1, "finished_at": 2 }, "provenance": [], "alternative_provenance": [], "limitations": [] },
+    "diagnostics": []
+  },
+  "correlations": { "version": 1, "edges": [], "limitations": ["NoReachabilityProbe"] },
+  "limitations": ["NoReachabilityProbe"]
+}

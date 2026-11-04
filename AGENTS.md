@@ -60,3 +60,17 @@ Start with [issue #1](https://github.com/psousaj/manyfw/issues/1). Verify the cu
 ## Example handoff prompt
 
 > Implement the next unblocked issue in psousaj/manyfw, starting at #1. Read AGENTS.md and docs/{SECURITY,ARCHITECTURE,SPECIFICATION,ROADMAP}.md first. Create a feature branch and PR, include tests and documentation, and do not modify host firewall rules. Treat unsupported or unknown network reachability as unknown, not safe.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for `psousaj/manyfw`; use the configured GitHub workflow. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical triage labels mapped in `docs/agents/triage-labels.md`. See that file for the state and category vocabulary.
+
+### Domain docs
+
+This is a single-context repository. Read root `CONTEXT.md` and `docs/adr/` when they exist. See `docs/agents/domain.md`.

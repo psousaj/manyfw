@@ -1,0 +1,267 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manyfw-release-main
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: detect version and validate release source
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      should_release: ${{ steps.release.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+      - name: Detect unpublished workspace version
+        id: release
+        shell: bash
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_REF: ${{ github.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$EVENT_REF" == refs/heads/main ]] || {
+            echo "Release workflow must run from main." >&2
+            exit 1
+          }
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Cargo workspace version must be stable X.Y.Z, got: $version" >&2
+            exit 1
+          }
+          tag="v${version}"
+
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          jq -e --arg version "$version" '.packages | all(.[]; .version == $version)' <<<"$metadata" >/dev/null
+
+          remote_main="$(git ls-remote origin refs/heads/main | cut -f1)"
+          [[ "$remote_main" == "$EVENT_SHA" ]] || {
+            echo "This push is no longer the main branch tip; refusing to publish a stale release." >&2
+            exit 1
+          }
+
+          latest_version="$(
+            git ls-remote --tags --refs origin 'refs/tags/v*' \
+              | awk '{ sub("refs/tags/v", "", $2); if ($2 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print $2 }' \
+              | sort -V \
+              | tail -n1
+          )"
+          if [[ -n "$latest_version" && "$version" != "$latest_version" ]]; then
+            newer_version="$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | tail -n1)"
+            [[ "$newer_version" == "$version" ]] || {
+              echo "Cargo version $version is older than the latest release $latest_version." >&2
+              exit 1
+            }
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"
+            tag_sha="$(git rev-parse "${tag}^{commit}")"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release $tag already exists; nothing to publish."
+              should_release=false
+            elif [[ "$tag_sha" == "$EVENT_SHA" ]]; then
+              echo "Tag $tag exists for this commit but the release is missing; resuming publication."
+              should_release=true
+            else
+              echo "Tag $tag already points to a different commit ($tag_sha); refusing to move it." >&2
+              exit 1
+            fi
+          else
+            [[ -z "$latest_version" || "$version" != "$latest_version" ]] || {
+              echo "Release tag $tag is missing from origin; refusing to recreate the latest release implicitly." >&2
+              exit 1
+            }
+            should_release=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: steps.release.outputs.should_release == 'true'
+        run: cargo fmt --all -- --check
+      - if: steps.release.outputs.should_release == 'true'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - if: steps.release.outputs.should_release == 'true'
+        run: cargo test --workspace --locked
+
+  build:
+    name: package ${{ matrix.target }}
+    needs: validate
+    if: needs.validate.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package and smoke test final artifact
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_version="${VERSION#v}"
+          binary="target/$TARGET/release/manyfw"
+          test -x "$binary"
+          test "$("$binary" --version)" = "manyfw $release_version"
+          stage="dist/manyfw-$TARGET-$release_version"
+          mkdir -p "$stage"
+          install -m 0755 "$binary" "$stage/manyfw"
+          install -m 0644 README.md LICENSE "$stage/"
+          tarball="manyfw-$TARGET-$release_version.tar.gz"
+          tar -C "dist/manyfw-$TARGET-$release_version" -czf "$tarball" .
+          sha256sum "$tarball" > "$tarball.sha256"
+          mkdir -p dist/smoke
+          tar -xzf "$tarball" -C dist/smoke
+          test "$(dist/smoke/manyfw --version)" = "manyfw $release_version"
+          dist/smoke/manyfw check --file examples/manyfw.toml
+          sha256sum -c "$tarball.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            manyfw-${{ matrix.target }}-*.tar.gz
+            manyfw-${{ matrix.target }}-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    needs: [validate, build, smoke]
+    if: needs.validate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify every release checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          checksums=(dist/*.sha256)
+          test "${#checksums[@]}" -eq 4
+          for checksum in "${checksums[@]}"; do
+            (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+      - name: Extract every release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tarball in dist/*.tar.gz; do
+            dir="$(mktemp -d)"
+            tar -xzf "$tarball" -C "$dir"
+            test -x "$dir/manyfw"
+            rm -rf "$dir"
+          done
+      - name: Create version tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
+            git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            tag_sha="$(git rev-parse "${TAG}^{commit}")"
+            test "$tag_sha" = "$GITHUB_SHA" || {
+              echo "Tag $TAG points to a different commit ($tag_sha); refusing to move it." >&2
+              exit 1
+            }
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "ManyFW $TAG" "$GITHUB_SHA"
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "ManyFW $TAG" --generate-notes
+          fi
+
+  smoke:
+    name: smoke packaged ${{ matrix.target }}
+    needs: [validate, build]
+    if: needs.validate.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist
+      - name: Smoke test packaged artifact
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_version="${VERSION#v}"
+          tarball="dist/manyfw-$TARGET-$release_version.tar.gz"
+          checksum="dist/manyfw-$TARGET-$release_version.tar.gz.sha256"
+          (cd dist && sha256sum -c "$(basename "$checksum")")
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+          tar -xzf "$tarball" -C "$dir"
+          test "$("$dir/manyfw" --version)" = "manyfw $release_version"
+          "$dir/manyfw" check --file examples/manyfw.toml
