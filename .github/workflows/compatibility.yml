@@ -54,8 +54,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate-inputs:
+    name: validate compatibility inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete specialized input pairs
+        env:
+          QEMU_KERNEL: ${{ inputs.qemu_kernel }}
+          QEMU_INITRD: ${{ inputs.qemu_initrd }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$QEMU_KERNEL" && -z "$QEMU_INITRD" ]] ||
+             [[ -z "$QEMU_KERNEL" && -n "$QEMU_INITRD" ]]; then
+            echo 'qemu_kernel and qemu_initrd must be supplied together' >&2
+            exit 1
+          fi
+          if [[ -n "$CANDIDATE_SHA" && -z "$RECOVERY_RUN_ID" ]] ||
+             [[ -z "$CANDIDATE_SHA" && -n "$RECOVERY_RUN_ID" ]]; then
+            echo 'candidate_sha and recovery_run_id must be supplied together' >&2
+            exit 1
+          fi
+
   build:
     name: build ${{ matrix.target }}
+    needs: validate-inputs
     if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     strategy:
       fail-fast: false
@@ -109,6 +133,7 @@ jobs:
 
   pull-request-build:
     name: PR build ${{ matrix.target }}
+    needs: validate-inputs
     if: github.event_name == 'pull_request'
     strategy:
       fail-fast: false
@@ -141,7 +166,7 @@ jobs:
   distro-smoke:
     name: smoke ${{ matrix.distribution }}
     if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
-    needs: build
+    needs: [validate-inputs, build]
     strategy:
       fail-fast: false
       matrix:
@@ -199,7 +224,7 @@ jobs:
   integration-contracts:
     name: integration and recovery contracts
     if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
-    needs: [build, distro-smoke]
+    needs: [validate-inputs, build, distro-smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -228,6 +253,7 @@ jobs:
 
   privileged-recovery:
     name: issue #24 privileged recovery evidence
+    needs: validate-inputs
     if: inputs.qemu_kernel != ''
     runs-on: [self-hosted, manyfw-qemu]
     permissions:
@@ -257,6 +283,7 @@ jobs:
 
   candidate-gate:
     name: verify candidate-bound recovery evidence
+    needs: validate-inputs
     if: inputs.candidate_sha != '' && inputs.recovery_run_id != ''
     runs-on: ubuntu-latest
     permissions:

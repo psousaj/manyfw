@@ -12,6 +12,9 @@ on:
       - "scripts/**"
       - "docs/**"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/compatibility.yml"
+      - ".github/workflows/release.yml"
+      - ".github/actionlint.yaml"
   workflow_dispatch:
 
 env:
