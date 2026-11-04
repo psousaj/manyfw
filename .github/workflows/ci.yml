@@ -2,10 +2,27 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "examples/**"
+      - "docs/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
@@ -14,35 +31,78 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["1.85.0", stable]
+        include:
+          - toolchain: 1.85.0
+            channel: 1.85.0
+          - toolchain: stable
+            channel: stable
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: ${{ matrix.channel }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - run: cargo build --workspace
+      - run: cargo test --workspace --doc
+      - run: cargo build --workspace --locked
       - run: cargo run -p manyfw -- check --file examples/manyfw.toml
-      - name: Reject invalid fixtures
+      - name: Reject invalid policy fixtures
         shell: bash
         run: |
           set -euo pipefail
           for fixture in examples/invalid/*.toml; do
             if cargo run -p manyfw -- check --file "$fixture"; then
-              echo "expected validation failure for $fixture"
+              echo "expected validation failure for $fixture" >&2
               exit 1
             fi
           done
 
-  dependency-audit:
-    name: Dependency audit
+  unit:
+    name: unit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --lib
+
+  fixtures:
+    name: fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - run: cargo test -p manyfw-core --test recovery_matrix -- --nocapture
+      - run: cargo test -p manyfw --test cli
+      - name: Reject invalid policy fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          for fixture in examples/invalid/*.toml; do
+            if cargo run -p manyfw -- check --file "$fixture"; then
+              echo "expected validation failure for $fixture" >&2
+              exit 1
+            fi
+          done
+      - name: Validate warning fixtures remain non-fatal
+        run: cargo run -p manyfw -- check --file examples/warnings/broad-ports.toml
+
+  dependency-audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - run: cargo install cargo-audit --locked --version 0.21.2
+      - run: cargo audit
