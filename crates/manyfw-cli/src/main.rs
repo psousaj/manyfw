@@ -39,21 +39,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Check { file } | Command::Plan { file } => file,
     };
     let input = std::fs::read_to_string(file)?;
-    let config = manyfw_core::parse_and_validate(&input)?;
+    let report = manyfw_core::parse_and_normalize(&input)?;
+    let policy = report.policy;
     match cli.command {
         Command::Check { .. } => println!(
-            "Valid schema v{}: {} zones, {} services",
-            config.version,
-            config.zones.len(),
-            config.services.len()
+            "Valid schema v{}: {} zones, {} rules",
+            policy.version,
+            policy.zones.len(),
+            policy.rules.len()
         ),
         Command::Plan { .. } => {
             println!("PREVIEW ONLY — not a kernel firewall plan; no rules will be applied");
-            for (name, service) in config.services {
+            for rule in policy.rules {
                 println!(
-                    "service {name} ({}) <- {}",
-                    service.target,
-                    service.allow.join(", ")
+                    "rule {}: {:?} -> {:?} {:?} {:?}",
+                    rule.id, rule.source, rule.destination, rule.protocol, rule.action
                 );
             }
         }

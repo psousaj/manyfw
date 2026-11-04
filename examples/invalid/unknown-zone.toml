@@ -1,5 +1,11 @@
 version = 1
+default_action = "deny"
 
-[services.postgres]
-target = "docker:postgres"
-allow = ["missing-zone"]
+[[rules]]
+id = "bad-zone"
+source = "zone:missing-zone"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "allow"
+priority = 100
