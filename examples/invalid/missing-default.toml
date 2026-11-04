@@ -1,0 +1,4 @@
+version = 1
+
+[zones.vpn]
+interfaces = ["tailscale0"]

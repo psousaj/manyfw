@@ -57,8 +57,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             print_diagnostics(&diagnostics);
             for rule in policy.rules {
                 println!(
-                    "rule {}: {:?} -> {:?} {:?} {:?}",
-                    rule.id, rule.source, rule.destination, rule.protocol, rule.action
+                    "rule {}: priority={} {:?} -> {:?} {:?} ports={:?} action={:?}",
+                    rule.id,
+                    rule.priority,
+                    rule.source,
+                    rule.destination,
+                    rule.protocol,
+                    rule.ports,
+                    rule.action
                 );
             }
         }

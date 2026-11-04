@@ -1,0 +1,14 @@
+version = 1
+default_action = "deny"
+
+[zones.vpn]
+interfaces = ["tailscale0"]
+
+[[rules]]
+id = "admin-vpn"
+source = "zone:vpn"
+destination = "docker:homelab/admin"
+port_scope = "any"
+protocol = "tcp"
+action = "allow"
+priority = 100
