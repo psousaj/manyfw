@@ -1,6 +1,6 @@
 # CI/CD and compatibility policy
 
-ManyFW is Linux-specific. The CI/CD surface intentionally has four
+ManyFW is Linux-specific. The CI/CD surface intentionally has three
 workflows:
 
 | Workflow | Responsibility | Fast PR path? |
@@ -8,13 +8,12 @@ workflows:
 | `ci.yml` | fmt, clippy, workspace tests, docs, fixtures, dependency audit | Yes |
 | `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro and binary smoke tests | Main, scheduled, manual, relevant PRs |
 | `release.yml` | Tagged release packaging, checksums, final smoke tests, GitHub Release | Tags only |
-| `enforcement-gate.yml` | Candidate-SHA-bound privileged recovery evidence | Explicit gate only |
 
-The optional issue #24 recovery invocation is consolidated into
-`compatibility.yml` rather than maintained as a fourth workflow. A normal
-compatibility run never needs a self-hosted runner; the privileged path is
-selected only when trusted kernel/initrd inputs are supplied and uses the
-dedicated `manyfw-qemu` label.
+The optional issue #24 recovery and candidate-evidence gate are consolidated
+into `compatibility.yml` rather than maintained as additional workflows. A
+normal compatibility run never needs a self-hosted runner; the privileged path
+is selected only when trusted kernel/initrd/controller inputs are supplied and
+uses the dedicated `manyfw-qemu` label.
 
 ## Evidence vocabulary
 
@@ -70,7 +69,7 @@ pre-provisioned guest artifacts, an external controller, and disposable VM
 teardown; it is not a claim that the current GitHub runner is isolated. An
 enforcement release would require a candidate-SHA-bound report with every
 critical scenario `Passed`; `Skipped` and `NotApplicable` are blockers. The
-reusable `enforcement-gate.yml` workflow verifies that binding from the
+ optional candidate-gate job verifies that binding from the
 candidate SHA and recovery run artifact. It is deliberately not called by the
 read-only `release.yml`; that release cannot enable enforcement.
 
@@ -98,6 +97,6 @@ The repository contains policy parsing, discovery, audit, explanation, planning,
 backend capability, and transaction components from the staged roadmap. The
 conventional CI workflows exercise the read-only and fixture paths together;
 they do not present the privileged transaction paths as host or VM enforcement
-validation. The privileged evidence contract is isolated in the explicit gate,
-and remains unavailable until its external controller and runner isolation are
-reviewed.
+validation. The privileged evidence contract is isolated behind explicit
+compatibility inputs and remains unavailable until its external controller and
+runner isolation are reviewed.
