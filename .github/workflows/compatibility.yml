@@ -10,6 +10,7 @@ on:
       - "crates/**"
       - "examples/**"
       - "scripts/**"
+      - "tests/**"
       - ".github/workflows/compatibility.yml"
   workflow_dispatch:
     inputs:
@@ -162,6 +163,21 @@ jobs:
           test -x "$binary"
           "$binary" --version
           "$binary" check --file examples/manyfw.toml
+
+  host-namespace-smoke:
+    name: read-only host discovery in a disposable namespace
+    needs: validate-inputs
+    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Cache a test-only userspace image
+        run: docker pull debian:bookworm-slim
+      - name: Run read-only namespace discovery test
+        env:
+          MANYFW_HOST_TEST_IMAGE: debian:bookworm-slim
+        run: bash tests/host_namespace.sh
 
   distro-smoke:
     name: smoke ${{ matrix.distribution }}

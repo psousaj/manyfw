@@ -1,16 +1,9 @@
-//! Read-only host network discovery contracts.
-//!
-//! This module contains read-only source boundaries. The Linux implementation
-//! below reads structured `/sys` and `/proc` files directly; it never invokes
-//! `ip`, `ss`, `route`, `netstat`, a shell, or an external API.
+//! Read-only host network discovery contracts and deterministic evidence
+//! normalization. Concrete Linux I/O lives in the `manyfw-linux` adapter crate.
 
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionInterval {
@@ -226,10 +219,13 @@ pub enum TailscaleState {
     PartiallyObservable,
 }
 
+/// A read-only source result with explicit provenance and coverage limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceData<T> {
     pub records: Vec<T>,
     pub alternative_records: Vec<T>,
+    /// Source-specific reasons for partial or otherwise qualified data.
+    pub limitations: Vec<Limitation>,
     pub interval: CollectionInterval,
     pub provenance: Provenance,
     pub alternative_provenance: Vec<Provenance>,
@@ -272,6 +268,10 @@ pub enum HostSourceError {
     Malformed(String),
     Interrupted,
     Other(String),
+    SourcesFailed {
+        primary_limitation: Limitation,
+        fallback: Box<HostSourceError>,
+    },
 }
 
 pub struct HostSources {
@@ -510,480 +510,6 @@ impl HostDiscovery {
         result.diagnostics.dedup();
         result
     }
-
-    /// Construct discovery backed by the read-only Linux `/sys` and `/proc`
-    /// sources for this process' network namespace.
-    #[cfg(target_os = "linux")]
-    pub fn linux() -> Self {
-        Self::new(LinuxHostSources::new(), SystemClock)
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub struct LinuxHostSources {
-    sys_class_net: PathBuf,
-    proc_net: PathBuf,
-}
-
-#[cfg(target_os = "linux")]
-impl Default for LinuxHostSources {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl LinuxHostSources {
-    pub fn new() -> Self {
-        Self {
-            sys_class_net: PathBuf::from("/sys/class/net"),
-            proc_net: PathBuf::from("/proc/net"),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl From<LinuxHostSources> for HostSources {
-    fn from(value: LinuxHostSources) -> Self {
-        Self {
-            interfaces: Arc::new(LinuxInterfaceSource {
-                root: value.sys_class_net.clone(),
-            }),
-            addresses: Arc::new(LinuxAddressSource {
-                ipv6_path: value.proc_net.join("if_inet6"),
-                ipv4_path: value.proc_net.join("fib_trie"),
-            }),
-            listeners: Arc::new(LinuxListenerSource {
-                root: value.proc_net.clone(),
-            }),
-            routes: Arc::new(LinuxRouteSource {
-                path: value.proc_net.join("route"),
-                ipv6_path: value.proc_net.join("ipv6_route"),
-                sys_root: value.sys_class_net.clone(),
-            }),
-            tailscale: Arc::new(LinuxTailscaleSource {
-                root: value.sys_class_net,
-            }),
-            namespace: Arc::new(CurrentNamespace),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub struct SystemClock;
-
-#[cfg(target_os = "linux")]
-impl Clock for SystemClock {
-    fn now(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_data<T>(records: Vec<T>, source: &str, operation: &str) -> SourceData<T> {
-    linux_data_with_partial(records, source, operation, false)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_data_with_partial<T>(
-    records: Vec<T>,
-    source: &str,
-    operation: &str,
-    partial: bool,
-) -> SourceData<T> {
-    let now = SystemClock.now();
-    SourceData {
-        records,
-        alternative_records: Vec::new(),
-        interval: CollectionInterval {
-            started_at: now,
-            finished_at: now,
-        },
-        provenance: Provenance {
-            source: source.into(),
-            operation: operation.into(),
-        },
-        alternative_provenance: Vec::new(),
-        divergent: false,
-        partial,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn read_linux(path: &Path) -> Result<String, HostSourceError> {
-    fs::read_to_string(path).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => HostSourceError::Unavailable,
-        io::ErrorKind::PermissionDenied => HostSourceError::PermissionDenied,
-        io::ErrorKind::Interrupted => HostSourceError::Interrupted,
-        _ => HostSourceError::Other(format!("{}: {e}", path.display())),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn parse_u32(value: &str, what: &str) -> Result<u32, HostSourceError> {
-    value
-        .trim()
-        .parse()
-        .map_err(|_| HostSourceError::Malformed(what.into()))
-}
-
-#[cfg(target_os = "linux")]
-fn state(value: &str) -> InterfaceState {
-    match value.trim() {
-        "up" => InterfaceState::Up,
-        "down" => InterfaceState::Down,
-        _ => InterfaceState::Unknown,
-    }
-}
-
-#[cfg(target_os = "linux")]
-struct LinuxInterfaceSource {
-    root: PathBuf,
-}
-#[cfg(target_os = "linux")]
-impl InterfaceSource for LinuxInterfaceSource {
-    fn interfaces(&self) -> Result<SourceData<NetworkInterface>, HostSourceError> {
-        let entries = fs::read_dir(&self.root).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => HostSourceError::Unavailable,
-            io::ErrorKind::PermissionDenied => HostSourceError::PermissionDenied,
-            _ => HostSourceError::Other(e.to_string()),
-        })?;
-        let mut records = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| HostSourceError::Other(e.to_string()))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let dir = entry.path();
-            let index = parse_u32(
-                &read_linux(&dir.join("ifindex"))?,
-                "invalid interface index",
-            )?;
-            let flags = read_linux(&dir.join("flags"))
-                .ok()
-                .and_then(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok());
-            records.push(NetworkInterface {
-                index,
-                name,
-                administrative_state: flags.map_or(InterfaceState::Unknown, |v| {
-                    if v & 1 != 0 {
-                        InterfaceState::Up
-                    } else {
-                        InterfaceState::Down
-                    }
-                }),
-                operational_state: state(&read_linux(&dir.join("operstate")).unwrap_or_default()),
-            });
-        }
-        Ok(linux_data_with_partial(
-            records,
-            "sysfs",
-            "read /sys/class/net (netlink unavailable)",
-            true,
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-struct LinuxAddressSource {
-    ipv6_path: PathBuf,
-    ipv4_path: PathBuf,
-}
-#[cfg(target_os = "linux")]
-impl AddressSource for LinuxAddressSource {
-    fn addresses(&self) -> Result<SourceData<InterfaceAddress>, HostSourceError> {
-        let text = read_linux(&self.ipv6_path)?;
-        let mut records = Vec::new();
-        for line in text.lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() != 6 || fields[0].len() != 32 {
-                continue;
-            }
-            let Ok(bytes) = (0..16)
-                .map(|i| u8::from_str_radix(&fields[0][i * 2..i * 2 + 2], 16))
-                .collect::<Result<Vec<_>, _>>()
-            else {
-                continue;
-            };
-            let Ok(bytes) = <[u8; 16]>::try_from(bytes) else {
-                continue;
-            };
-            let address = IpAddr::V6(Ipv6Addr::from(bytes));
-            let Ok(index) = u32::from_str_radix(fields[1], 16) else {
-                continue;
-            };
-            let name = fields[5].to_string();
-            let scope = match fields[3] {
-                "0000" => AddressScope::Global,
-                "0020" => AddressScope::Link,
-                "0010" => AddressScope::Host,
-                _ => AddressScope::Unknown,
-            };
-            records.push(InterfaceAddress {
-                interface_index: Some(index),
-                interface_name: Some(name),
-                address,
-                prefix_length: match u8::from_str_radix(fields[2], 16) {
-                    Ok(prefix) => Some(prefix),
-                    Err(_) => {
-                        continue;
-                    }
-                },
-                scope,
-            });
-        }
-        if let Ok(ipv4_text) = read_linux(&self.ipv4_path) {
-            let mut pending = None;
-            for line in ipv4_text.lines() {
-                let token = line.trim().strip_prefix("|-- ");
-                if let Some(token) = token {
-                    pending = token.parse::<Ipv4Addr>().ok();
-                } else if line.contains("/32 host LOCAL") {
-                    if let Some(address) = pending.take() {
-                        records.push(InterfaceAddress {
-                            interface_index: None,
-                            interface_name: None,
-                            address: IpAddr::V4(address),
-                            prefix_length: None,
-                            scope: if address.is_loopback() {
-                                AddressScope::Host
-                            } else {
-                                AddressScope::Unknown
-                            },
-                        });
-                    }
-                }
-            }
-        }
-        Ok(linux_data_with_partial(
-            records,
-            "procfs",
-            "read /proc/net/if_inet6 and fib_trie",
-            true,
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-struct LinuxRouteSource {
-    path: PathBuf,
-    ipv6_path: PathBuf,
-    sys_root: PathBuf,
-}
-#[cfg(target_os = "linux")]
-impl RouteSource for LinuxRouteSource {
-    fn routes(&self) -> Result<SourceData<NetworkRoute>, HostSourceError> {
-        let text = read_linux(&self.path)?;
-        let mut records = Vec::new();
-        for line in text.lines().skip(1) {
-            let f: Vec<_> = line.split_whitespace().collect();
-            if f.len() < 8 {
-                continue;
-            }
-            let (Ok(destination_raw), Ok(gateway_raw), Ok(mask)) = (
-                u32::from_str_radix(f[1], 16),
-                u32::from_str_radix(f[2], 16),
-                u32::from_str_radix(f[7], 16),
-            ) else {
-                continue;
-            };
-            let destination = Ipv4Addr::from(destination_raw.to_le_bytes());
-            let name = f[0].to_string();
-            let index = fs::read_to_string(self.sys_root.join(&name).join("ifindex"))
-                .ok()
-                .and_then(|v| v.trim().parse().ok());
-            records.push(NetworkRoute {
-                family: IpFamily::Ipv4,
-                destination: IpAddr::V4(destination),
-                prefix_length: mask.count_ones() as u8,
-                gateway: (gateway_raw != 0)
-                    .then(|| IpAddr::V4(Ipv4Addr::from(gateway_raw.to_le_bytes()))),
-                interface_index: index,
-                interface_name: Some(name),
-                table: None,
-                metric: f[6].parse().ok(),
-                route_type: RouteType::Other,
-            });
-        }
-        if let Ok(ipv6_text) = read_linux(&self.ipv6_path) {
-            for line in ipv6_text.lines() {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                if fields.len() < 10 {
-                    continue;
-                }
-                let (Ok(destination), Ok(gateway), Ok(prefix)) = (
-                    parse_proc_ipv6(fields[0]),
-                    parse_proc_ipv6(fields[4]),
-                    u8::from_str_radix(fields[1], 16),
-                ) else {
-                    continue;
-                };
-                let destination = IpAddr::V6(destination);
-                let interface_name = fields[9].to_string();
-                let interface_index =
-                    fs::read_to_string(self.sys_root.join(&interface_name).join("ifindex"))
-                        .ok()
-                        .and_then(|v| v.trim().parse().ok());
-                records.push(NetworkRoute {
-                    family: IpFamily::Ipv6,
-                    destination,
-                    prefix_length: prefix,
-                    gateway: (!gateway.is_unspecified()).then_some(IpAddr::V6(gateway)),
-                    interface_index,
-                    interface_name: Some(interface_name),
-                    table: None,
-                    metric: u32::from_str_radix(fields[5], 16).ok(),
-                    route_type: RouteType::Other,
-                });
-            }
-        }
-        Ok(linux_data_with_partial(
-            records,
-            "procfs",
-            "read /proc/net/route and ipv6_route",
-            true,
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-struct LinuxListenerSource {
-    root: PathBuf,
-}
-#[cfg(target_os = "linux")]
-impl ListenerSource for LinuxListenerSource {
-    fn listeners(&self) -> Result<SourceData<SocketListener>, HostSourceError> {
-        let mut records = Vec::new();
-        let mut partial = false;
-        for (file, protocol, ipv6, listen_only) in [
-            ("tcp", TransportProtocol::Tcp, false, true),
-            ("tcp6", TransportProtocol::Tcp, true, true),
-            ("udp", TransportProtocol::Udp, false, false),
-            ("udp6", TransportProtocol::Udp, true, false),
-        ] {
-            let path = self.root.join(file);
-            let text = match read_linux(&path) {
-                Ok(v) => v,
-                Err(HostSourceError::Unavailable) => {
-                    partial = true;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
-            for line in text.lines().skip(1) {
-                let f: Vec<_> = line.split_whitespace().collect();
-                if f.len() < 4 {
-                    partial = true;
-                    continue;
-                }
-                if listen_only && f[3] != "0A" {
-                    continue;
-                }
-                let Some((raw_addr, raw_port)) = f[1].split_once(':') else {
-                    partial = true;
-                    continue;
-                };
-                let Ok(port) = u16::from_str_radix(raw_port, 16) else {
-                    partial = true;
-                    continue;
-                };
-                let address = if ipv6 {
-                    let Ok(address) = parse_proc_ipv6(raw_addr) else {
-                        partial = true;
-                        continue;
-                    };
-                    IpAddr::V6(address)
-                } else {
-                    let Ok(address) = u32::from_str_radix(raw_addr, 16) else {
-                        partial = true;
-                        continue;
-                    };
-                    IpAddr::V4(Ipv4Addr::from(address.to_le_bytes()))
-                };
-                records.push(SocketListener {
-                    protocol,
-                    family: if ipv6 { IpFamily::Ipv6 } else { IpFamily::Ipv4 },
-                    wildcard: address.is_unspecified(),
-                    address,
-                    port,
-                    interface_index: None,
-                    interface_name: None,
-                    owner: SocketOwner::Unknown,
-                });
-            }
-        }
-        Ok(linux_data_with_partial(
-            records,
-            "procfs",
-            "read /proc/net/tcp* and udp*",
-            partial,
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_proc_ipv6(value: &str) -> Result<Ipv6Addr, HostSourceError> {
-    if value.len() != 32 {
-        return Err(HostSourceError::Malformed(
-            "invalid IPv6 socket address".into(),
-        ));
-    }
-    let mut bytes = [0u8; 16];
-    for word in 0..4 {
-        let n = u32::from_str_radix(&value[word * 8..word * 8 + 8], 16)
-            .map_err(|_| HostSourceError::Malformed("invalid IPv6 socket address".into()))?;
-        bytes[word * 4..word * 4 + 4].copy_from_slice(&n.to_le_bytes());
-    }
-    Ok(Ipv6Addr::from(bytes))
-}
-
-#[cfg(target_os = "linux")]
-struct LinuxTailscaleSource {
-    root: PathBuf,
-}
-#[cfg(target_os = "linux")]
-impl TailscaleSource for LinuxTailscaleSource {
-    fn tailscale(&self) -> Result<SourceData<TailscaleObservation>, HostSourceError> {
-        let path = self.root.join("tailscale0");
-        match fs::metadata(&path) {
-            Ok(_) => {
-                let index = fs::read_to_string(path.join("ifindex"))
-                    .ok()
-                    .and_then(|v| v.trim().parse().ok());
-                let state = if index.is_some() {
-                    TailscaleState::Present
-                } else {
-                    TailscaleState::PartiallyObservable
-                };
-                Ok(linux_data_with_partial(
-                    vec![TailscaleObservation {
-                        state,
-                        interface_index: index,
-                        interface_name: Some("tailscale0".into()),
-                        addresses: Vec::new(),
-                    }],
-                    "sysfs",
-                    "detect /sys/class/net/tailscale0",
-                    index.is_none(),
-                ))
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(linux_data(
-                vec![TailscaleObservation {
-                    state: TailscaleState::Absent,
-                    interface_index: None,
-                    interface_name: None,
-                    addresses: Vec::new(),
-                }],
-                "sysfs",
-                "detect /sys/class/net/tailscale0",
-            )),
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                Err(HostSourceError::PermissionDenied)
-            }
-            Err(e) => Err(HostSourceError::Other(e.to_string())),
-        }
-    }
 }
 
 fn mark_temporal<T>(dimension: &mut DimensionObservation<T>) {
@@ -1113,6 +639,18 @@ where
                 });
             }
             let partial = source.partial;
+            let mut limitations = source.limitations;
+            if source.divergent {
+                limitations.extend([
+                    Limitation::InconsistentSnapshot,
+                    Limitation::SourceDivergence,
+                ]);
+            } else if partial {
+                if limitations.is_empty() {
+                    limitations.push(unavailable_limitation);
+                }
+                limitations.push(Limitation::UnsupportedDimension);
+            }
             DimensionObservation {
                 records: source.records,
                 alternative_records: source.alternative_records,
@@ -1131,16 +669,7 @@ where
                 interval,
                 provenance: vec![source.provenance],
                 alternative_provenance: source.alternative_provenance,
-                limitations: if source.divergent {
-                    vec![
-                        Limitation::InconsistentSnapshot,
-                        Limitation::SourceDivergence,
-                    ]
-                } else if partial {
-                    vec![unavailable_limitation, Limitation::UnsupportedDimension]
-                } else {
-                    Vec::new()
-                },
+                limitations,
             }
         }
         Err(error) => {
@@ -1196,6 +725,13 @@ fn error_kind(
             Limitation::CollectionInterrupted,
         ),
         HostSourceError::Other(_) => (CollectionOutcome::Partial, unavailable_limitation),
+        HostSourceError::SourcesFailed {
+            primary_limitation,
+            fallback,
+        } => {
+            let (outcome, _) = error_kind(fallback, unavailable_limitation);
+            (outcome, primary_limitation.clone())
+        }
     }
 }
 fn source_name(dimension: Dimension, error: &HostSourceError) -> String {
@@ -1209,6 +745,7 @@ fn source_name(dimension: Dimension, error: &HostSourceError) -> String {
         HostSourceError::PermissionDenied => format!("{source}-permission"),
         HostSourceError::Malformed(_) => format!("{source}-parser"),
         HostSourceError::Interrupted => source.into(),
+        HostSourceError::SourcesFailed { .. } => source.into(),
     }
 }
 fn error_message(error: &HostSourceError) -> String {
@@ -1218,6 +755,7 @@ fn error_message(error: &HostSourceError) -> String {
         HostSourceError::Malformed(value) => format!("malformed source ({value})"),
         HostSourceError::Interrupted => "interrupted".into(),
         HostSourceError::Other(value) => value.clone(),
+        HostSourceError::SourcesFailed { fallback, .. } => error_message(fallback),
     }
 }
 fn sanitize(value: &str) -> String {
@@ -1296,14 +834,6 @@ fn protocol(value: TransportProtocol) -> u8 {
     }
 }
 
-#[allow(dead_code)]
-fn _address_examples() -> (IpAddr, IpAddr) {
-    (
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1335,6 +865,7 @@ mod tests {
         Ok(SourceData {
             records,
             alternative_records: Vec::new(),
+            limitations: Vec::new(),
             interval: CollectionInterval {
                 started_at: 10,
                 finished_at: 10,
@@ -1467,44 +998,26 @@ mod tests {
         assert_eq!(result.alternative_provenance[0].source, "second-reader");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn linux_constructor_uses_structured_current_namespace_sources() {
-        let result = HostDiscovery::linux().collect();
-        assert_eq!(
-            result.namespace.kind,
-            NamespaceKind::CurrentNetworkNamespace
+    fn partial_source_uses_its_specific_limitations_instead_of_a_generic_fallback() {
+        let mut source = data(vec![1u32]).unwrap();
+        source.partial = true;
+        source.limitations = vec![Limitation::NetlinkUnavailable];
+        let result = collect_dimension(
+            Dimension::Interfaces,
+            Ok(source),
+            10,
+            &mut Vec::new(),
+            |values: &mut Vec<u32>| values.sort(),
+            Limitation::ProcfsUnavailable,
         );
+        assert!(result.limitations.contains(&Limitation::NetlinkUnavailable));
         assert!(
             result
-                .interfaces
-                .provenance
-                .iter()
-                .any(|p| p.source == "sysfs"),
-            "{:?}",
-            result.interfaces
+                .limitations
+                .contains(&Limitation::UnsupportedDimension)
         );
-        assert!(
-            result
-                .addresses
-                .provenance
-                .iter()
-                .any(|p| p.source == "procfs")
-        );
-        assert!(
-            result
-                .listeners
-                .provenance
-                .iter()
-                .any(|p| p.source == "procfs")
-        );
-        assert!(
-            result
-                .routes
-                .provenance
-                .iter()
-                .any(|p| p.source == "procfs")
-        );
+        assert!(!result.limitations.contains(&Limitation::ProcfsUnavailable));
     }
 
     #[test]
@@ -1653,131 +1166,5 @@ mod tests {
                 .any(|diagnostic| diagnostic.dimension == Dimension::Tailscale
                     && diagnostic.code == DiagnosticCode::SourceDivergence)
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_fixture_preserves_ipv4_ipv6_wildcards_loopback_transports_and_routes() {
-        use std::fs::{create_dir_all, remove_dir_all, write};
-
-        let root = std::env::temp_dir().join(format!(
-            "manyfw-host-fixture-{}-{}",
-            std::process::id(),
-            SystemClock.now()
-        ));
-        let sys = root.join("sys/class/net");
-        let proc_net = root.join("proc/net");
-        create_dir_all(sys.join("lo")).unwrap();
-        create_dir_all(sys.join("eth0")).unwrap();
-        create_dir_all(&proc_net).unwrap();
-        write(sys.join("lo/ifindex"), "1\n").unwrap();
-        write(sys.join("lo/flags"), "0x1\n").unwrap();
-        write(sys.join("lo/operstate"), "unknown\n").unwrap();
-        write(sys.join("eth0/ifindex"), "2\n").unwrap();
-        write(sys.join("eth0/flags"), "0x1\n").unwrap();
-        write(sys.join("eth0/operstate"), "up\n").unwrap();
-        write(
-            proc_net.join("if_inet6"),
-            "00000000000000000000000000000001 01 0080 0010 80 lo\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("fib_trie"),
-            "Main:\n |-- 127.0.0.0\n    |-- 127.0.0.1\n       /32 host LOCAL\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("tcp"),
-            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000:01BB 00000000:0000 0A 0 0 0 0 0 0\n 1: 0100007F:1F90 00000000:0000 0A 0 0 0 0 0 0\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("tcp6"),
-            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("udp"),
-            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000:0035 00000000:0000 07 0 0 0 0 0 0\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("udp6"),
-            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt\n 0: 00000000000000000000000000000001:0035 00000000000000000000000000000000:0000 07 0 0 0 0 0 0\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("route"),
-            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\neth0 00000000 0101A8C0 0003 0 0 10 00000000 1500 0 0\n",
-        )
-        .unwrap();
-        write(
-            proc_net.join("ipv6_route"),
-            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 0000000 0 0 1 lo\n",
-        )
-        .unwrap();
-
-        let sources = LinuxHostSources {
-            sys_class_net: root.join("sys/class/net"),
-            proc_net: root.join("proc/net"),
-        };
-        let result = HostDiscovery::new(sources, Time).collect();
-        assert!(
-            result
-                .addresses
-                .records
-                .iter()
-                .any(|value| value.address == "127.0.0.1".parse::<IpAddr>().unwrap())
-        );
-        assert!(
-            result
-                .addresses
-                .records
-                .iter()
-                .any(|value| value.address == "::1".parse::<IpAddr>().unwrap())
-        );
-        assert!(
-            result
-                .listeners
-                .records
-                .iter()
-                .any(|value| value.wildcard && value.family == IpFamily::Ipv4)
-        );
-        assert!(
-            result
-                .listeners
-                .records
-                .iter()
-                .any(|value| value.wildcard && value.family == IpFamily::Ipv6)
-        );
-        assert!(
-            result
-                .listeners
-                .records
-                .iter()
-                .any(|value| value.protocol == TransportProtocol::Tcp && value.port == 8080)
-        );
-        assert!(
-            result
-                .listeners
-                .records
-                .iter()
-                .any(|value| value.protocol == TransportProtocol::Udp && value.port == 53)
-        );
-        assert!(
-            result
-                .routes
-                .records
-                .iter()
-                .any(|value| value.family == IpFamily::Ipv4)
-        );
-        assert!(
-            result
-                .routes
-                .records
-                .iter()
-                .any(|value| value.family == IpFamily::Ipv6)
-        );
-        remove_dir_all(root).unwrap();
     }
 }

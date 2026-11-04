@@ -9,5 +9,6 @@ rust-version.workspace = true
 bollard = "0.18.1"
 clap = { version = "4", features = ["derive"] }
 manyfw-core = { path = "../manyfw-core" }
+manyfw-linux = { path = "../manyfw-linux" }
 serde_json = "1"
 tokio = { version = "1.38", features = ["rt"] }

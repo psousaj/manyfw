@@ -75,6 +75,11 @@ source limitations, temporal inconsistencies, and unknown process ownership.
   divergence.
 - Linux namespace integration tests are read-only and disposable. They do not
   alter the development host firewall or routing configuration.
+- `bash tests/host_namespace.sh` exercises the collector in a disposable Docker
+  network namespace with `--network none`, no Docker socket, and no capabilities.
+  It uses only an already-cached image selected by `MANYFW_HOST_TEST_IMAGE`; it
+  never pulls an image implicitly. Missing Docker/image support is reported as
+  `NotApplicable` (exit 77), not a passing integration assertion.
 - Determinism tests vary source ordering and collection timing metadata while
   asserting stable normalized records and explicit temporal limitations.
 

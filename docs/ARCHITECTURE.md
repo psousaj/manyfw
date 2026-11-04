@@ -7,7 +7,7 @@ ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel
 - **Core**: policy parsing/normalization, sanitized observation contracts, snapshot composition, audit, explain, and deterministic planning; no Docker client or firewall writes.
 - **CLI**: one executable. `check` validates policy, `discover` collects a snapshot, `audit` and `explain` consume saved snapshots, and `plan` summarizes policy intent.
 - **Docker adapter**: the CLI uses Bollard for read-only `list`/`inspect` operations over a local Unix socket and projects only allowlisted fields.
-- **Linux host sources**: current-namespace interface, address, listener, route, and Tailscale observations use read-only sysfs/procfs sources with explicit partial coverage.
+- **Linux host adapter**: the separate `manyfw-linux` crate uses Netlink for interfaces, addresses, and routes, and Socket Diagnostics for TCP/UDP sockets. Read-only sysfs/procfs fallbacks are explicitly partial; the core contains only typed source contracts and normalization.
 - **Backends**: capability and feasibility planning only; no nftables or iptables mutation adapter is approved.
 - **Transaction runner**: durable state-machine primitives and fixture tests exist, but no production apply command or independent recovery supervisor is shipped.
 

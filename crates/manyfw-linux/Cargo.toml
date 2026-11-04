@@ -1,0 +1,19 @@
+[package]
+name = "manyfw-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures-util = "0.3"
+manyfw-core = { path = "../manyfw-core" }
+netlink-packet-core = "0.9"
+netlink-packet-route = "0.34"
+# Keep sock-diag on the Rust 1.85-compatible packet API; v0.5 uses an API
+# unavailable on the declared MSRV. It therefore has its own aliased core type.
+netlink-packet-core-v07 = { package = "netlink-packet-core", version = "0.7" }
+netlink-packet-sock-diag = "=0.4.2"
+netlink-sys = "0.9"
+rtnetlink = "0.24"
+tokio = { version = "1.38", features = ["rt", "time"] }
