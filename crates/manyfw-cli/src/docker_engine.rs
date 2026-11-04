@@ -8,8 +8,9 @@ use bollard::{
     models::{ContainerInspectResponse, ContainerSummary},
 };
 use manyfw_core::docker::{
-    self, BindingRecord, ConfiguredPortRecord, ContainerList, ContainerRecord, DockerTransport,
-    IdentityLabels, InspectionFailure, TransportError,
+    self, BindingRecord, ConfiguredHostBindingRecord, ConfiguredPortRecord, ContainerAddressRecord,
+    ContainerList, ContainerRecord, DockerTransport, IdentityLabels, InspectionFailure,
+    TransportError,
 };
 use std::{io, time::SystemTime};
 use tokio::runtime::{Builder, Runtime};
@@ -183,7 +184,7 @@ fn project_container(
         .unwrap_or("unknown")
         .to_owned();
 
-    let mut configured_ports = Vec::new();
+    let mut configured_ports = std::collections::BTreeMap::new();
     if let Some(ports) = inspection
         .config
         .as_ref()
@@ -191,12 +192,93 @@ fn project_container(
     {
         for key in ports.keys() {
             let (container_port, protocol) = parse_port_key(key);
-            configured_ports.push(ConfiguredPortRecord {
-                container_port,
-                protocol,
-            });
+            configured_ports.insert(
+                key.clone(),
+                ConfiguredPortRecord {
+                    container_port,
+                    protocol,
+                    host_bindings: Vec::new(),
+                },
+            );
         }
     }
+    if let Some(port_map) = inspection
+        .host_config
+        .as_ref()
+        .and_then(|config| config.port_bindings.as_ref())
+    {
+        for (key, values) in port_map {
+            let (container_port, protocol) = parse_port_key(key);
+            let configured =
+                configured_ports
+                    .entry(key.clone())
+                    .or_insert_with(|| ConfiguredPortRecord {
+                        container_port,
+                        protocol,
+                        host_bindings: Vec::new(),
+                    });
+            if let Some(values) = values {
+                configured
+                    .host_bindings
+                    .extend(values.iter().map(|binding| {
+                        ConfiguredHostBindingRecord {
+                            host_address: binding.host_ip.clone(),
+                            host_port: binding
+                                .host_port
+                                .as_deref()
+                                .and_then(|port| port.parse().ok()),
+                        }
+                    }));
+            }
+        }
+    }
+    let mut configured_ports = configured_ports.into_values().collect::<Vec<_>>();
+
+    let mut container_addresses = Vec::new();
+    if let Some(networks) = inspection
+        .network_settings
+        .as_ref()
+        .and_then(|settings| settings.networks.as_ref())
+    {
+        for (network, endpoint) in networks {
+            for address in [
+                endpoint.ip_address.as_deref(),
+                endpoint.global_ipv6_address.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            {
+                container_addresses.push(ContainerAddressRecord {
+                    network: network.clone(),
+                    address: address.into(),
+                });
+            }
+        }
+    }
+    if container_addresses.is_empty() {
+        if let Some(settings) = inspection.network_settings.as_ref() {
+            for address in [
+                settings.ip_address.as_deref(),
+                settings.global_ipv6_address.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            {
+                container_addresses.push(ContainerAddressRecord {
+                    network: "default".into(),
+                    address: address.into(),
+                });
+            }
+        }
+    }
+    container_addresses.sort_by(|left, right| {
+        left.network
+            .cmp(&right.network)
+            .then(left.address.cmp(&right.address))
+    });
+    container_addresses.dedup();
 
     let mut bindings = Vec::new();
     if let Some(ports) = inspection
@@ -216,6 +298,7 @@ fn project_container(
                         .and_then(|port| port.parse().ok())
                         .unwrap_or(0),
                     container_port,
+                    container_addresses: container_addresses.clone(),
                     protocol: protocol.clone(),
                     // The Engine reports a binding, not whether packets use
                     // DNAT, a userland proxy, or another publication path.
@@ -228,6 +311,14 @@ fn project_container(
     // Sort projections so HashMap iteration order in Bollard's API models does
     // not affect the normalized records.
     configured_ports.sort_by_key(|port| (port.container_port, port.protocol.clone()));
+    for configured in &mut configured_ports {
+        configured.host_bindings.sort_by(|left, right| {
+            left.host_port
+                .cmp(&right.host_port)
+                .then(left.host_address.cmp(&right.host_address))
+        });
+        configured.host_bindings.dedup();
+    }
     bindings.sort_by_key(|binding| {
         (
             binding.container_port,
@@ -390,7 +481,12 @@ mod tests {
         serde_json::from_value(json!({
             "Id": id,
             "State": {"Status": "running"},
-            "HostConfig": {"NetworkMode": "bridge"},
+            "HostConfig": {
+                "NetworkMode": "bridge",
+                "PortBindings": {
+                    "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]
+                }
+            },
             "Config": {
                 "Labels": {
                     "com.manyfw.service-id": "inventory/postgres",
@@ -401,6 +497,9 @@ mod tests {
                 "ExposedPorts": {"5432/tcp": {}}
             },
             "NetworkSettings": {
+                "Networks": {
+                    "bridge": {"IPAddress": "172.17.0.2", "GlobalIPv6Address": ""}
+                },
                 "Ports": {
                     "5432/tcp": [
                         {"HostIp": "0.0.0.0", "HostPort": "15432"},
@@ -416,7 +515,13 @@ mod tests {
         serde_json::from_value(json!({
             "Id": id,
             "State": {"Status": "running"},
-            "HostConfig": {"NetworkMode": network_mode},
+            "HostConfig": {
+                "NetworkMode": network_mode,
+                "PortBindings": {
+                    "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "25432"}],
+                    "5434/tcp": [{"HostIp": "0.0.0.0", "HostPort": "25434"}]
+                }
+            },
             "Config": {
                 "Labels": {"com.manyfw.service-id": "inventory/postgres"},
                 "ExposedPorts": {
@@ -426,6 +531,12 @@ mod tests {
                 }
             },
             "NetworkSettings": {
+                "Networks": {
+                    "custom-overlay": {
+                        "IPAddress": "172.20.0.3",
+                        "GlobalIPv6Address": "2001:db8::3"
+                    }
+                },
                 "Ports": {
                     "5432/tcp": [
                         {"HostIp": "127.0.0.1", "HostPort": "15432"}
@@ -461,6 +572,15 @@ mod tests {
         );
         assert_eq!(container.network_mode, NetworkMode::Bridge);
         assert_eq!(container.configured_publications.len(), 1);
+        assert_eq!(container.configured_publications[0].host_bindings.len(), 1);
+        assert_eq!(
+            container.configured_publications[0].host_bindings[0].port,
+            Some(5432)
+        );
+        assert_eq!(
+            container.configured_publications[0].host_bindings[0].address,
+            Some("127.0.0.1".parse().unwrap())
+        );
         assert_eq!(container.observed_endpoints.len(), 2);
         assert!(container.observed_endpoints.iter().any(|endpoint| matches!(
             endpoint,
@@ -493,7 +613,7 @@ mod tests {
         let result = DockerDiscovery::new(DockerEngineTransport::new(api), SystemClock).collect();
         let container = &result.containers[0];
 
-        assert_eq!(container.configured_publications.len(), 3);
+        assert_eq!(container.configured_publications.len(), 4);
         assert_eq!(container.observed_endpoints.len(), 2);
         assert_eq!(
             container.network_mode,
@@ -505,11 +625,33 @@ mod tests {
                 .iter()
                 .any(|configured| configured.container_port == 5433)
         );
+        let configured_tcp = container
+            .configured_publications
+            .iter()
+            .find(|configured| {
+                configured.container_port == 5432
+                    && configured.protocol == docker::TransportProtocol::Tcp
+            })
+            .unwrap();
+        assert_eq!(configured_tcp.host_bindings.len(), 1);
+        assert_eq!(configured_tcp.host_bindings[0].port, Some(25432));
+        let configured_only = container
+            .configured_publications
+            .iter()
+            .find(|configured| configured.container_port == 5434)
+            .unwrap();
+        assert_eq!(configured_only.host_bindings[0].port, Some(25434));
         assert!(
             !container
                 .observed_endpoints
                 .iter()
                 .any(|endpoint| endpoint.container_port == 5433)
+        );
+        assert!(
+            !container
+                .observed_endpoints
+                .iter()
+                .any(|endpoint| endpoint.container_port == 5434)
         );
 
         let tcp = container
@@ -540,6 +682,16 @@ mod tests {
         );
         assert_eq!(udp.provenance, docker::FieldProvenance::PortBinding);
         assert_eq!(tcp.container_port, 5432);
+        assert_eq!(tcp.host.port, 15432);
+        assert_eq!(tcp.container_addresses.len(), 2);
+        assert!(tcp.container_addresses.iter().any(|address| {
+            address.network == "custom-overlay"
+                && address.address == "172.20.0.3".parse::<std::net::IpAddr>().unwrap()
+        }));
+        assert!(tcp.container_addresses.iter().any(|address| {
+            address.network == "custom-overlay"
+                && address.address == "2001:db8::3".parse::<std::net::IpAddr>().unwrap()
+        }));
         assert_eq!(udp.container_port, 5432);
     }
 

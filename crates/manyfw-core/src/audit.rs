@@ -914,6 +914,7 @@ mod tests {
                     port: 8080,
                 },
                 container_port: 80,
+                container_addresses: Vec::new(),
                 protocol: docker::TransportProtocol::Tcp,
                 family: docker::IpFamily::Ipv4,
                 network_mode: docker::NetworkMode::Bridge,

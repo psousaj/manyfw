@@ -145,8 +145,16 @@ pub enum NetworkMode {
 pub struct ConfiguredPublication {
     pub container_port: u16,
     pub protocol: TransportProtocol,
+    #[serde(default)]
+    pub host_bindings: Vec<ConfiguredHostBinding>,
     pub network_mode: NetworkMode,
     pub provenance: FieldProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredHostBinding {
+    pub address: Option<IpAddr>,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,10 +162,19 @@ pub struct ObservedPublishedEndpoint {
     pub instance_id: String,
     pub host: HostBinding,
     pub container_port: u16,
+    #[serde(default)]
+    pub container_addresses: Vec<ContainerAddress>,
     pub protocol: TransportProtocol,
     pub family: IpFamily,
     pub network_mode: NetworkMode,
     pub mechanism: PublicationMechanism,
+    pub provenance: FieldProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerAddress {
+    pub network: String,
+    pub address: IpAddr,
     pub provenance: FieldProvenance,
 }
 
@@ -221,6 +238,13 @@ pub struct IdentityLabels {
 pub struct ConfiguredPortRecord {
     pub container_port: u16,
     pub protocol: String,
+    pub host_bindings: Vec<ConfiguredHostBindingRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredHostBindingRecord {
+    pub host_address: Option<String>,
+    pub host_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +252,15 @@ pub struct BindingRecord {
     pub host_address: Option<String>,
     pub host_port: u16,
     pub container_port: u16,
+    pub container_addresses: Vec<ContainerAddressRecord>,
     pub protocol: String,
     pub mechanism: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerAddressRecord {
+    pub network: String,
+    pub address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,6 +614,7 @@ fn project(
         (
             publication.container_port,
             protocol_key(publication.protocol),
+            format!("{:?}", publication.host_bindings),
         )
     });
     configured_publications.dedup();
@@ -703,6 +735,18 @@ fn configured(
     Some(ConfiguredPublication {
         container_port: value.container_port,
         protocol: protocol(&value.protocol)?,
+        host_bindings: value
+            .host_bindings
+            .into_iter()
+            .map(|binding| ConfiguredHostBinding {
+                address: binding
+                    .host_address
+                    .as_deref()
+                    .filter(|address| !address.is_empty())
+                    .and_then(|address| address.parse().ok()),
+                port: binding.host_port.filter(|port| *port != 0),
+            })
+            .collect(),
         network_mode: network_mode.clone(),
         provenance: FieldProvenance::ContainerConfiguration,
     })
@@ -740,6 +784,23 @@ fn endpoint(
             v.parse().ok()
         }
     });
+    let mut container_addresses = value
+        .container_addresses
+        .into_iter()
+        .filter_map(|address| {
+            Some(ContainerAddress {
+                network: address.network,
+                address: address.address.parse().ok()?,
+                provenance: FieldProvenance::DockerInspection,
+            })
+        })
+        .collect::<Vec<_>>();
+    container_addresses.sort_by(|left, right| {
+        left.network
+            .cmp(&right.network)
+            .then(left.address.cmp(&right.address))
+    });
+    container_addresses.dedup();
     Some(ObservedPublishedEndpoint {
         instance_id: instance_id.into(),
         host: HostBinding {
@@ -747,6 +808,7 @@ fn endpoint(
             port: value.host_port,
         },
         container_port: value.container_port,
+        container_addresses,
         protocol: protocol(&value.protocol)?,
         family,
         network_mode: network_mode.clone(),
@@ -799,7 +861,15 @@ fn protocol_key(value: TransportProtocol) -> u8 {
 }
 fn endpoint_key(
     value: &ObservedPublishedEndpoint,
-) -> (u16, u16, u8, IpFamily, Option<IpAddr>, PublicationMechanism) {
+) -> (
+    u16,
+    u16,
+    u8,
+    IpFamily,
+    Option<IpAddr>,
+    PublicationMechanism,
+    String,
+) {
     (
         value.host.port,
         value.container_port,
@@ -807,6 +877,7 @@ fn endpoint_key(
         value.family,
         value.host.address,
         value.mechanism.clone(),
+        format!("{:?}", value.container_addresses),
     )
 }
 fn observation_key(value: &ContainerObservation) -> (String, String) {
@@ -906,11 +977,13 @@ mod tests {
             configured_ports: vec![ConfiguredPortRecord {
                 container_port: 8080,
                 protocol: "tcp".into(),
+                host_bindings: Vec::new(),
             }],
             bindings: vec![BindingRecord {
                 host_address: Some("127.0.0.1".into()),
                 host_port: 18080,
                 container_port: 8080,
+                container_addresses: Vec::new(),
                 protocol: "tcp".into(),
                 mechanism: "nat".into(),
             }],
@@ -990,6 +1063,7 @@ mod tests {
                 host_address: Some("0.0.0.0".into()),
                 host_port: 80,
                 container_port: 80,
+                container_addresses: Vec::new(),
                 protocol: "tcp".into(),
                 mechanism: "nat".into(),
             },
@@ -997,6 +1071,7 @@ mod tests {
                 host_address: Some("2001:db8::1".into()),
                 host_port: 81,
                 container_port: 81,
+                container_addresses: Vec::new(),
                 protocol: "udp".into(),
                 mechanism: "proxy".into(),
             },
@@ -1009,17 +1084,48 @@ mod tests {
         assert_eq!(endpoints[1].family, IpFamily::Ipv6);
         assert_eq!(endpoints[1].protocol, TransportProtocol::Udp);
         assert_eq!(endpoints[1].mechanism, PublicationMechanism::UserlandProxy);
+        assert!(
+            endpoints
+                .iter()
+                .all(|endpoint| endpoint.container_addresses.is_empty())
+        );
 
         let mut duplicate = record("id", &[("com.manyfw.service-id", "svc")]);
         duplicate.bindings.push(BindingRecord {
             host_address: Some("127.0.0.1".into()),
             host_port: 18080,
             container_port: 8080,
+            container_addresses: Vec::new(),
             protocol: "tcp".into(),
             mechanism: "proxy".into(),
         });
         let endpoints = &discovery(vec![duplicate]).collect().containers[0].observed_endpoints;
         assert_eq!(endpoints.len(), 2);
+    }
+
+    #[test]
+    fn older_snapshot_endpoints_default_new_binding_details_to_empty() {
+        let configured: ConfiguredPublication = serde_json::from_value(serde_json::json!({
+            "container_port": 5432,
+            "protocol": "Tcp",
+            "network_mode": "Bridge",
+            "provenance": "ContainerConfiguration"
+        }))
+        .unwrap();
+        let observed: ObservedPublishedEndpoint = serde_json::from_value(serde_json::json!({
+            "instance_id": "instance",
+            "host": {"address": null, "port": 15432},
+            "container_port": 5432,
+            "protocol": "Tcp",
+            "family": "Ipv4",
+            "network_mode": "Bridge",
+            "mechanism": "Nat",
+            "provenance": "PortBinding"
+        }))
+        .unwrap();
+
+        assert!(configured.host_bindings.is_empty());
+        assert!(observed.container_addresses.is_empty());
     }
 
     #[test]
