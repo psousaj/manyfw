@@ -6,7 +6,7 @@ workflows:
 | Workflow | Responsibility | Fast PR path? |
 | --- | --- | --- |
 | `ci.yml` | fmt, clippy, workspace tests, docs, fixtures, dependency audit | Yes |
-| `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro and binary smoke tests | Main, scheduled, manual, relevant PRs |
+| `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro/binary smoke tests, disposable host-namespace discovery | Main, scheduled, manual, relevant PRs |
 | `release.yml` | Detect unpublished Cargo workspace versions, package/checksum/smoke artifacts, create an annotated tag and GitHub Release | Version/lock/workflow changes on `main`, or manual dispatch from `main` |
 
 The optional issue #24 recovery and candidate-evidence gate are consolidated
@@ -55,6 +55,12 @@ Pull requests use a reduced fast path with x86_64 GNU and musl builds and
 smoke tests. The complete four-target architecture matrix and five-distribution
 smoke matrix run on `main`, schedule, or manual dispatch; the reduced PR path
 does not imply ARM64 coverage.
+
+Normal compatibility runs also execute `tests/host_namespace.sh` in a disposable
+Docker container with `--network none`, no Docker socket, no capabilities, and a
+read-only root filesystem. This tests live host-source collection in an isolated
+network namespace; it does not inspect or mutate firewall rules. The image is
+pulled explicitly by CI and is never downloaded implicitly by the test script.
 
 Manual dispatches that provide the optional recovery or candidate-gate inputs
 select the specialized issue #24 path and intentionally suppress the normal
@@ -114,6 +120,8 @@ Passed locally:
 - `cargo test --workspace`
 - shell syntax validation for `scripts/run-qemu-recovery.sh`
 - candidate-bound recovery report validation with all critical scenarios
+- disposable read-only network-namespace discovery with
+  `MANYFW_HOST_TEST_IMAGE=postgres:17.4 bash tests/host_namespace.sh`
 
 Not yet validated locally:
 

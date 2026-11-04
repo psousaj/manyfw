@@ -158,7 +158,7 @@ fn run_discover(output: &std::path::Path) -> Result<(), Box<dyn std::error::Erro
             DiscoveryClock,
         )
         .collect();
-        let host = manyfw_core::host::HostDiscovery::linux().collect();
+        let host = manyfw_linux::collect();
         let snapshot = manyfw_core::snapshot::ObservationSnapshot::compose(docker, host);
         let rendered = serde_json::to_string_pretty(&snapshot)?;
         if output == std::path::Path::new("-") {

@@ -13,6 +13,8 @@ The highest completed roadmap milestone is **v0.1.0**. The workspace remains at
 ## v0.2.0 — Discovery and audit (in progress)
 - [ ] End-to-end observation of Docker publishers and host network state
   - [x] Read-only host interfaces, addresses, listeners, and routes for the current namespace
+  - [x] Netlink/Socket Diagnostics primary sources with explicit sysfs/procfs fallback limitations
+  - [x] Disposable network-namespace discovery smoke test (`tests/host_namespace.sh`)
   - [x] Docker observation DTOs, stable metadata identity, and endpoint normalization
   - [x] Concrete read-only Docker API transport and CLI snapshot collection
 - [x] Resolve Docker service identity from explicit/Compose metadata in the observation boundary

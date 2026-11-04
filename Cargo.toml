@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/manyfw-core", "crates/manyfw-cli"]
+members = ["crates/manyfw-core", "crates/manyfw-cli", "crates/manyfw-linux"]
 resolver = "2"
 
 [workspace.package]

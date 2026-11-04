@@ -10,6 +10,7 @@ on:
       - "crates/**"
       - "examples/**"
       - "scripts/**"
+      - "tests/**"
       - "docs/**"
       - ".github/workflows/ci.yml"
       - ".github/workflows/compatibility.yml"
