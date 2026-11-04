@@ -64,6 +64,9 @@ limitations without making security conclusions.
   network modes without coercion.
 - Preserve unknown publication mechanisms rather than inferring DNAT or proxy
   behavior from bridge mode.
+- Preserve an empty configured host port as dynamic, but represent malformed
+  non-empty host address or port fields as unknown and mark the Docker result
+  malformed/partial rather than treating invalid input as an unspecified bind.
 - Project external Docker responses immediately into allowlisted DTOs. Do not
   expose raw responses, environment variables, secrets, mounts, commands, or
   unrelated labels.

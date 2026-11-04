@@ -220,14 +220,9 @@ fn project_container(
             if let Some(values) = values {
                 configured
                     .host_bindings
-                    .extend(values.iter().map(|binding| {
-                        ConfiguredHostBindingRecord {
-                            host_address: binding.host_ip.clone(),
-                            host_port: binding
-                                .host_port
-                                .as_deref()
-                                .and_then(|port| port.parse().ok()),
-                        }
+                    .extend(values.iter().map(|binding| ConfiguredHostBindingRecord {
+                        host_address: binding.host_ip.clone(),
+                        host_port: binding.host_port.clone(),
                     }));
             }
         }
@@ -575,11 +570,11 @@ mod tests {
         assert_eq!(container.configured_publications[0].host_bindings.len(), 1);
         assert_eq!(
             container.configured_publications[0].host_bindings[0].port,
-            Some(5432)
+            docker::ConfiguredHostPort::Port(5432)
         );
         assert_eq!(
             container.configured_publications[0].host_bindings[0].address,
-            Some("127.0.0.1".parse().unwrap())
+            docker::ConfiguredHostAddress::Address("127.0.0.1".parse().unwrap())
         );
         assert_eq!(container.observed_endpoints.len(), 2);
         assert!(container.observed_endpoints.iter().any(|endpoint| matches!(
@@ -634,13 +629,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(configured_tcp.host_bindings.len(), 1);
-        assert_eq!(configured_tcp.host_bindings[0].port, Some(25432));
+        assert_eq!(
+            configured_tcp.host_bindings[0].port,
+            docker::ConfiguredHostPort::Port(25432)
+        );
         let configured_only = container
             .configured_publications
             .iter()
             .find(|configured| configured.container_port == 5434)
             .unwrap();
-        assert_eq!(configured_only.host_bindings[0].port, Some(25434));
+        assert_eq!(
+            configured_only.host_bindings[0].port,
+            docker::ConfiguredHostPort::Port(25434)
+        );
         assert!(
             !container
                 .observed_endpoints
@@ -693,6 +694,74 @@ mod tests {
                 && address.address == "2001:db8::3".parse::<std::net::IpAddr>().unwrap()
         }));
         assert_eq!(udp.container_port, 5432);
+    }
+
+    #[test]
+    fn malformed_configured_host_binding_is_unknown_and_reported_partial() {
+        let inspection: ContainerInspectResponse = serde_json::from_value(json!({
+            "Id": "container-1",
+            "State": {"Status": "running"},
+            "HostConfig": {
+                "NetworkMode": "bridge",
+                "PortBindings": {
+                    "5432/tcp": [
+                        {"HostIp": "", "HostPort": ""},
+                        {"HostIp": "not-an-address", "HostPort": "not-a-port"}
+                    ]
+                }
+            },
+            "Config": {
+                "Labels": {"com.manyfw.service-id": "inventory/postgres"},
+                "ExposedPorts": {"5432/tcp": {}}
+            },
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "not-an-address"}},
+                "Ports": {
+                    "5432/tcp": [{"HostIp": "0.0.0.0", "HostPort": "15432"}]
+                }
+            }
+        }))
+        .unwrap();
+        let api = FakeApi {
+            summaries: vec![summary("container-1")],
+            inspections: HashMap::from([("container-1".into(), Ok(inspection))]),
+            ..Default::default()
+        };
+
+        let result = DockerDiscovery::new(DockerEngineTransport::new(api), SystemClock).collect();
+        let configured = &result.containers[0].configured_publications[0].host_bindings;
+
+        assert_eq!(result.outcome, CollectionOutcome::Malformed);
+        assert!(
+            result
+                .limitations
+                .contains(&docker::Limitation::MalformedContainer)
+        );
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == docker::DiagnosticCode::MalformedContainer
+            })
+        );
+        assert!(configured.iter().any(|binding| {
+            binding.address == docker::ConfiguredHostAddress::Unspecified
+                && binding.port == docker::ConfiguredHostPort::Dynamic
+        }));
+        assert!(configured.iter().any(|binding| {
+            binding.address == docker::ConfiguredHostAddress::Unknown
+                && binding.port == docker::ConfiguredHostPort::Unknown
+        }));
+        assert_eq!(result.containers[0].observed_endpoints.len(), 1);
+        assert!(
+            result.containers[0].observed_endpoints[0]
+                .container_addresses
+                .is_empty()
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.message.contains("container network endpoint") })
+        );
     }
 
     #[test]

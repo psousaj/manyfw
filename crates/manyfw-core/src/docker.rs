@@ -153,8 +153,22 @@ pub struct ConfiguredPublication {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfiguredHostBinding {
-    pub address: Option<IpAddr>,
-    pub port: Option<u16>,
+    pub address: ConfiguredHostAddress,
+    pub port: ConfiguredHostPort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfiguredHostAddress {
+    Unspecified,
+    Address(IpAddr),
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfiguredHostPort {
+    Dynamic,
+    Port(u16),
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,7 +258,7 @@ pub struct ConfiguredPortRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfiguredHostBindingRecord {
     pub host_address: Option<String>,
-    pub host_port: Option<u16>,
+    pub host_port: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,7 +622,7 @@ fn project(
     let mut configured_publications = record
         .configured_ports
         .into_iter()
-        .filter_map(|port| configured(port, &network_mode))
+        .filter_map(|port| configured(port, &network_mode, diagnostics, &record.id))
         .collect::<Vec<_>>();
     configured_publications.sort_by_key(|publication| {
         (
@@ -621,7 +635,7 @@ fn project(
     let mut observed_endpoints = record
         .bindings
         .into_iter()
-        .filter_map(|binding| endpoint(&record.id, binding, &network_mode))
+        .filter_map(|binding| endpoint(&record.id, binding, &network_mode, diagnostics))
         .collect::<Vec<_>>();
     observed_endpoints.sort_by_key(endpoint_key);
     observed_endpoints.dedup();
@@ -728,25 +742,51 @@ fn network_mode(value: &str) -> NetworkMode {
 fn configured(
     value: ConfiguredPortRecord,
     network_mode: &NetworkMode,
+    diagnostics: &mut Vec<DiscoveryDiagnostic>,
+    instance_id: &str,
 ) -> Option<ConfiguredPublication> {
     if value.container_port == 0 {
         return None;
     }
+    let host_bindings = value
+        .host_bindings
+        .into_iter()
+        .map(|binding| {
+            let address = match binding.host_address.as_deref() {
+                None | Some("") => ConfiguredHostAddress::Unspecified,
+                Some(address) => match address.parse::<IpAddr>() {
+                    Ok(address) => ConfiguredHostAddress::Address(address),
+                    Err(_) => {
+                        diagnostics.push(DiscoveryDiagnostic {
+                            code: DiagnosticCode::MalformedContainer,
+                            message: "configured Docker host binding has an invalid address".into(),
+                            instance_id: Some(instance_id.into()),
+                        });
+                        ConfiguredHostAddress::Unknown
+                    }
+                },
+            };
+            let port = match binding.host_port.as_deref() {
+                None | Some("") => ConfiguredHostPort::Dynamic,
+                Some(port) => match port.parse::<u16>() {
+                    Ok(port) if port != 0 => ConfiguredHostPort::Port(port),
+                    _ => {
+                        diagnostics.push(DiscoveryDiagnostic {
+                            code: DiagnosticCode::MalformedContainer,
+                            message: "configured Docker host binding has an invalid port".into(),
+                            instance_id: Some(instance_id.into()),
+                        });
+                        ConfiguredHostPort::Unknown
+                    }
+                },
+            };
+            ConfiguredHostBinding { address, port }
+        })
+        .collect();
     Some(ConfiguredPublication {
         container_port: value.container_port,
         protocol: protocol(&value.protocol)?,
-        host_bindings: value
-            .host_bindings
-            .into_iter()
-            .map(|binding| ConfiguredHostBinding {
-                address: binding
-                    .host_address
-                    .as_deref()
-                    .filter(|address| !address.is_empty())
-                    .and_then(|address| address.parse().ok()),
-                port: binding.host_port.filter(|port| *port != 0),
-            })
-            .collect(),
+        host_bindings,
         network_mode: network_mode.clone(),
         provenance: FieldProvenance::ContainerConfiguration,
     })
@@ -755,6 +795,7 @@ fn endpoint(
     instance_id: &str,
     value: BindingRecord,
     network_mode: &NetworkMode,
+    diagnostics: &mut Vec<DiscoveryDiagnostic>,
 ) -> Option<ObservedPublishedEndpoint> {
     if !binding_is_valid(&value) {
         return None;
@@ -784,17 +825,21 @@ fn endpoint(
             v.parse().ok()
         }
     });
-    let mut container_addresses = value
-        .container_addresses
-        .into_iter()
-        .filter_map(|address| {
-            Some(ContainerAddress {
+    let mut container_addresses = Vec::new();
+    for address in value.container_addresses {
+        match address.address.parse::<IpAddr>() {
+            Ok(ip_address) => container_addresses.push(ContainerAddress {
                 network: address.network,
-                address: address.address.parse().ok()?,
+                address: ip_address,
                 provenance: FieldProvenance::DockerInspection,
-            })
-        })
-        .collect::<Vec<_>>();
+            }),
+            Err(_) => diagnostics.push(DiscoveryDiagnostic {
+                code: DiagnosticCode::MalformedContainer,
+                message: "container network endpoint has an invalid IP address".into(),
+                instance_id: Some(instance_id.into()),
+            }),
+        }
+    }
     container_addresses.sort_by(|left, right| {
         left.network
             .cmp(&right.network)
@@ -1126,6 +1171,55 @@ mod tests {
 
         assert!(configured.host_bindings.is_empty());
         assert!(observed.container_addresses.is_empty());
+    }
+
+    #[test]
+    fn container_network_addresses_keep_target_endpoints_distinct() {
+        let mut container = record("instance", &[("com.manyfw.service-id", "service")]);
+        container.bindings = vec![
+            BindingRecord {
+                host_address: Some("127.0.0.1".into()),
+                host_port: 8080,
+                container_port: 80,
+                container_addresses: vec![ContainerAddressRecord {
+                    network: "bridge".into(),
+                    address: "172.17.0.2".into(),
+                }],
+                protocol: "tcp".into(),
+                mechanism: "nat".into(),
+            },
+            BindingRecord {
+                host_address: Some("127.0.0.1".into()),
+                host_port: 8080,
+                container_port: 80,
+                container_addresses: vec![ContainerAddressRecord {
+                    network: "custom".into(),
+                    address: "10.20.0.3".into(),
+                }],
+                protocol: "tcp".into(),
+                mechanism: "nat".into(),
+            },
+        ];
+
+        let endpoints = discovery(vec![container])
+            .collect()
+            .containers
+            .remove(0)
+            .observed_endpoints;
+        assert_eq!(endpoints.len(), 2);
+        assert_ne!(
+            endpoints[0].container_addresses,
+            endpoints[1].container_addresses
+        );
+        assert!(endpoints.iter().any(|endpoint| {
+            endpoint.container_addresses[0].network == "bridge"
+                && endpoint.container_addresses[0].address
+                    == "172.17.0.2".parse::<IpAddr>().unwrap()
+        }));
+        assert!(endpoints.iter().any(|endpoint| {
+            endpoint.container_addresses[0].network == "custom"
+                && endpoint.container_addresses[0].address == "10.20.0.3".parse::<IpAddr>().unwrap()
+        }));
     }
 
     #[test]
