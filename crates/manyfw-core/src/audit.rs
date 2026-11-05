@@ -191,23 +191,33 @@ pub fn evaluate(
             let family = format!("{:?}", endpoint.family).to_lowercase();
             let protocol = format!("{:?}", endpoint.protocol).to_lowercase();
             let instance_reference = format!("instance-{}", stable_key(&endpoint.instance_id));
+            let mut container_targets = endpoint
+                .container_addresses
+                .iter()
+                .map(|address| format!("{}:{}", address.network, address.address))
+                .collect::<Vec<_>>();
+            container_targets.sort();
+            container_targets.dedup();
             let resource = format!(
-                "{identity_reference}:{instance_reference}:{protocol}/{family}/{:?}/{}->{}:{:?}",
+                "{identity_reference}:{instance_reference}:{protocol}/{family}/{:?}/{}->{}:{:?}/{:?}/{:?}/targets={container_targets:?}",
                 endpoint.host.address,
                 endpoint.host.port,
                 endpoint.container_port,
-                endpoint.mechanism
+                endpoint.mechanism,
+                endpoint.network_mode,
+                endpoint.provenance
             );
             let evidence_id = format!("evidence-{}", stable_key(&resource));
             let related = graph.edges.iter().filter(|edge| {
                 matches!(&edge.source, snapshot::CorrelationNode::DockerEndpoint { instance_id, host_port, .. }
                     if instance_id == &endpoint.instance_id && *host_port == endpoint.host.port)
                     && matches!(&edge.source, snapshot::CorrelationNode::DockerEndpoint {
-                        protocol, family, container_port, host_address, network_mode,
+                        protocol, family, container_port, container_addresses, host_address, network_mode,
                         mechanism, ..
                     } if *protocol == endpoint.protocol
                         && *family == endpoint.family
                         && *container_port == endpoint.container_port
+                        && *container_addresses == endpoint.container_addresses
                         && *host_address == endpoint.host.address
                         && network_mode == &endpoint.network_mode
                         && mechanism == &endpoint.mechanism)
@@ -260,8 +270,12 @@ pub fn evaluate(
                         .collect(),
                 });
             }
-            let (matching, declared) =
-                matching_rules(policy, &identity, endpoint.protocol, endpoint.host.port);
+            let (matching, declared) = matching_rules(
+                policy,
+                &identity,
+                endpoint.protocol,
+                endpoint.container_port,
+            );
             let subject = resource.clone();
             let unexpected = matching.is_empty()
                 && matches!(
@@ -805,6 +819,14 @@ fn sanitize(value: &str) -> String {
 }
 
 fn validate_report(report: &AuditReport) -> Result<(), AuditError> {
+    let finding_ids = report
+        .findings
+        .iter()
+        .map(|finding| &finding.id)
+        .collect::<BTreeSet<_>>();
+    if finding_ids.len() != report.findings.len() {
+        return Err(AuditError::InvalidReport("duplicate finding id".into()));
+    }
     let evidence_ids: BTreeSet<_> = report
         .evidence
         .iter()
@@ -966,6 +988,118 @@ mod tests {
                 .severity_factors
                 .justification
                 .contains("not proof of external reachability")
+        );
+    }
+
+    #[test]
+    fn docker_policy_uses_container_port_and_target_addresses_remain_distinct() {
+        let endpoint = docker::ObservedPublishedEndpoint {
+            instance_id: "instance-1".into(),
+            host: docker::HostBinding {
+                address: Some("192.0.2.10".parse().unwrap()),
+                port: 8080,
+            },
+            container_port: 80,
+            container_addresses: vec![docker::ContainerAddress {
+                network: "bridge".into(),
+                address: "172.20.0.3".parse().unwrap(),
+                provenance: docker::FieldProvenance::DockerInspection,
+            }],
+            protocol: docker::TransportProtocol::Tcp,
+            family: docker::IpFamily::Ipv4,
+            network_mode: docker::NetworkMode::Bridge,
+            mechanism: docker::PublicationMechanism::Nat,
+            provenance: docker::FieldProvenance::PortBinding,
+        };
+        let mut second_target = endpoint.clone();
+        second_target.container_addresses = vec![docker::ContainerAddress {
+            network: "custom".into(),
+            address: "10.20.0.4".parse().unwrap(),
+            provenance: docker::FieldProvenance::DockerInspection,
+        }];
+        let mut docker_observation = docker(docker::CollectionOutcome::Complete);
+        docker_observation
+            .containers
+            .push(docker::ContainerObservation {
+                logical_identity: Some(docker::LogicalIdentity {
+                    value: "docker:demo/api".into(),
+                    source: docker::IdentitySource::ComposeLabels,
+                }),
+                instance: docker::ContainerInstance {
+                    id: "instance-1".into(),
+                    replica_key: "api".into(),
+                },
+                lifecycle: docker::LifecycleState::Running,
+                operational_status: docker::OperationalStatus::Running,
+                network_mode: docker::NetworkMode::Bridge,
+                configured_publications: Vec::new(),
+                observed_endpoints: vec![endpoint, second_target],
+            });
+        let snapshot = snapshot::ObservationSnapshot::compose(docker_observation, host(Vec::new()));
+        let policy = crate::parse_and_normalize(
+            r#"
+version = 1
+default_action = "deny"
+[[rules]]
+id = "service-port-80"
+source = "cidr:192.0.2.0/24"
+destination = "docker:demo/api"
+ports = [80]
+protocol = "tcp"
+action = "allow"
+priority = 10
+"#,
+        )
+        .unwrap()
+        .policy;
+        let report = evaluate(&policy, &snapshot).unwrap();
+        let published = report
+            .findings
+            .iter()
+            .filter(|finding| finding.category == "PublishedPort")
+            .collect::<Vec<_>>();
+
+        assert_eq!(published.len(), 2);
+        assert!(published.iter().all(|finding| {
+            finding.policy.matching_rule_ids == vec!["service-port-80".to_owned()]
+                && finding.policy.declared == "allow"
+        }));
+        assert_eq!(
+            published
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        let json = report.json().unwrap();
+        assert!(json.contains("bridge:172.20.0.3"));
+        assert!(json.contains("custom:10.20.0.4"));
+
+        let mut host_port_policy = policy.clone();
+        host_port_policy.rules[0].ports = crate::PortScope::Specific(vec![crate::PortRange {
+            start: 8080,
+            end: 8080,
+        }]);
+        let host_port_report = evaluate(&host_port_policy, &snapshot).unwrap();
+        assert!(
+            host_port_report
+                .findings
+                .iter()
+                .filter(|finding| { finding.category == "PublishedPort" })
+                .all(|finding| finding.policy.matching_rule_ids.is_empty())
+        );
+
+        let mut reversed_docker = snapshot.docker();
+        reversed_docker.containers[0].observed_endpoints.reverse();
+        let reversed_snapshot =
+            snapshot::ObservationSnapshot::compose(reversed_docker, snapshot.host());
+        assert_eq!(
+            json,
+            evaluate(&policy, &reversed_snapshot)
+                .unwrap()
+                .json()
+                .unwrap()
         );
     }
 
