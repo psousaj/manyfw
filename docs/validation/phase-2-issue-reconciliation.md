@@ -136,6 +136,28 @@ triggers; on PR the updated workflow retains only the disposable host namespace
 smoke alongside the ordinary CI workflow. No GitHub release or host firewall
 state was modified during this audit.
 
+## Final tracker reconciliation
+
+Read-only GitHub issue audit on 2026-11-05 confirms the following current
+statuses. Closed child issues have evidence comments recorded in their relevant
+task sections above. No issue state was changed by this final audit.
+
+| Issue(s) | Tracker state | Reconciliation |
+|---|---|---|
+| #1, #2, #10–#19 | CLOSED | Implemented/released foundation, discovery, snapshot, audit, and explain work; relevant acceptance evidence is recorded above (and #1/#14 were already closed before this reconciliation) |
+| #3 | OPEN | Parent Docker integration criterion still lacks safely isolated disposable-Docker evidence; rootful development-daemon networking is not exercised |
+| #4 | CLOSED | Parent host discovery criteria demonstrated and evidence commented; closed 2026-11-05 |
+| #5 | OPEN | Required public-bind and Tailscale-only audit golden outputs remain incomplete |
+| #6 | OPEN | Required NAT, host-network, multiple-mapping, and conflicting-policy golden outputs remain incomplete |
+| #7, #20, #21 | OPEN | v0.3.0 planner release gates intentionally remain open |
+| #8, #22–#24 | OPEN | v0.4.0 enforcement/rollback and privileged VM recovery gates intentionally remain open; #24 evidence is NotApplicable in hosted CI |
+| #26 | OPEN | Release/matrix evidence is positive, but PR-matrix gating change awaits hosted workflow verification |
+
+No planner or enforcement issue was closed based solely on fixture tests or
+artifact smoke. Repository remains on local reconciliation branch
+`chore/phase-2-issue-reconciliation`; it is ten commits ahead of `main` and was
+not pushed.
+
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 
 | Acceptance criterion | Implementation evidence | Test/evidence | Status |
