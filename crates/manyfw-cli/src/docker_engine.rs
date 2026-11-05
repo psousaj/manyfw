@@ -697,6 +697,48 @@ mod tests {
     }
 
     #[test]
+    fn malformed_observed_host_address_or_port_marks_collection_partial() {
+        for (host_ip, host_port) in [("0.0.0.0", "not-a-port"), ("not-an-address", "15432")] {
+            let inspection: ContainerInspectResponse = serde_json::from_value(json!({
+                "Id": "container-1",
+                "State": {"Status": "running"},
+                "HostConfig": {"NetworkMode": "bridge"},
+                "Config": {
+                    "Labels": {"com.manyfw.service-id": "inventory/postgres"},
+                    "ExposedPorts": {"5432/tcp": {}}
+                },
+                "NetworkSettings": {
+                    "Networks": {"bridge": {"IPAddress": "172.17.0.2"}},
+                    "Ports": {
+                        "5432/tcp": [{"HostIp": host_ip, "HostPort": host_port}]
+                    }
+                }
+            }))
+            .unwrap();
+            let api = FakeApi {
+                summaries: vec![summary("container-1")],
+                inspections: HashMap::from([("container-1".into(), Ok(inspection))]),
+                ..Default::default()
+            };
+
+            let result =
+                DockerDiscovery::new(DockerEngineTransport::new(api), SystemClock).collect();
+            assert_eq!(result.outcome, CollectionOutcome::Malformed);
+            assert_eq!(result.completeness, docker::Completeness::Partial);
+            assert!(
+                result
+                    .limitations
+                    .contains(&docker::Limitation::MalformedContainer)
+            );
+            assert!(result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == docker::DiagnosticCode::MalformedContainer));
+            assert!(result.containers[0].observed_endpoints.is_empty());
+        }
+    }
+
+    #[test]
     fn malformed_configured_host_binding_is_unknown_and_reported_partial() {
         let inspection: ContainerInspectResponse = serde_json::from_value(json!({
             "Id": "container-1",
