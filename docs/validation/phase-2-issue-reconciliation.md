@@ -23,6 +23,23 @@ Initial base: `d6b745b7b28e4aa896ecfde95091ad9d6b9c19b0`
 
 Tracker: commented with evidence and closed as completed on 2026-11-05.
 
+### #3 — Read-only Docker discovery (parent issue; remains open)
+
+| Acceptance criterion | Implementation evidence | Test/evidence | Status |
+|---|---|---|---|
+| Fixtures cover Compose labels, multiple published mappings, dual-stack ports, and restarts | Core Docker projection and CLI Bollard adapter in `crates/manyfw-core/src/docker.rs` and `crates/manyfw-cli/src/docker_engine.rs` | `identity_precedence_and_replicas_are_preserved`; `endpoint_normalization_keeps_family_and_protocol_distinct`; adapter fixture tests listed in PR #28 CI | Demonstrated by deterministic fixtures |
+| Read-only integration tests with disposable Docker containers when daemon available | No disposable Docker integration test or harness is present in the repository/workflow | Existing v0.2.0 evidence (`docs/validation/v0.2.0-discovery.md`) used a disposable `--network none` container without a Docker socket and separately observed six pre-existing containers; it explicitly made no Docker resource changes | **Not demonstrated** |
+| Permission/unavailable-daemon diagnostics | Docker Engine error classification and core `CollectionOutcome`/diagnostic mapping | `docker_engine::tests::unavailable_socket_and_malformed_api_response_have_distinct_statuses`; core `failures_are_distinguished_from_zero_candidates`; #13 permission tests | Demonstrated |
+| No Docker API mutations | Adapter uses list/inspect only; no mutation method is in its injected API boundary | Source inspection of `DockerEngineApi` and `LocalDockerEngine`; no create/start/stop/remove API calls | Demonstrated by source inspection |
+
+Parent #3 remains OPEN. The local daemon is available and has existing running
+containers, but is rootful; creating a disposable bridge-published container
+would invoke Docker networking that can modify the development host firewall.
+Repository safety guidance forbids firewall mutation testing on that host.
+Existing live read-only snapshots and mock/fixture tests do not satisfy the
+parent's explicit disposable-container integration criterion, so the issue is
+not closed and no unsafe runtime test was attempted.
+
 ### #11 — Policy semantics and legacy migration
 
 | Acceptance criterion | Implementation evidence | Test/evidence |
