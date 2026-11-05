@@ -43,6 +43,7 @@ fn check_reports_warnings_and_still_exits_zero() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Warning BroadPortScope"));
+    assert!(stdout.contains("rules[id=\"admin-vpn\"].port_scope"));
     assert!(stdout.contains("[rules: admin-vpn]"));
 }
 
