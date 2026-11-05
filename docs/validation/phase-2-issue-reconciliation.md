@@ -38,3 +38,17 @@ normalized numeric port ranges, consistent with canonical port ordering.
 Validation: Rust 1.85 fmt, workspace Clippy, and
 `cargo test --workspace --locked` passed; the workspace reports 83 core unit tests.
 Tracker: commented with the completed evidence and closed as completed on 2026-11-05.
+
+### #12 — Deterministic policy CLI contract
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| `manyfw check` consumes the normalized report and prints actionable diagnostics | `crates/manyfw-cli/src/main.rs`: `run` calls `parse_and_normalize`; check prints normalized summary/diagnostics; `print_diagnostics` includes severity, code, message, location, and rule IDs | Real-binary tests assert the valid normalized summary; the warning test asserts diagnostic code, source location, and rule ID; invalid tests assert error codes/messages |
+| Valid policies with warnings exit zero; invalid policies exit nonzero | `main` returns errors through stderr and exit 1; valid diagnostics remain a successful result | `check_reports_warnings_and_still_exits_zero`; `check_reports_invalid_policy_and_exits_nonzero`; `check_reports_missing_default_unknown_fields_and_conflicts`; `check_reports_legacy_migration_requirements` |
+| `manyfw plan` is read-only and summarizes normalized rules deterministically | Source inspection of the `Plan` branch in `crates/manyfw-cli/src/main.rs` shows it only iterates normalized values and invokes no backend; output explicitly says `PREVIEW ONLY`; normalized ordering is specified in `docs/SPECIFICATION.md` | `plan_prints_normalized_rules_in_priority_order`; core tests verify declaration-order-independent normalization |
+| Valid and invalid CLI fixtures cover the documented schema | Representative valid/warning fixtures (`examples/manyfw.toml`, `examples/warnings/broad-ports.toml`) and invalid fixtures under `examples/invalid/`; schema contract in `docs/SPECIFICATION.md` | CLI tests execute the real binary via `CARGO_BIN_EXE_manyfw`; CI's invalid-fixture loop is also run locally for all `examples/invalid/*.toml` |
+
+Validation: `cargo +1.85.0 test -p manyfw --test cli --locked` passed (11
+tests); every `examples/invalid/*.toml` fixture returned nonzero through the
+real CLI. Tracker: commented with the completed evidence and closed as
+completed on 2026-11-05.
