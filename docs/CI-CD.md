@@ -81,7 +81,7 @@ compatibility coverage is required.
    workflow create an annotated `vX.Y.Z` tag at that exact commit and publish
    the GitHub Release with the archives and SHA-256 files.
 
-The first successful run publishes the current version (`0.1.0`); subsequent
+The first successful run publishes the current version (`0.2.0`); subsequent
 releases are triggered by bumping the workspace version and merging it. A push
 at an already released version is a no-op. The tag and release are created in
 the same workflow run so publication does not depend on a tag-push event from
