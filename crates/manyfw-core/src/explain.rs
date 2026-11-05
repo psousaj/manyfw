@@ -371,7 +371,7 @@ pub fn explain(
                     let (kind, detail) = match &edge.target {
                         Some(snapshot::CorrelationNode::HostListener { address, port, .. }) => (
                             PathStepKind::HostListener,
-                            format!("listener {address}:{port}"),
+                            format!("listener {}", format_ip_port(*address, *port)),
                         ),
                         Some(snapshot::CorrelationNode::HostInterface { index, name }) => (
                             PathStepKind::Interface,
@@ -657,15 +657,21 @@ fn format_host_binding(endpoint: &docker::ObservedPublishedEndpoint) -> String {
 }
 
 fn format_host_binding_parts(address: Option<std::net::IpAddr>, family: &str, port: u16) -> String {
-    let address = address.map_or_else(
-        || match family {
-            "ipv4" => "0.0.0.0".into(),
-            "ipv6" => "::".into(),
-            _ => "unspecified".into(),
+    match address {
+        Some(address) => format_ip_port(address, port),
+        None => match family {
+            "ipv4" => format!("0.0.0.0:{port}"),
+            "ipv6" => format!("[::]:{port}"),
+            _ => format!("unspecified:{port}"),
         },
-        |address| address.to_string(),
-    );
-    format!("{address}:{port}")
+    }
+}
+
+fn format_ip_port(address: std::net::IpAddr, port: u16) -> String {
+    match address {
+        std::net::IpAddr::V4(address) => format!("{address}:{port}"),
+        std::net::IpAddr::V6(address) => format!("[{address}]:{port}"),
+    }
 }
 
 fn stable_key(value: &str) -> String {
@@ -822,7 +828,9 @@ fn evaluate_policy(
                     "udp" => Some(docker::TransportProtocol::Udp),
                     _ => None,
                 }?;
-                Some(crate::audit::matching_rules(policy, identity, protocol, path.host_port).0)
+                Some(
+                    crate::audit::matching_rules(policy, identity, protocol, path.container_port).0,
+                )
             })
             .flatten()
             .collect::<BTreeSet<_>>()
@@ -897,7 +905,12 @@ fn evaluate_policy_for_endpoint(
             )
         },
         |identity| {
-            crate::audit::matching_rules(policy, identity, endpoint.protocol, endpoint.host.port)
+            crate::audit::matching_rules(
+                policy,
+                identity,
+                endpoint.protocol,
+                endpoint.container_port,
+            )
         },
     );
     let mut raw_precedence = raw_rule_ids.clone();
@@ -1059,6 +1072,56 @@ mod tests {
             display_identity("arbitrary-secret-value-not-keyword"),
             "[redacted]"
         );
+    }
+
+    #[test]
+    fn ipv6_host_bindings_are_bracketed_in_terminal_details() {
+        assert_eq!(
+            format_host_binding_parts(Some("2001:db8::1".parse().unwrap()), "ipv6", 8080),
+            "[2001:db8::1]:8080"
+        );
+        assert_eq!(format_host_binding_parts(None, "ipv6", 8080), "[::]:8080");
+        assert_eq!(format_ip_port("::1".parse().unwrap(), 5432), "[::1]:5432");
+    }
+
+    #[test]
+    fn endpoint_policy_uses_container_port_not_host_binding_port() {
+        let endpoint = docker::ObservedPublishedEndpoint {
+            instance_id: "instance".into(),
+            host: docker::HostBinding {
+                address: Some("192.0.2.10".parse().unwrap()),
+                port: 8080,
+            },
+            container_port: 80,
+            container_addresses: Vec::new(),
+            protocol: docker::TransportProtocol::Tcp,
+            family: docker::IpFamily::Ipv4,
+            network_mode: docker::NetworkMode::Bridge,
+            mechanism: docker::PublicationMechanism::Nat,
+            provenance: docker::FieldProvenance::PortBinding,
+        };
+        let policy_for = |port| {
+            crate::parse_and_normalize(&format!(
+                "version = 1\ndefault_action = \"deny\"\n[[rules]]\nid = \"container-rule\"\nsource = \"cidr:192.0.2.0/24\"\ndestination = \"docker:demo/api\"\nports = [{port}]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n"
+            ))
+            .unwrap()
+            .policy
+        };
+
+        let container_port_policy = policy_for(80);
+        let container_match = evaluate_policy_for_endpoint(
+            &container_port_policy,
+            Some("docker:demo/api"),
+            &endpoint,
+        );
+        assert_eq!(container_match.declared_action, "allow");
+        assert_eq!(container_match.matching_rule_count, 1);
+
+        let host_port_policy = policy_for(8080);
+        let host_only_match =
+            evaluate_policy_for_endpoint(&host_port_policy, Some("docker:demo/api"), &endpoint);
+        assert_eq!(host_only_match.declared_action, "default_deny");
+        assert_eq!(host_only_match.matching_rule_count, 0);
     }
 
     #[test]
