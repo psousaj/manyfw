@@ -4,14 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "examples/**"
-      - "scripts/**"
-      - "tests/**"
-      - ".github/workflows/compatibility.yml"
+    # Keep end-to-end compatibility coverage active for every PR, including
+    # docs-only changes and the stacked discovery branches.
   workflow_dispatch:
     inputs:
       qemu_kernel:
@@ -81,7 +75,7 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     needs: validate-inputs
-    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     strategy:
       fail-fast: false
       matrix:
@@ -132,42 +126,10 @@ jobs:
             status/${{ matrix.target }}.txt
           if-no-files-found: error
 
-  pull-request-build:
-    name: PR build ${{ matrix.target }}
-    needs: validate-inputs
-    if: github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-      - name: Install musl linker
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
-      - run: cargo build --locked --release --target ${{ matrix.target }}
-      - name: Smoke test PR binary
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          binary="target/$TARGET/release/manyfw"
-          test -x "$binary"
-          "$binary" --version
-          "$binary" check --file examples/manyfw.toml
-
   host-namespace-smoke:
     name: read-only host discovery in a disposable namespace
     needs: validate-inputs
-    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -177,11 +139,21 @@ jobs:
       - name: Run read-only namespace discovery test
         env:
           MANYFW_HOST_TEST_IMAGE: debian:bookworm-slim
-        run: bash tests/host_namespace.sh
+        shell: bash
+        run: |
+          if bash tests/host_namespace.sh; then
+            exit 0
+          else
+            status=$?
+          fi
+          if [[ "$status" -eq 77 ]]; then
+            echo "::error::PR CI requires the disposable namespace discovery test; NotApplicable is not accepted here"
+          fi
+          exit "$status"
 
   distro-smoke:
     name: smoke ${{ matrix.distribution }}
-    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     needs: [validate-inputs, build]
     strategy:
       fail-fast: false
@@ -239,7 +211,7 @@ jobs:
 
   integration-contracts:
     name: integration and recovery contracts
-    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     needs: [validate-inputs, build, distro-smoke]
     runs-on: ubuntu-latest
     steps:
