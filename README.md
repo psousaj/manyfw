@@ -80,6 +80,7 @@ cargo build --workspace
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security and rollback](docs/SECURITY.md)
 - [CLI and policy specification](docs/SPECIFICATION.md)
+- [Explain JSON artifact](docs/EXPLAIN.md)
 - [Roadmap and release gates](docs/ROADMAP.md)
 - [Contributing](CONTRIBUTING.md)
 

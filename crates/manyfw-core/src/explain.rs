@@ -631,7 +631,7 @@ fn same_endpoint(
     node: &snapshot::CorrelationNode,
     endpoint: &docker::ObservedPublishedEndpoint,
 ) -> bool {
-    matches!(node, snapshot::CorrelationNode::DockerEndpoint { instance_id, host_address, host_port, container_port, protocol, family, network_mode, mechanism, .. } if instance_id == &endpoint.instance_id && *host_address == endpoint.host.address && *host_port == endpoint.host.port && *container_port == endpoint.container_port && *protocol == endpoint.protocol && *family == endpoint.family && network_mode == &endpoint.network_mode && mechanism == &endpoint.mechanism)
+    matches!(node, snapshot::CorrelationNode::DockerEndpoint { instance_id, host_address, host_port, container_port, container_addresses, protocol, family, network_mode, mechanism, provenance } if instance_id == &endpoint.instance_id && *host_address == endpoint.host.address && *host_port == endpoint.host.port && *container_port == endpoint.container_port && container_addresses == &endpoint.container_addresses && *protocol == endpoint.protocol && *family == endpoint.family && network_mode == &endpoint.network_mode && mechanism == &endpoint.mechanism && provenance == &endpoint.provenance)
 }
 
 fn endpoint_key(endpoint: &docker::ObservedPublishedEndpoint) -> String {
@@ -1241,6 +1241,53 @@ mod tests {
             evaluate_policy_for_endpoint(&host_port_policy, Some("docker:demo/api"), &endpoint);
         assert_eq!(host_only_match.declared_action, "default_deny");
         assert_eq!(host_only_match.matching_rule_count, 0);
+    }
+
+    #[test]
+    fn endpoint_correlations_require_matching_container_targets_and_provenance() {
+        let endpoint = docker::ObservedPublishedEndpoint {
+            instance_id: "instance".into(),
+            host: docker::HostBinding {
+                address: Some("192.0.2.10".parse().unwrap()),
+                port: 8080,
+            },
+            container_port: 80,
+            container_addresses: vec![docker::ContainerAddress {
+                network: "bridge".into(),
+                address: "172.17.0.2".parse().unwrap(),
+                provenance: docker::FieldProvenance::DockerInspection,
+            }],
+            protocol: docker::TransportProtocol::Tcp,
+            family: docker::IpFamily::Ipv4,
+            network_mode: docker::NetworkMode::Bridge,
+            mechanism: docker::PublicationMechanism::Nat,
+            provenance: docker::FieldProvenance::PortBinding,
+        };
+        let node_for = |endpoint: &docker::ObservedPublishedEndpoint| {
+            snapshot::CorrelationNode::DockerEndpoint {
+                instance_id: endpoint.instance_id.clone(),
+                host_address: endpoint.host.address,
+                host_port: endpoint.host.port,
+                container_port: endpoint.container_port,
+                container_addresses: endpoint.container_addresses.clone(),
+                protocol: endpoint.protocol,
+                family: endpoint.family,
+                network_mode: endpoint.network_mode.clone(),
+                mechanism: endpoint.mechanism.clone(),
+                provenance: endpoint.provenance.clone(),
+            }
+        };
+
+        let matching = node_for(&endpoint);
+        assert!(same_endpoint(&matching, &endpoint));
+
+        let mut different_target = endpoint.clone();
+        different_target.container_addresses[0].address = "172.17.0.3".parse().unwrap();
+        assert!(!same_endpoint(&matching, &different_target));
+
+        let mut different_provenance = endpoint.clone();
+        different_provenance.provenance = docker::FieldProvenance::DockerInspection;
+        assert!(!same_endpoint(&matching, &different_provenance));
     }
 
     #[test]

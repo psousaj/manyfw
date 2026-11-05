@@ -83,3 +83,7 @@ without adding business logic.
 The command explains what is observed and what remains unknown. It does not
 promise protection, reachability, or enforcement merely because a policy or
 binding exists.
+
+The current serialized artifact schema is documented in
+[`../EXPLAIN.md`](../EXPLAIN.md). Schema changes must update that document and
+the `Explanation` version together.
