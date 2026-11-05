@@ -194,7 +194,12 @@ pub fn evaluate(
             let mut container_targets = endpoint
                 .container_addresses
                 .iter()
-                .map(|address| format!("{}:{}", address.network, address.address))
+                .map(|address| {
+                    format!(
+                        "{}:{}:{:?}",
+                        address.network, address.address, address.provenance
+                    )
+                })
                 .collect::<Vec<_>>();
             container_targets.sort();
             container_targets.dedup();
@@ -212,32 +217,32 @@ pub fn evaluate(
                 matches!(&edge.source, snapshot::CorrelationNode::DockerEndpoint { instance_id, host_port, .. }
                     if instance_id == &endpoint.instance_id && *host_port == endpoint.host.port)
                     && matches!(&edge.source, snapshot::CorrelationNode::DockerEndpoint {
-                        protocol, family, container_port, container_addresses, host_address, network_mode,
-                        mechanism, ..
+                        protocol, family, container_port, container_addresses, host_address,
+                        network_mode, mechanism, provenance, ..
                     } if *protocol == endpoint.protocol
                         && *family == endpoint.family
                         && *container_port == endpoint.container_port
                         && *container_addresses == endpoint.container_addresses
                         && *host_address == endpoint.host.address
                         && network_mode == &endpoint.network_mode
-                        && mechanism == &endpoint.mechanism)
+                        && mechanism == &endpoint.mechanism
+                        && provenance == &endpoint.provenance)
             }).collect::<Vec<_>>();
             let edge_uncertain = related
                 .iter()
                 .any(|edge| edge.status == snapshot::CorrelationEdgeStatus::Unknown);
+            let edge_potential = related
+                .iter()
+                .any(|edge| edge.status == snapshot::CorrelationEdgeStatus::Potential);
             let edge_confirmed = related
                 .iter()
-                .any(|edge| edge.status == snapshot::CorrelationEdgeStatus::Confirmed)
-                && !edge_uncertain;
-            let assessment = if edge_confirmed {
-                Assessment::ObservedExposure
-            } else if edge_uncertain {
+                .any(|edge| edge.status == snapshot::CorrelationEdgeStatus::Confirmed);
+            let assessment = if edge_uncertain {
                 Assessment::Unknown
-            } else if related
-                .iter()
-                .any(|edge| edge.status == snapshot::CorrelationEdgeStatus::Potential)
-            {
+            } else if edge_potential {
                 Assessment::PotentialExposure
+            } else if edge_confirmed {
+                Assessment::ObservedExposure
             } else if endpoint.family == crate::docker::IpFamily::Unspecified {
                 Assessment::Unknown
             } else {
@@ -342,13 +347,11 @@ pub fn evaluate(
         }
     }
 
-    for (listener_index, listener) in host.listeners.records.iter().enumerate() {
-        let family = format!("{:?}", listener.family).to_lowercase();
-        let protocol = format!("{:?}", listener.protocol).to_lowercase();
-        let resource = format!(
-            "listener:{protocol}/{family}/{:?}/{}/{}",
-            listener.address, listener.port, listener_index
-        );
+    let mut listeners = host.listeners.records.clone();
+    listeners.sort_by_key(listener_resource);
+    listeners.dedup_by(|left, right| listener_resource(left) == listener_resource(right));
+    for listener in &listeners {
+        let resource = listener_resource(listener);
         let evidence_id = format!("evidence-{}", stable_key(&resource));
         let (matching, declared) = matching_host_rules(policy, listener);
         let limitations = host
@@ -598,6 +601,18 @@ fn endpoint_limitations(
             .flat_map(|e| e.limitations.iter().map(|l| sanitize(&format!("{l:?}")))),
     );
     values
+}
+
+fn listener_resource(listener: &crate::host::SocketListener) -> String {
+    format!(
+        "listener:{:?}/{:?}/{}/wildcard-{}/port-{}/interface-name-{:?}",
+        listener.protocol,
+        listener.family,
+        listener.address,
+        listener.wildcard,
+        listener.port,
+        listener.interface_name
+    )
 }
 
 fn coverage(
@@ -1017,6 +1032,8 @@ mod tests {
             address: "10.20.0.4".parse().unwrap(),
             provenance: docker::FieldProvenance::DockerInspection,
         }];
+        let mut provenance_variant = endpoint.clone();
+        provenance_variant.provenance = docker::FieldProvenance::DockerInspection;
         let mut docker_observation = docker(docker::CollectionOutcome::Complete);
         docker_observation
             .containers
@@ -1033,9 +1050,41 @@ mod tests {
                 operational_status: docker::OperationalStatus::Running,
                 network_mode: docker::NetworkMode::Bridge,
                 configured_publications: Vec::new(),
-                observed_endpoints: vec![endpoint, second_target],
+                observed_endpoints: vec![endpoint, second_target, provenance_variant],
             });
-        let snapshot = snapshot::ObservationSnapshot::compose(docker_observation, host(Vec::new()));
+        let listener = host::SocketListener {
+            protocol: host::TransportProtocol::Tcp,
+            family: host::IpFamily::Ipv4,
+            address: "192.0.2.10".parse().unwrap(),
+            wildcard: false,
+            port: 8080,
+            interface_index: Some(2),
+            interface_name: Some("eth0".into()),
+            owner: host::SocketOwner::Unknown,
+        };
+        let mut host_observation = host(vec![listener]);
+        host_observation
+            .addresses
+            .records
+            .push(host::InterfaceAddress {
+                interface_index: Some(2),
+                interface_name: Some("eth0".into()),
+                address: "192.0.2.10".parse().unwrap(),
+                prefix_length: Some(24),
+                scope: host::AddressScope::Global,
+            });
+        host_observation.routes.records.push(host::NetworkRoute {
+            family: host::IpFamily::Ipv4,
+            destination: "192.0.2.0".parse().unwrap(),
+            prefix_length: 24,
+            gateway: None,
+            interface_index: Some(2),
+            interface_name: Some("eth0".into()),
+            table: Some(254),
+            metric: Some(10),
+            route_type: host::RouteType::Unicast,
+        });
+        let snapshot = snapshot::ObservationSnapshot::compose(docker_observation, host_observation);
         let policy = crate::parse_and_normalize(
             r#"
 version = 1
@@ -1059,19 +1108,64 @@ priority = 10
             .filter(|finding| finding.category == "PublishedPort")
             .collect::<Vec<_>>();
 
-        assert_eq!(published.len(), 2);
+        assert_eq!(published.len(), 3);
         assert!(published.iter().all(|finding| {
             finding.policy.matching_rule_ids == vec!["service-port-80".to_owned()]
                 && finding.policy.declared == "allow"
+                && finding.assessment == Assessment::PotentialExposure
         }));
+
+        let mut uncertain_host = snapshot.host();
+        uncertain_host.listeners.completeness = host::Completeness::Partial;
+        uncertain_host.listeners.outcome = host::CollectionOutcome::Partial;
+        uncertain_host.listeners.limitations = vec![host::Limitation::PermissionDenied];
+        let uncertain_snapshot =
+            snapshot::ObservationSnapshot::compose(snapshot.docker(), uncertain_host);
+        let uncertain_report = evaluate(&policy, &uncertain_snapshot).unwrap();
+        assert!(
+            uncertain_report
+                .findings
+                .iter()
+                .filter(|finding| finding.category == "PublishedPort")
+                .all(|finding| finding.assessment == Assessment::Unknown)
+        );
+        let mut uncertain_route_host = snapshot.host();
+        uncertain_route_host.routes.completeness = host::Completeness::Partial;
+        uncertain_route_host.routes.outcome = host::CollectionOutcome::Partial;
+        uncertain_route_host.routes.limitations = vec![host::Limitation::PolicyRoutingIncomplete];
+        let uncertain_route_snapshot =
+            snapshot::ObservationSnapshot::compose(snapshot.docker(), uncertain_route_host);
+        let edge_statuses = uncertain_route_snapshot
+            .correlations()
+            .edges
+            .iter()
+            .map(|edge| edge.status)
+            .collect::<Vec<_>>();
+        assert!(edge_statuses.contains(&snapshot::CorrelationEdgeStatus::Confirmed));
+        assert!(edge_statuses.contains(&snapshot::CorrelationEdgeStatus::Potential));
+        assert!(edge_statuses.contains(&snapshot::CorrelationEdgeStatus::Unknown));
+        let uncertain_route_report = evaluate(&policy, &uncertain_route_snapshot).unwrap();
+        assert!(
+            uncertain_route_report
+                .findings
+                .iter()
+                .filter(|finding| finding.category == "PublishedPort")
+                .all(|finding| finding.assessment == Assessment::Unknown)
+        );
         assert_eq!(
             published
                 .iter()
                 .map(|finding| finding.id.as_str())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            2
+            3
         );
+        let mut duplicate_finding_report = report.clone();
+        duplicate_finding_report.findings.push(published[0].clone());
+        assert!(matches!(
+            validate_report(&duplicate_finding_report),
+            Err(AuditError::InvalidReport(_))
+        ));
         let json = report.json().unwrap();
         assert!(json.contains("bridge:172.20.0.3"));
         assert!(json.contains("custom:10.20.0.4"));
@@ -1097,6 +1191,64 @@ priority = 10
         assert_eq!(
             json,
             evaluate(&policy, &reversed_snapshot)
+                .unwrap()
+                .json()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn host_listener_findings_are_stable_across_input_order() {
+        let listener = |address: &str, port| host::SocketListener {
+            protocol: host::TransportProtocol::Tcp,
+            family: host::IpFamily::Ipv4,
+            address: address.parse().unwrap(),
+            wildcard: false,
+            port,
+            interface_index: Some(2),
+            interface_name: Some("eth0".into()),
+            owner: host::SocketOwner::Unknown,
+        };
+        let first = listener("192.0.2.10", 8080);
+        let second = listener("192.0.2.11", 8081);
+        let mut wildcard_variant = first.clone();
+        wildcard_variant.wildcard = true;
+        let mut reindexed = first.clone();
+        reindexed.interface_index = Some(99);
+
+        let snapshot = snapshot::ObservationSnapshot::compose(
+            docker(docker::CollectionOutcome::Complete),
+            host(vec![
+                first.clone(),
+                second,
+                first,
+                wildcard_variant,
+                reindexed,
+            ]),
+        );
+        let report = evaluate(&policy(), &snapshot).unwrap();
+        let listener_findings = report
+            .findings
+            .iter()
+            .filter(|finding| finding.category == "HostListener")
+            .collect::<Vec<_>>();
+        assert_eq!(listener_findings.len(), 3);
+        assert_eq!(
+            listener_findings
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+
+        let mut reordered_host = snapshot.host();
+        reordered_host.listeners.records.reverse();
+        let reordered_snapshot =
+            snapshot::ObservationSnapshot::compose(snapshot.docker(), reordered_host);
+        assert_eq!(
+            report.json().unwrap(),
+            evaluate(&policy(), &reordered_snapshot)
                 .unwrap()
                 .json()
                 .unwrap()
