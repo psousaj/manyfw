@@ -862,6 +862,12 @@ mod tests {
             10
         }
     }
+    struct NamespaceStatus(bool);
+    impl NamespaceSource for NamespaceStatus {
+        fn is_current_network_namespace(&self) -> bool {
+            self.0
+        }
+    }
     fn data<T>(records: Vec<T>) -> Result<SourceData<T>, HostSourceError> {
         Ok(SourceData {
             records,
@@ -909,6 +915,171 @@ mod tests {
         assert_eq!(result.listeners.completeness, Completeness::Unknown);
         assert!(!result.diagnostics[0].message.contains('\n'));
         assert_eq!(result.tailscale.records[0].state, TailscaleState::Absent);
+    }
+
+    #[test]
+    fn permission_denial_and_namespace_verification_failure_remain_explicit() {
+        let denied = HostSources {
+            interfaces: Arc::new(Fake {
+                value: data(Vec::<NetworkInterface>::new()),
+            }),
+            addresses: Arc::new(Fake {
+                value: data(Vec::<InterfaceAddress>::new()),
+            }),
+            listeners: Arc::new(Fake {
+                value: Err(HostSourceError::PermissionDenied),
+            }),
+            routes: Arc::new(Fake {
+                value: data(Vec::<NetworkRoute>::new()),
+            }),
+            tailscale: Arc::new(Fake {
+                value: data(Vec::<TailscaleObservation>::new()),
+            }),
+            namespace: Arc::new(NamespaceStatus(true)),
+        };
+        let permission = HostDiscovery::new(denied, Time).collect();
+        assert_eq!(
+            permission.listeners.outcome,
+            CollectionOutcome::PermissionDenied
+        );
+        assert_eq!(permission.listeners.completeness, Completeness::Unknown);
+        assert!(
+            permission
+                .listeners
+                .limitations
+                .contains(&Limitation::PermissionDenied)
+        );
+        assert!(permission.diagnostics.iter().any(|diagnostic| {
+            diagnostic.dimension == Dimension::Listeners
+                && diagnostic.code == DiagnosticCode::CollectionError
+                && diagnostic.message == "socket source unavailable: permission denied"
+        }));
+
+        let unverified = HostSources {
+            interfaces: Arc::new(Fake {
+                value: data(Vec::<NetworkInterface>::new()),
+            }),
+            addresses: Arc::new(Fake {
+                value: data(Vec::<InterfaceAddress>::new()),
+            }),
+            listeners: Arc::new(Fake {
+                value: data(Vec::<SocketListener>::new()),
+            }),
+            routes: Arc::new(Fake {
+                value: data(Vec::<NetworkRoute>::new()),
+            }),
+            tailscale: Arc::new(Fake {
+                value: data(Vec::<TailscaleObservation>::new()),
+            }),
+            namespace: Arc::new(NamespaceStatus(false)),
+        };
+        let namespace = HostDiscovery::new(unverified, Time).collect();
+        assert_eq!(namespace.namespace.kind, NamespaceKind::Unknown);
+        assert!(namespace.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::CollectionError
+                && diagnostic.message == "source is not observing the current network namespace"
+        }));
+        assert!(
+            namespace
+                .interfaces
+                .limitations
+                .contains(&Limitation::NamespaceNotVerified)
+        );
+        assert!(
+            namespace
+                .addresses
+                .limitations
+                .contains(&Limitation::NamespaceNotVerified)
+        );
+        assert!(
+            namespace
+                .listeners
+                .limitations
+                .contains(&Limitation::NamespaceNotVerified)
+        );
+        assert!(
+            namespace
+                .routes
+                .limitations
+                .contains(&Limitation::NamespaceNotVerified)
+        );
+        assert!(
+            namespace
+                .tailscale
+                .limitations
+                .contains(&Limitation::NamespaceNotVerified)
+        );
+        assert!(
+            namespace
+                .tailscale
+                .limitations
+                .contains(&Limitation::TailscaleDaemonNotQueried)
+        );
+    }
+
+    #[test]
+    fn out_of_window_source_intervals_mark_only_that_dimension_temporal() {
+        let address = |value: &str| InterfaceAddress {
+            interface_index: None,
+            interface_name: None,
+            address: value.parse().unwrap(),
+            prefix_length: Some(32),
+            scope: AddressScope::Global,
+        };
+        let mut consistent = data(vec![address("192.0.2.2"), address("192.0.2.1")]).unwrap();
+        consistent.interval = CollectionInterval {
+            started_at: 10,
+            finished_at: 10,
+        };
+        let mut inconsistent = data(vec![address("192.0.2.1"), address("192.0.2.2")]).unwrap();
+        inconsistent.interval = CollectionInterval {
+            started_at: 9,
+            finished_at: 10,
+        };
+        let collect = |addresses| {
+            let sources = (
+                Fake {
+                    value: data(Vec::<NetworkInterface>::new()),
+                },
+                Fake {
+                    value: Ok(addresses),
+                },
+                Fake {
+                    value: data(Vec::<SocketListener>::new()),
+                },
+                Fake {
+                    value: data(Vec::<NetworkRoute>::new()),
+                },
+                Fake {
+                    value: data(Vec::<TailscaleObservation>::new()),
+                },
+            );
+            HostDiscovery::new(sources, Time).collect()
+        };
+        let stable = collect(consistent);
+        let result = collect(inconsistent);
+        assert_eq!(stable.addresses.records, result.addresses.records);
+        assert_eq!(
+            stable.addresses.records[0].address,
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(stable.addresses.outcome, CollectionOutcome::Complete);
+        assert_eq!(
+            result.addresses.outcome,
+            CollectionOutcome::TemporalInconsistency
+        );
+        assert!(
+            result
+                .addresses
+                .limitations
+                .contains(&Limitation::TemporalInconsistency)
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.dimension == Dimension::Addresses
+                && diagnostic.code == DiagnosticCode::TemporalInconsistency
+        }));
+        assert_eq!(result.interfaces.outcome, CollectionOutcome::Complete);
+        assert_eq!(result.routes.outcome, CollectionOutcome::Complete);
     }
 
     #[test]

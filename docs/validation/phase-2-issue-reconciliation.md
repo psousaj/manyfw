@@ -23,6 +23,44 @@ Initial base: `d6b745b7b28e4aa896ecfde95091ad9d6b9c19b0`
 
 Tracker: commented with evidence and closed as completed on 2026-11-05.
 
+### #15 — Host network observation
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Observe current namespace through structured Linux sources without external commands | `manyfw-linux` uses Netlink for interfaces/addresses/routes and socket diagnostics for listeners, with explicit procfs fallbacks; `HostDiscovery` marks namespace scope | `cargo test --workspace --locked`; `tests/host_namespace.sh` confirms current-namespace collection in disposable `--network none` containers; source inspection finds no external-command discovery path |
+| Separate typed observations for interfaces, addresses, TCP/UDP listeners, and routes | Distinct observation structs and dimension types in `crates/manyfw-core/src/host.rs` | Netlink mapping tests; `procfs_fallback_fixtures_keep_ipv4_ipv6_sockets_routes_and_interfaces`; local live host-sources test |
+| Explicit Netlink, socket-diagnostics, and procfs limitations | Per-dimension outcome/completeness/provenance/limitations; source adapters preserve primary/fallback errors | Linux fallback tests cover unavailable/permission/malformed sources; core permission test now asserts final outcome, completeness, limitation, and diagnostic |
+| Read-only and injectable source boundaries | `HostSources`, `NamespaceSource`, and `Clock` are injectable; adapters issue read operations only | Fake-source core tests and the disposable namespace smoke; no route/firewall mutation path in the collector |
+
+### #16 — Host normalization and Tailscale coverage
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Deterministic normalization and independent per-dimension completeness | `HostDiscovery::collect`, sort functions, and metadata normalization in `crates/manyfw-core/src/host.rs` | `records_are_sorted_and_wildcard_family_is_retained`; `out_of_window_source_intervals_mark_only_that_dimension_temporal` compares normalized records across source ordering/timing changes |
+| Tailscale present/absent/partial without peer or reachability claims | `TailscaleObservation` represents only interface state/address facts; limitation records daemon not queried | `tailscale_states_are_normalized_deterministically_without_peer_claims`; `tailscale_absence_is_not_inferred_when_interface_observation_is_unavailable`; procfs fixture asserts observed presence |
+| Source divergence, permission, namespace, and temporal limits remain visible | `HostDiscovery` maps source errors, verifies namespace, reconciles provenance, and applies per-dimension temporal limits | `divergent_source_is_inconsistent_and_keeps_alternative_provenance`; added `permission_denial_and_namespace_verification_failure_remain_explicit`; added `out_of_window_source_intervals_mark_only_that_dimension_temporal` |
+| IPv4/IPv6, wildcard, loopback, TCP, UDP, and routes are covered | Netlink/procfs typed mappings | `procfs_fallback_fixtures_keep_ipv4_ipv6_sockets_routes_and_interfaces`; `address_mapping_preserves_family_prefix_scope_and_interface` includes `fe80::17`; `cross_source_reference_is_partial_not_silently_dropped` covers a missing interface reference |
+
+### #4 — Host discovery (parent issue)
+
+| Acceptance criterion | Implementation evidence | Test/evidence | Status |
+|---|---|---|---|
+| Unit coverage for loopback, wildcard, link-local, IPv6, and missing interfaces | Core reconciliation and Linux Netlink/procfs mapping | `records_are_sorted_and_wildcard_family_is_retained`; `address_mapping_preserves_family_prefix_scope_and_interface` (link-local IPv6); `cross_source_reference_is_partial_not_silently_dropped` | Demonstrated |
+| Linux namespace integration for interface/address changes | Updated `tests/host_namespace.sh` uses disposable `--network none` namespaces; fixture setup alone has `NET_ADMIN`, while the baseline collector has no capabilities | Local Rust 1.85 run observed loopback administrative state `Up -> Down` and newly added `192.0.2.77/32` plus `2001:db8::77/128` on `lo`; before/after snapshots assert the transition | Demonstrated |
+| Explain unknown host-firewall, cloud security-group, upstream NAT, and host-proxy state | `explain` unknowns and `docs/SPECIFICATION.md` explicitly name uninspected external factors | `human_and_json_render_policy_evidence_and_validate_references` asserts host firewall state, upstream NAT, cloud security groups, and host proxies appear in human and JSON output | Demonstrated |
+| Discovery does not change routes or firewall state | Host adapter performs read-only collection; test fixture setup changes only the disposable namespace and does not invoke route or firewall tools | Source inspection of Linux collectors; script uses `--network none`, no Docker socket, and asserts only loopback/link/address observations; no host firewall/routing operations | Demonstrated |
+
+The integration fixture changes only its disposable namespace to exercise
+observation of changes; the ManyFW collector remains read-only. It does not
+alter the development host routing or firewall state. Rust 1.85 formatting,
+workspace Clippy, workspace tests, shell syntax, workflow YAML parsing, and the
+updated namespace integration passed locally. Hosted CI passed on the prior
+release candidate (run 42063795948); the locally modified fixture has not yet
+run in hosted CI. The script cleanup removes only its three named output files
+and then removes the specifically named temporary directory. Tracker: issues
+#15 and #16 received evidence comments; parent #4 received its completed
+evidence comment and was closed as completed on 2026-11-05.
+
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 
 | Acceptance criterion | Implementation evidence | Test/evidence | Status |
