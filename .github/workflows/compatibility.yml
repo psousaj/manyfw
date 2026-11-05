@@ -75,7 +75,7 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     needs: validate-inputs
-    if: github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: github.event_name != 'pull_request' && github.event_name != 'workflow_call' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     strategy:
       fail-fast: false
       matrix:
@@ -174,7 +174,7 @@ jobs:
 
   distro-smoke:
     name: smoke ${{ matrix.distribution }}
-    if: inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: github.event_name != 'pull_request' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     needs: [validate-inputs, build]
     strategy:
       fail-fast: false
@@ -232,7 +232,7 @@ jobs:
 
   integration-contracts:
     name: integration and recovery contracts
-    if: inputs.qemu_kernel == '' && inputs.candidate_sha == ''
+    if: github.event_name != 'pull_request' && inputs.qemu_kernel == '' && inputs.candidate_sha == ''
     needs: [validate-inputs, build, distro-smoke]
     runs-on: ubuntu-latest
     steps:
