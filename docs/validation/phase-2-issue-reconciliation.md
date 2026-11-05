@@ -39,6 +39,24 @@ Validation: Rust 1.85 fmt, workspace Clippy, and
 `cargo test --workspace --locked` passed; the workspace reports 83 core unit tests.
 Tracker: commented with the completed evidence and closed as completed on 2026-11-05.
 
+### #13 — Docker identity and lifecycle snapshot
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Typed sanitized observations through injectable read-only boundary | `DockerTransport`, `Clock`, and `ErrorConverter` in `crates/manyfw-core/src/docker.rs`; `DockerDiscovery::collect` projects typed output; CLI Docker adapter uses read-only Engine API calls | Core fake-transport tests assert observations and sanitization; `unknown_identity_is_explicit_and_prohibited_metadata_is_not_serialized`; PR #28 CI completed successfully |
+| Stable identity precedence and unresolved, ambiguous, conflicting outcomes | `identity` prefers `com.manyfw.service-id`, then Compose project/service; `resolve_short_selector` only resolves one observed logical identity | `identity_precedence_and_replicas_are_preserved`; `conflicting_identity_labels_are_reported_without_falling_back_to_an_instance`; `unknown_identity_is_explicit_and_prohibited_metadata_is_not_serialized`; `short_selector_requires_one_observed_logical_identity` |
+| Lifecycle and logical identity versus container instance are preserved | `ContainerObservation` exposes separate `logical_identity`, `instance`, `lifecycle`, and operational state fields | `identity_precedence_and_replicas_are_preserved`; `lifecycle_network_and_temporal_outcomes_are_retained`; `replicas_share_identity_without_being_duplicate_identity_errors` |
+| Unavailable, permission, malformed, and partial collection retain explicit status/evidence | `CollectionOutcome`, `Completeness`, diagnostics, provenance, and limitations; malformed records are quarantined while valid ones remain | `failures_are_distinguished_from_zero_candidates` asserts unavailable and permission-denied listing; `partial_inspection_keeps_valid_observations_and_sanitizes_errors` asserts permission-denied inspection and retained valid data; `malformed_ports_are_quarantined_as_a_partial_snapshot`; `malformed_inspection_failure_is_not_downgraded_to_partial` |
+
+Remediation added direct permission-denied assertions for both Docker listing
+and per-instance inspection, including outcome, completeness, limitation,
+diagnostic, and retention of valid observations. Rust 1.85 targeted tests,
+core Clippy, and formatting checks passed. PR #28's Rust 1.85/stable, fixture,
+unit, and dependency-audit CI jobs passed. The live Docker daemon is available,
+but this child-ticket audit relies on deterministic injectable transport tests;
+parent #3's disposable-container integration criterion is tracked separately.
+Tracker: commented with evidence and closed as completed on 2026-11-05.
+
 ### #12 — Deterministic policy CLI contract
 
 | Acceptance criterion | Implementation evidence | Test/evidence |
