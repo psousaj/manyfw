@@ -48,7 +48,7 @@ detected without `ldd`). It uses `sudo` only if the destination is not writable.
 To install a specific release or choose a writable destination:
 
 ```sh
-bash scripts/install.sh 0.1.0
+bash scripts/install.sh 0.2.0
 MANYFW_INSTALL_DIR="$HOME/.local/bin" bash scripts/install.sh
 ```
 
