@@ -342,7 +342,7 @@ fn normalize(raw: RawConfig) -> Result<ValidationReport, PolicyError> {
             .then_with(|| selector_key(&left.source).cmp(&selector_key(&right.source)))
             .then_with(|| selector_key(&left.destination).cmp(&selector_key(&right.destination)))
             .then_with(|| protocol_key(left.protocol).cmp(&protocol_key(right.protocol)))
-            .then_with(|| port_key(&left.ports).cmp(&port_key(&right.ports)))
+            .then_with(|| compare_port_scope(&left.ports, &right.ports))
             .then_with(|| action_key(left.action).cmp(&action_key(right.action)))
             .then_with(|| left.id.cmp(&right.id))
     });
@@ -836,11 +836,20 @@ fn action_key(value: Action) -> u8 {
     }
 }
 
-fn port_key(value: &PortScope) -> String {
-    match value {
-        PortScope::NotApplicable => "0".into(),
-        PortScope::Any => "1".into(),
-        PortScope::Specific(ranges) => format!("2:{ranges:?}"),
+fn compare_port_scope(left: &PortScope, right: &PortScope) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match (left, right) {
+        (PortScope::NotApplicable, PortScope::NotApplicable) | (PortScope::Any, PortScope::Any) => {
+            Ordering::Equal
+        }
+        (PortScope::NotApplicable, _) | (PortScope::Any, PortScope::Specific(_)) => Ordering::Less,
+        (PortScope::Specific(_), PortScope::NotApplicable | PortScope::Any) => Ordering::Greater,
+        (PortScope::Specific(left), PortScope::Specific(right)) => left
+            .iter()
+            .map(|range| (range.start, range.end))
+            .cmp(right.iter().map(|range| (range.start, range.end))),
+        (PortScope::Any, PortScope::NotApplicable) => Ordering::Greater,
     }
 }
 
@@ -1192,6 +1201,58 @@ priority = 100
     }
 
     #[test]
+    fn normalized_rule_sort_uses_priority_and_canonical_tie_breaks() {
+        let header = "version = 1\ndefault_action = \"deny\"\n\n[zones.vpn]\ninterfaces = [\"tailscale0\"]\n";
+        let rules = [
+            "[[rules]]\nid = \"priority-first\"\nsource = \"zone:vpn\"\ndestination = \"host:later\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 5\n",
+            "[[rules]]\nid = \"source-cidr\"\nsource = \"cidr:192.0.2.0/24\"\ndestination = \"host:later\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"destination-docker\"\nsource = \"zone:vpn\"\ndestination = \"docker:service\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"destination-host-a\"\nsource = \"zone:vpn\"\ndestination = \"host:alpha\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"destination-host-z\"\nsource = \"zone:vpn\"\ndestination = \"host:zulu\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"tcp-any\"\nsource = \"zone:vpn\"\ndestination = \"host:ports\"\nport_scope = \"any\"\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"tcp-80\"\nsource = \"zone:vpn\"\ndestination = \"host:ports\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"tcp-443\"\nsource = \"zone:vpn\"\ndestination = \"host:ports\"\nports = [443]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 10\n",
+            "[[rules]]\nid = \"udp-80\"\nsource = \"zone:vpn\"\ndestination = \"host:ports\"\nports = [80]\nprotocol = \"udp\"\naction = \"allow\"\npriority = 10\n",
+        ];
+        let first = format!("{header}{}", rules.concat());
+        let second = format!(
+            "{header}{}",
+            rules.iter().rev().copied().collect::<Vec<_>>().concat()
+        );
+        let first = parse_and_normalize(&first).unwrap();
+        let second = parse_and_normalize(&second).unwrap();
+        let ids = first
+            .policy
+            .rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "priority-first",
+                "source-cidr",
+                "destination-docker",
+                "destination-host-a",
+                "tcp-any",
+                "tcp-80",
+                "tcp-443",
+                "udp-80",
+                "destination-host-z",
+            ]
+        );
+        assert_eq!(first, second);
+
+        let conflict = VALID
+            .replace("id = \"db-vpn\"", "id = \"deny\"")
+            .replace("action = \"allow\"", "action = \"deny\"")
+            + "\n[[rules]]\nid = \"allow\"\nsource = \"zone:vpn\"\ndestination = \"docker:homelab/postgres\"\nports = [5432, \"6000-6002\", \"6002-6004\"]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 100\n";
+        let error = parse_and_normalize(&conflict).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        assert!(error.to_string().contains("rules \"allow\" and \"deny\""));
+    }
+
+    #[test]
     fn reports_broad_scope_and_unknown_symbolic_overlap() {
         let input = VALID
             .replace("ports = [5432, \"6000-6002\", \"6002-6004\"]", "port_scope = \"any\"")
@@ -1238,6 +1299,8 @@ priority = 100
             parse_and_normalize(&duplicate).unwrap_err().code(),
             ErrorCode::DuplicateRule
         );
+        let duplicate_error = parse_and_normalize(&duplicate).unwrap_err().to_string();
+        assert!(duplicate_error.contains("rules \"db-vpn\" and \"other\""));
         let conflict = format!(
             "{VALID}\n[[rules]]\nid = \"other\"\nsource = \"zone:vpn\"\ndestination = \"docker:homelab/postgres\"\nports = [5432]\nprotocol = \"tcp\"\naction = \"deny\"\npriority = 100\n"
         );
@@ -1292,6 +1355,289 @@ priority = 100
         assert_eq!(
             parse_and_normalize(&input).unwrap_err().code(),
             ErrorCode::InvalidProtocol
+        );
+
+        let input = VALID
+            .replace("source = \"zone:vpn\"", "source = \"cidr:192.0.2.0/24\"")
+            .replace("protocol = \"tcp\"", "protocol = \"icmpv6\"")
+            .replace("ports = [5432, \"6000-6002\", \"6002-6004\"]\n", "");
+        assert_eq!(
+            parse_and_normalize(&input).unwrap_err().code(),
+            ErrorCode::InvalidProtocol
+        );
+    }
+
+    #[test]
+    fn normalized_policy_and_diagnostic_metadata_are_declaration_order_independent() {
+        let zones_forward = r#"
+[zones.vpn]
+interfaces = ["tailscale0", "eth0", "eth0", "enp*"]
+subnets = ["2001:db8:1::1/64", "192.0.2.15/24", "192.0.2.0/24"]
+
+[zones.local]
+interfaces = ["lo"]
+"#;
+        let zones_reverse = r#"
+[zones.local]
+interfaces = ["lo"]
+
+[zones.vpn]
+subnets = ["192.0.2.0/24", "192.0.2.0/24", "2001:db8:1::/64"]
+interfaces = ["enp*", "eth0", "tailscale0"]
+"#;
+        let broad = r#"
+[[rules]]
+id = "broad"
+source = "zone:vpn"
+destination = "docker:homelab/postgres"
+port_scope = "any"
+protocol = "tcp"
+action = "allow"
+priority = 10
+"#;
+        let specific = r#"
+[[rules]]
+id = "specific"
+source = "zone:vpn"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "allow"
+priority = 20
+"#;
+        let symbolic = r#"
+[[rules]]
+id = "symbolic"
+source = "identity:client"
+destination = "docker:homelab/postgres"
+ports = [5432]
+protocol = "tcp"
+action = "deny"
+priority = 30
+"#;
+        let header = "version = 1\ndefault_action = \"deny\"\n";
+        let forward = format!("{header}{zones_forward}{broad}{specific}{symbolic}");
+        let reverse = format!("{header}{zones_reverse}{symbolic}{specific}{broad}");
+        let forward = parse_and_normalize(&forward).unwrap();
+        let reverse = parse_and_normalize(&reverse).unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward.policy.zones["vpn"].interfaces,
+            vec![
+                InterfaceSelector::Exact("eth0".into()),
+                InterfaceSelector::Exact("tailscale0".into()),
+                InterfaceSelector::Glob("enp*".into()),
+            ]
+        );
+        assert_eq!(
+            forward.policy.zones["vpn"].subnets,
+            vec![
+                "192.0.2.0/24".parse::<IpNet>().unwrap(),
+                "2001:db8:1::/64".parse::<IpNet>().unwrap(),
+            ]
+        );
+
+        let broad_scope = forward
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::BroadPortScope)
+            .unwrap();
+        assert_eq!(broad_scope.severity, Severity::Warning);
+        assert_eq!(
+            broad_scope.location.as_deref(),
+            Some("rules[id=\"broad\"].port_scope")
+        );
+        assert_eq!(broad_scope.rule_ids, ["broad"]);
+
+        let redundant = forward
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::Redundant)
+            .unwrap();
+        assert_eq!(redundant.severity, Severity::Warning);
+        assert_eq!(
+            redundant.location.as_deref(),
+            Some("rules[id=\"broad\"],rules[id=\"specific\"]")
+        );
+        assert_eq!(redundant.rule_ids, ["broad", "specific"]);
+
+        let unknown_overlaps = forward
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == DiagnosticCode::UnknownOverlap)
+            .collect::<Vec<_>>();
+        assert_eq!(unknown_overlaps.len(), 2);
+        assert!(
+            unknown_overlaps
+                .iter()
+                .all(|diagnostic| diagnostic.severity == Severity::Warning)
+        );
+        assert_eq!(unknown_overlaps[0].rule_ids, ["broad", "symbolic"]);
+        assert_eq!(
+            unknown_overlaps[0].location.as_deref(),
+            Some("rules[id=\"broad\"],rules[id=\"symbolic\"]")
+        );
+        assert_eq!(unknown_overlaps[1].rule_ids, ["specific", "symbolic"]);
+        assert_eq!(
+            unknown_overlaps[1].location.as_deref(),
+            Some("rules[id=\"specific\"],rules[id=\"symbolic\"]")
+        );
+    }
+
+    #[test]
+    fn validates_rule_ids_selectors_interfaces_and_priority_bounds() {
+        let long_id = "x".repeat(129);
+        for invalid_id in ["Upper", "_starts_with_symbol", "", long_id.as_str()] {
+            let input = VALID.replace("id = \"db-vpn\"", &format!("id = {invalid_id:?}"));
+            assert_eq!(
+                parse_and_normalize(&input).unwrap_err().code(),
+                ErrorCode::InvalidRuleId,
+                "id {invalid_id:?} should be rejected"
+            );
+        }
+
+        let reserved_id = VALID.replace("id = \"db-vpn\"", "id = \"legacy.explicit\"");
+        assert_eq!(
+            parse_and_normalize(&reserved_id).unwrap_err().code(),
+            ErrorCode::InvalidRuleId
+        );
+
+        let duplicate_id = format!(
+            "{VALID}\n[[rules]]\nid = \"db-vpn\"\nsource = \"zone:vpn\"\ndestination = \"host:gateway\"\nports = [80]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 101\n"
+        );
+        assert_eq!(
+            parse_and_normalize(&duplicate_id).unwrap_err().code(),
+            ErrorCode::DuplicateRuleId
+        );
+
+        for (selector, expected) in [
+            ("not-qualified", ErrorCode::InvalidSelector),
+            ("zone:missing", ErrorCode::InvalidSelector),
+            ("cidr:not-a-cidr", ErrorCode::InvalidCidr),
+        ] {
+            let input = VALID.replace("source = \"zone:vpn\"", &format!("source = \"{selector}\""));
+            assert_eq!(parse_and_normalize(&input).unwrap_err().code(), expected);
+        }
+
+        let invalid_interface = VALID.replace(
+            "interfaces = [\"tailscale0\"]",
+            "interfaces = [\"bad/name\"]",
+        );
+        assert_eq!(
+            parse_and_normalize(&invalid_interface).unwrap_err().code(),
+            ErrorCode::InvalidInterface
+        );
+
+        let negative_priority = VALID.replace("priority = 100", "priority = -1");
+        assert_eq!(
+            parse_and_normalize(&negative_priority).unwrap_err().code(),
+            ErrorCode::InvalidToml
+        );
+
+        let zero_priority = VALID.replace("priority = 100", "priority = 0");
+        assert_eq!(
+            parse_and_normalize(&zero_priority).unwrap().policy.rules[0].priority,
+            0
+        );
+    }
+
+    #[test]
+    fn distinguishes_valid_partial_overlap_priority_and_non_overlap_cases() {
+        let partial_same_action = VALID
+            .replace(
+                "ports = [5432, \"6000-6002\", \"6002-6004\"]",
+                "ports = [\"1000-2000\"]",
+            )
+            .replace("priority = 100", "priority = 10")
+            + "\n[[rules]]\nid = \"partial\"\nsource = \"zone:vpn\"\ndestination = \"docker:homelab/postgres\"\nports = [\"1500-2500\"]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 20\n";
+        assert!(parse_and_normalize(&partial_same_action).is_ok());
+
+        let different_priority_actions = VALID.replace(
+            "ports = [5432, \"6000-6002\", \"6002-6004\"]",
+            "ports = [5432]",
+        ) + "\n[[rules]]\nid = \"lower-priority-deny\"\nsource = \"zone:vpn\"\ndestination = \"docker:homelab/postgres\"\nports = [5432]\nprotocol = \"tcp\"\naction = \"deny\"\npriority = 200\n";
+        assert!(parse_and_normalize(&different_priority_actions).is_ok());
+
+        let non_overlapping = VALID.replace(
+            "ports = [5432, \"6000-6002\", \"6002-6004\"]",
+            "ports = [5432]",
+        ) + "\n[[rules]]\nid = \"other-port\"\nsource = \"zone:vpn\"\ndestination = \"docker:homelab/postgres\"\nports = [8080]\nprotocol = \"tcp\"\naction = \"deny\"\npriority = 100\n";
+        assert!(parse_and_normalize(&non_overlapping).is_ok());
+    }
+
+    #[test]
+    fn legacy_migration_expands_zones_and_rejects_missing_fields_and_reserved_ids() {
+        let legacy = r#"version = 1
+default_action = "deny"
+[zones.alpha]
+interfaces = ["eth0"]
+[zones.beta]
+interfaces = ["eth1"]
+[services.postgres]
+target = "docker:homelab/postgres"
+allow = ["beta", "alpha"]
+protocol = "tcp"
+ports = [5432]
+priority = 100
+"#;
+        let report = parse_and_normalize(legacy).unwrap();
+        let ids = report
+            .policy
+            .rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "legacy.service.postgres.zone.alpha",
+                "legacy.service.postgres.zone.beta"
+            ]
+        );
+        let migration_diagnostics = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == DiagnosticCode::LegacySyntax)
+            .collect::<Vec<_>>();
+        assert_eq!(migration_diagnostics.len(), 2);
+        assert!(migration_diagnostics.iter().all(|diagnostic| {
+            diagnostic.code == DiagnosticCode::LegacySyntax
+                && diagnostic.severity == Severity::Warning
+                && diagnostic.location.as_deref() == Some("services.postgres")
+        }));
+        assert_eq!(
+            migration_diagnostics[0].rule_ids,
+            ["legacy.service.postgres.zone.alpha"]
+        );
+        assert_eq!(
+            migration_diagnostics[1].rule_ids,
+            ["legacy.service.postgres.zone.beta"]
+        );
+
+        for field in ["target", "allow", "protocol", "ports", "priority"] {
+            let incomplete = legacy
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{field} =")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                parse_and_normalize(&incomplete).unwrap_err().code(),
+                ErrorCode::LegacyMigrationRequired,
+                "missing legacy field {field} should require migration"
+            );
+        }
+
+        let missing_default = legacy.replace("default_action = \"deny\"\n", "");
+        assert_eq!(
+            parse_and_normalize(&missing_default).unwrap_err().code(),
+            ErrorCode::LegacyMigrationRequired
+        );
+        let both_port_forms =
+            legacy.replace("ports = [5432]", "ports = [5432]\nport_scope = \"any\"");
+        assert_eq!(
+            parse_and_normalize(&both_port_forms).unwrap_err().code(),
+            ErrorCode::LegacyMigrationRequired
         );
     }
 }

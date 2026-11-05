@@ -22,3 +22,19 @@ Initial base: `d6b745b7b28e4aa896ecfde95091ad9d6b9c19b0`
 | Core tests exercise the public normalization seam | `parse_and_normalize(input: &str) -> Result<ValidationReport, PolicyError>` | Core tests call the public seam; `cargo +1.85.0 test -p manyfw-core --lib --locked` passed (78 tests) |
 
 Tracker: commented with evidence and closed as completed on 2026-11-05.
+
+### #11 — Policy semantics and legacy migration
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| CIDRs, interfaces, ports, selectors, IDs, and policy ordering normalize deterministically | Normalization functions in `crates/manyfw-core/src/lib.rs`; `compare_port_scope` compares normalized numeric port ranges rather than debug-formatted strings | `normalizes_cidr_and_interface_types`; `normalized_policy_and_diagnostic_metadata_are_declaration_order_independent`; `normalized_rule_sort_uses_priority_and_canonical_tie_breaks`; `parses_a_canonical_policy_through_the_public_seam`; `validates_rule_ids_selectors_interfaces_and_priority_bounds` |
+| Conflicts, semantic duplicates, unknown overlaps, and legacy migration have specified outcomes | `analyze_rules`, duplicate-ID validation, and legacy migration in `crates/manyfw-core/src/lib.rs`; details in `docs/SPECIFICATION.md` and ADR-0001 | `rejects_duplicates_and_equal_priority_conflicts`; `reports_broad_scope_and_unknown_symbolic_overlap`; `distinguishes_valid_partial_overlap_priority_and_non_overlap_cases`; `migrates_complete_legacy_service_and_rejects_incomplete_one`; `legacy_migration_expands_zones_and_rejects_missing_fields_and_reserved_ids` |
+| Validation reports contain stable diagnostic codes, locations, severities, and rule IDs | `Diagnostic` fields and deterministic sorting in `normalize`/`analyze_rules` | Exact metadata assertions for broad scope, redundancy, unknown overlaps, and legacy diagnostics; full report equality under declaration permutations |
+| Tests prove declaration-order independence and IPv4/IPv6 protocol validation | Canonical normalization and protocol-family validation in `crates/manyfw-core/src/lib.rs` | Policy/diagnostic permutation test; `accepts_ipv6_cidr_selectors_and_icmpv6`; `rejects_mismatched_icmp_address_family` rejects both mismatched families |
+
+Audit remediation found that specific port scopes were sorted by their debug
+string, which placed port 443 before port 80. Changed the sort to compare
+normalized numeric port ranges, consistent with canonical port ordering.
+Validation: Rust 1.85 fmt, workspace Clippy, and
+`cargo test --workspace --locked` passed; the workspace reports 83 core unit tests.
+Tracker: commented with the completed evidence and closed as completed on 2026-11-05.
