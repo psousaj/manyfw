@@ -87,3 +87,24 @@ Validation: `cargo +1.85.0 test -p manyfw --test cli --locked` passed (11
 tests); every `examples/invalid/*.toml` fixture returned nonzero through the
 real CLI. Tracker: commented with the completed evidence and closed as
 completed on 2026-11-05.
+
+### #2 — Versioned policy schema and validation contracts
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Examples and conceptual schema are documented | `docs/SPECIFICATION.md` documents schema v1, canonical and legacy forms, typed selectors, and normalized model; `docs/adr/0001-versioned-policy-schema.md` records the versioning decision; `examples/manyfw.toml` is the valid example | Documentation and fixture agree on required `version`, explicit `default_action`, selectors, ports, protocols, actions, and priority |
+| Unit tests cover valid/invalid ports, overlapping zones, unknown keys, malformed targets, and priority ties | `normalize_ports`, `parse_selector`, `analyze_rules` in `crates/manyfw-core/src/lib.rs` | `supports_explicit_any_and_non_port_protocol_scopes`; `reports_structured_errors_for_missing_rule_fields_and_bad_ports`; `rejects_unknown_fields_and_protocols`; `validates_rule_ids_selectors_interfaces_and_priority_bounds` now includes empty/whitespace Docker/host targets; `overlapping_zone_subnets_remain_unknown_in_symbolic_rule_analysis`; `rejects_duplicates_and_equal_priority_conflicts` |
+| Normalized result is independent of TOML declaration ordering | Canonical sorting in `normalize`; exact semantic values are exposed through the core `parse_and_normalize` seam | `ordering_is_independent_of_declaration_order`; `normalized_policy_and_diagnostic_metadata_are_declaration_order_independent`; `normalized_rule_sort_uses_priority_and_canonical_tie_breaks` |
+| No packet-filter mutations occur | Core parsing/normalization has no OS/firewall adapter; project security and architecture docs prohibit mutation in this milestone | Source inspection of `manyfw-core` parser path and `docs/SECURITY.md`, `docs/ARCHITECTURE.md`; schema tests invoke the public pure parsing seam only |
+
+The ambiguous “overlapping zones” test request is interpreted per the formal
+specification: distinct symbolic zone selectors with intersecting declared
+subnets are not assumed disjoint; they produce `UnknownOverlap` pending runtime
+resolution. This adds no unpromised rejection rule. Schema v1 remains
+experimental and backward-compatible with the documented legacy form; missing
+security-relevant values require explicit migration rather than inference.
+Validation with Rust 1.85.0: formatting, workspace Clippy, all workspace tests,
+the valid CLI example, and all invalid fixture CLI checks passed. The normalized
+contract is deterministic in-memory policy representation; a stable serialized
+JSON format remains outside the formal spec.
+Tracker: commented with evidence and closed as completed on 2026-11-05.

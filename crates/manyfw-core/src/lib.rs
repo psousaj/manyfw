@@ -1515,8 +1515,14 @@ priority = 30
             ("not-qualified", ErrorCode::InvalidSelector),
             ("zone:missing", ErrorCode::InvalidSelector),
             ("cidr:not-a-cidr", ErrorCode::InvalidCidr),
+            ("docker:", ErrorCode::InvalidSelector),
+            ("docker:shop/api with space", ErrorCode::InvalidSelector),
+            ("host:", ErrorCode::InvalidSelector),
         ] {
-            let input = VALID.replace("source = \"zone:vpn\"", &format!("source = \"{selector}\""));
+            let input = VALID.replace(
+                "destination = \"docker:homelab/postgres\"",
+                &format!("destination = \"{selector}\""),
+            );
             assert_eq!(parse_and_normalize(&input).unwrap_err().code(), expected);
         }
 
@@ -1564,6 +1570,50 @@ priority = 30
             "ports = [5432]",
         ) + "\n[[rules]]\nid = \"other-port\"\nsource = \"zone:vpn\"\ndestination = \"docker:homelab/postgres\"\nports = [8080]\nprotocol = \"tcp\"\naction = \"deny\"\npriority = 100\n";
         assert!(parse_and_normalize(&non_overlapping).is_ok());
+    }
+
+    #[test]
+    fn overlapping_zone_subnets_remain_unknown_in_symbolic_rule_analysis() {
+        let policy = r#"version = 1
+default_action = "deny"
+
+[zones.corp]
+interfaces = ["eth0"]
+subnets = ["10.0.0.0/8"]
+
+[zones.vpn]
+interfaces = ["tailscale0"]
+subnets = ["10.20.0.0/16"]
+
+[[rules]]
+id = "corp-allow"
+source = "zone:corp"
+destination = "docker:shop/api"
+ports = [443]
+protocol = "tcp"
+action = "allow"
+priority = 100
+
+[[rules]]
+id = "vpn-deny"
+source = "zone:vpn"
+destination = "docker:shop/api"
+ports = [443]
+protocol = "tcp"
+action = "deny"
+priority = 100
+"#;
+
+        let report = parse_and_normalize(policy).unwrap();
+        assert_eq!(report.policy.rules.len(), 2);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].code, DiagnosticCode::UnknownOverlap);
+        assert_eq!(report.diagnostics[0].severity, Severity::Warning);
+        assert_eq!(report.diagnostics[0].rule_ids, ["corp-allow", "vpn-deny"]);
+        assert_eq!(
+            report.diagnostics[0].location.as_deref(),
+            Some("rules[id=\"corp-allow\"],rules[id=\"vpn-deny\"]")
+        );
     }
 
     #[test]
