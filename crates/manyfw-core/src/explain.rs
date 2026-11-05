@@ -285,6 +285,13 @@ pub fn explain(
                 edges.sort_by_key(|edge| format!("{edge:?}"));
                 let mut steps = Vec::new();
                 let docker_id = evidence_ids.next();
+                let mut publication_limitations = endpoint_limitations(&docker, observation);
+                if !container_is_running(container) {
+                    publication_limitations.push(format!(
+                        "container lifecycle is {:?} and operational status is {:?}; published configuration does not establish a current runtime path",
+                        container.lifecycle, container.operational_status
+                    ));
+                }
                 let host_binding = format_host_binding(endpoint);
                 let container_targets = endpoint
                     .container_addresses
@@ -300,7 +307,7 @@ pub fn explain(
                         endpoint.container_port, endpoint.protocol
                     ),
                     Some(docker_interval(docker.collected_at)),
-                    endpoint_limitations(&docker, observation),
+                    publication_limitations,
                 );
                 steps.push(PathStep {
                     kind: PathStepKind::DockerPublication,
@@ -426,13 +433,7 @@ pub fn explain(
                         evidence: vec![docker_id.clone()],
                     });
                 }
-                let conclusion = if steps.iter().any(|s| s.status == StepStatus::Unknown) {
-                    PathConclusion::Unknown
-                } else if steps.iter().any(|s| s.status == StepStatus::Potential) {
-                    PathConclusion::PotentialPath
-                } else {
-                    PathConclusion::ObservedPath
-                };
+                let conclusion = path_conclusion(&steps, container);
                 let path_policy = evaluate_policy_for_endpoint(policy, selected, endpoint);
                 let path_policy_evidence = evidence_ids.next();
                 add_evidence(
@@ -1017,6 +1018,26 @@ fn runtime_conclusion(paths: &[ObservedPath]) -> RuntimeConclusion {
     }
 }
 
+fn container_is_running(container: &docker::ContainerObservation) -> bool {
+    container.lifecycle == docker::LifecycleState::Running
+        && container.operational_status == docker::OperationalStatus::Running
+}
+
+fn path_conclusion(steps: &[PathStep], container: &docker::ContainerObservation) -> PathConclusion {
+    if !container_is_running(container)
+        || steps.iter().any(|step| step.status == StepStatus::Unknown)
+    {
+        PathConclusion::Unknown
+    } else if steps
+        .iter()
+        .any(|step| step.status == StepStatus::Potential)
+    {
+        PathConclusion::PotentialPath
+    } else {
+        PathConclusion::ObservedPath
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1124,6 +1145,62 @@ mod tests {
         );
         assert_eq!(format_host_binding_parts(None, "ipv6", 8080), "[::]:8080");
         assert_eq!(format_ip_port("::1".parse().unwrap(), 5432), "[::1]:5432");
+    }
+
+    #[test]
+    fn non_running_container_never_produces_an_observed_runtime_path() {
+        let container_for = |lifecycle, operational_status| docker::ContainerObservation {
+            logical_identity: None,
+            instance: docker::ContainerInstance {
+                id: "instance-id".into(),
+                replica_key: "replica".into(),
+            },
+            lifecycle,
+            operational_status,
+            network_mode: docker::NetworkMode::Bridge,
+            configured_publications: Vec::new(),
+            observed_endpoints: Vec::new(),
+        };
+        let confirmed_steps = [PathStep {
+            kind: PathStepKind::DockerPublication,
+            status: StepStatus::Observed,
+            detail: "published endpoint".into(),
+            evidence: vec!["evidence-1".into()],
+        }];
+
+        let running = container_for(
+            docker::LifecycleState::Running,
+            docker::OperationalStatus::Running,
+        );
+        assert_eq!(
+            path_conclusion(&confirmed_steps, &running),
+            PathConclusion::ObservedPath
+        );
+
+        for (lifecycle, operational_status) in [
+            (
+                docker::LifecycleState::Exited,
+                docker::OperationalStatus::Stopped,
+            ),
+            (
+                docker::LifecycleState::Restarting,
+                docker::OperationalStatus::Restarting,
+            ),
+            (
+                docker::LifecycleState::Running,
+                docker::OperationalStatus::Unknown,
+            ),
+        ] {
+            let container = container_for(lifecycle, operational_status);
+            let conclusion = path_conclusion(&confirmed_steps, &container);
+            assert_eq!(conclusion, PathConclusion::Unknown);
+            let mut path = explanation_fixture().paths.remove(0);
+            path.conclusion = conclusion;
+            path.lifecycle = format!("{lifecycle:?}").to_lowercase();
+            path.operational_status = format!("{operational_status:?}").to_lowercase();
+            let runtime = runtime_conclusion(&[path]);
+            assert_eq!(runtime.status, RuntimeStatus::Unknown);
+        }
     }
 
     #[test]
