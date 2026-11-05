@@ -55,6 +55,9 @@ as human-readable terminal output and versioned JSON.
   guesses or service-name assumptions.
 - Policy context includes declared policy, potentially matching rules, static
   result, effective verification when available, and unverified capabilities.
+- Docker service rules are matched against the container destination port; the
+  separately observed host publication port is binding evidence, not the
+  service's policy port.
 - Correlation uses explicit graph edges and confidence; no edge alone proves
   external reachability.
 - Finding IDs, ordering, JSON schema, diagnostics, and evidence references are
