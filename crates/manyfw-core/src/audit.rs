@@ -1202,6 +1202,17 @@ priority = 10
                 && finding.policy.declared == "allow"
                 && finding.assessment == Assessment::PotentialExposure
         }));
+        let explanation = crate::explain::explain(&policy, &snapshot, "demo/api").unwrap();
+        assert_eq!(explanation.paths.len(), 3);
+        assert!(explanation.paths.iter().all(|path| {
+            path.host_port == 8080
+                && path.container_port == 80
+                && path.policy.matching_rule_count == 1
+                && path.policy.declared_action == "allow"
+                && path.conclusion == crate::explain::PathConclusion::PotentialPath
+        }));
+        assert!(explanation.human().contains("gateway=None"));
+        assert!(explanation.human().contains("type=Unicast"));
 
         let mut uncertain_host = snapshot.host();
         uncertain_host.listeners.completeness = host::Completeness::Partial;
