@@ -144,6 +144,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+            match &explanation.identity {
+                manyfw_core::explain::IdentityResolution::AmbiguousIdentity { candidates } => {
+                    return Err(format!(
+                        "ambiguous service selector {service:?}; candidates: {}",
+                        candidates.join(", ")
+                    )
+                    .into());
+                }
+                manyfw_core::explain::IdentityResolution::UnresolvedIdentity { candidates } => {
+                    let suggestions = if candidates.is_empty() {
+                        "no observed identities".into()
+                    } else {
+                        format!("candidates: {}", candidates.join(", "))
+                    };
+                    return Err(format!(
+                        "service selector {service:?} did not resolve; {suggestions}"
+                    )
+                    .into());
+                }
+                manyfw_core::explain::IdentityResolution::Resolved { .. } => {}
+            }
         }
         Command::Discover { .. } => unreachable!("discovery is handled before policy loading"),
     }

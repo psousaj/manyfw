@@ -95,6 +95,27 @@ fixture-driven assertions, not checked-in golden files, and do not assert a
 complete Tailscale-only audit rendering. Those exact parent acceptance items
 are not claimed demonstrated by this ledger.
 
+### #19 — Explain evidence model and renderers
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Resolve, reject ambiguous, and explicitly represent unresolved identities | Core returns typed outcomes; CLI renders the outcome/candidates and exits nonzero for ambiguous or unresolved selectors | Real-binary unresolved and ambiguous-selector tests; `identity_resolution_rejects_ambiguous_short_selector_and_groups_replicas` also checks core candidates, no paths, unknown runtime, and grouping of same-identity replicas |
+| Preserve per-path evidence for Docker, listener, NAT/proxy, interface, family, and route observations | `ObservedPath` owns ordered steps and evidence references; correlation graph facts are translated to typed path steps | `human_and_json_render_policy_evidence_and_validate_references`; snapshot correlation tests for listener, interface, route, and family/protocol; endpoint target/provenance correlation test |
+| Separate policy, runtime conclusion, unknowns, and limitations | Versioned `Explanation` model exposes independent policy/runtime/unknown/limitation fields | `human_and_json_render_policy_evidence_and_validate_references`; non-running lifecycle test; explicit firewall/NAT/proxy unknown assertions in both output forms |
+| Terminal/JSON preserve semantics and avoid reachability claims | Both renderers consume one validated model; version 3 schema and evidence references | Human/JSON model tests assert identical core policy, evidence and unknown semantics; CLI unresolved JSON asserts unresolved outcome and disclaims reachability |
+
+### #6 — Explain parent
+
+The read-only snapshot path, typed identity outcomes, policy/runtime distinction,
+evidence links, secret redaction, and uncertainty are demonstrated by the
+implementation and child evidence above. The parent ticket also specifically
+requires golden fixtures for NAT, host-network, multiple mappings, and
+conflicting policies. The current tests exercise endpoint policy, target and
+provenance matching, stopped lifecycle, IPv6 formatting, and mixed endpoint
+policy actions, but do not provide complete golden artifacts for each of those
+four parent scenarios. Parent #6 therefore remains open; no closure claim is
+made for those missing acceptance artifacts.
+
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 
 | Acceptance criterion | Implementation evidence | Test/evidence | Status |
