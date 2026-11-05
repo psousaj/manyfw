@@ -421,27 +421,76 @@ pub fn evaluate(
             interval: observation.collected_at(),
             limitations: vec![format!("coverage is {docker_status}")],
         });
-        findings.push(incomplete_finding("docker", docker_status, evidence_id));
-    }
-    let listener_status = host_coverage_status(host.listeners.completeness, host.listeners.outcome);
-    if listener_status != "complete" {
-        let evidence_id = format!("evidence-{}", stable_key("incomplete:host_listeners"));
-        evidence.push(Evidence {
-            id: evidence_id.clone(),
-            source: "host_listener_observation".into(),
-            resource: "host:listeners".into(),
-            interval: observation.collected_at(),
-            limitations: host
-                .listeners
+        findings.push(incomplete_finding(
+            "docker",
+            docker_status,
+            evidence_id,
+            docker
                 .limitations
                 .iter()
                 .map(|limitation| sanitize(&format!("{limitation:?}")))
                 .collect(),
+        ));
+    }
+    for (dimension, completeness, outcome, source_limitations) in [
+        (
+            "host_interfaces",
+            host.interfaces.completeness,
+            host.interfaces.outcome,
+            &host.interfaces.limitations,
+        ),
+        (
+            "host_addresses",
+            host.addresses.completeness,
+            host.addresses.outcome,
+            &host.addresses.limitations,
+        ),
+        (
+            "host_listeners",
+            host.listeners.completeness,
+            host.listeners.outcome,
+            &host.listeners.limitations,
+        ),
+        (
+            "host_routes",
+            host.routes.completeness,
+            host.routes.outcome,
+            &host.routes.limitations,
+        ),
+        (
+            "tailscale",
+            host.tailscale.completeness,
+            host.tailscale.outcome,
+            &host.tailscale.limitations,
+        ),
+    ] {
+        let status = host_coverage_status(completeness, outcome);
+        if status == "complete" {
+            continue;
+        }
+        let evidence_id = format!(
+            "evidence-{}",
+            stable_key(&format!("incomplete:{dimension}"))
+        );
+        let mut limitations = source_limitations
+            .iter()
+            .map(|limitation| sanitize(&format!("{limitation:?}")))
+            .collect::<Vec<_>>();
+        if limitations.is_empty() {
+            limitations.push(format!("{dimension} coverage is {status}"));
+        }
+        evidence.push(Evidence {
+            id: evidence_id.clone(),
+            source: "host_observation".into(),
+            resource: format!("host:{dimension}"),
+            interval: observation.collected_at(),
+            limitations: limitations.clone(),
         });
         findings.push(incomplete_finding(
-            "host_listeners",
-            listener_status.into(),
+            dimension,
+            status.into(),
             evidence_id,
+            limitations,
         ));
     }
     findings.sort_by(|a, b| a.id.cmp(&b.id));
@@ -767,7 +816,15 @@ fn docker_coverage_status(
     }
 }
 
-fn incomplete_finding(dimension: &str, status: String, evidence_id: String) -> AuditFinding {
+fn incomplete_finding(
+    dimension: &str,
+    status: String,
+    evidence_id: String,
+    mut limitations: Vec<String>,
+) -> AuditFinding {
+    if limitations.is_empty() {
+        limitations.push(format!("{dimension} coverage is {status}"));
+    }
     AuditFinding {
         id: format!("finding-incomplete-{}", stable_key(dimension)),
         subject: dimension.into(),
@@ -782,11 +839,11 @@ fn incomplete_finding(dimension: &str, status: String, evidence_id: String) -> A
         },
         policy: policy_context("unverified".into(), Vec::new()),
         evidence: vec![evidence_id],
-        limitations: vec![format!("{dimension} coverage is {status}")],
+        limitations: limitations.clone(),
         coverage: vec![Coverage {
             dimension: dimension.into(),
             status: status.to_lowercase(),
-            limitations: Vec::new(),
+            limitations,
         }],
     }
 }
@@ -969,6 +1026,37 @@ mod tests {
             .expect("incomplete finding");
         assert_eq!(finding.assessment, Assessment::Unknown);
         assert_eq!(finding.severity, AuditSeverity::Medium);
+    }
+
+    #[test]
+    fn incomplete_non_listener_host_sources_emit_findings_without_endpoints() {
+        let mut host_observation = host(Vec::new());
+        host_observation.addresses.completeness = host::Completeness::Unavailable;
+        host_observation.addresses.outcome = host::CollectionOutcome::Unavailable;
+        host_observation.addresses.limitations = vec![host::Limitation::ProcfsUnavailable];
+        let report = evaluate(
+            &policy(),
+            &snapshot::ObservationSnapshot::compose(
+                docker(docker::CollectionOutcome::Complete),
+                host_observation,
+            ),
+        )
+        .unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.category == "IncompleteObservation" && finding.subject == "host_addresses"
+            })
+            .unwrap();
+
+        assert_eq!(finding.assessment, Assessment::Unknown);
+        assert_eq!(finding.coverage[0].status, "unavailable");
+        assert!(
+            finding
+                .limitations
+                .contains(&"ProcfsUnavailable".to_owned())
+        );
     }
 
     #[test]
