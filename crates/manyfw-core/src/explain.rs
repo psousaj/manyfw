@@ -695,11 +695,41 @@ fn display_identity(value: &str) -> String {
             })
             && !component.contains("..")
     });
-    if valid {
+    let sensitive = value
+        .strip_prefix("docker:")
+        .is_some_and(contains_credential_marker);
+    if valid && !sensitive {
         value.to_owned()
     } else {
         "[redacted]".into()
     }
+}
+
+fn contains_credential_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let markers = [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "apikey",
+        "authorization",
+        "bearer",
+        "privatekey",
+        "accesskey",
+        "ghp_",
+        "glpat-",
+        "xoxb-",
+        "sk-",
+        "eyj",
+    ];
+    if markers.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| part.len() >= 32 && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
 fn docker_interval(interval: docker::CollectionInterval) -> snapshot::ObservationInterval {
@@ -1070,6 +1100,18 @@ mod tests {
         assert_eq!(display_identity("docker:team/api"), "docker:team/api");
         assert_eq!(
             display_identity("arbitrary-secret-value-not-keyword"),
+            "[redacted]"
+        );
+        assert_eq!(
+            display_identity("docker:prod-api-password123"),
+            "[redacted]"
+        );
+        assert_eq!(
+            display_identity("docker:team/0123456789abcdef0123456789abcdef"),
+            "[redacted]"
+        );
+        assert_eq!(
+            display_identity("docker:team/abcdefghijklmnopqrstuvwxyz0123456789"),
             "[redacted]"
         );
     }
