@@ -180,12 +180,45 @@ fn explain_unresolved_service_is_explicit_and_versioned() {
         ])
         .output()
         .expect("run manyfw explain");
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"version\": 3"));
     assert!(stdout.contains("\"outcome\": \"unresolved_identity\""));
     assert!(stdout.contains("external reachability"));
     assert!(!stdout.contains("SAFE"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("did not resolve"));
+}
+
+#[test]
+fn explain_ambiguous_selector_emits_candidates_and_fails() {
+    let mut snapshot: serde_json::Value =
+        serde_json::from_str(include_str!("../../../examples/empty-snapshot.json")).unwrap();
+    snapshot["docker"]["containers"] = serde_json::json!([
+        {"logical_identity":{"value":"docker:team-a/api","source":"ComposeLabels"},"instance":{"id":"instance-a","replica_key":"api-a"},"lifecycle":"Running","operational_status":"Running","network_mode":"Bridge","configured_publications":[],"observed_endpoints":[]},
+        {"logical_identity":{"value":"docker:team-b/api","source":"ComposeLabels"},"instance":{"id":"instance-b","replica_key":"api-b"},"lifecycle":"Running","operational_status":"Running","network_mode":"Bridge","configured_publications":[],"observed_endpoints":[]}
+    ]);
+    let snapshot_path =
+        std::env::temp_dir().join(format!("manyfw-ambiguous-{}.json", std::process::id()));
+    std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "explain",
+            "api",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+        ])
+        .arg(&snapshot_path)
+        .args(["--format", "json"])
+        .output()
+        .expect("run manyfw explain");
+    let _ = std::fs::remove_file(snapshot_path);
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ambiguous_identity"));
+    assert!(stdout.contains("docker:team-a/api"));
+    assert!(stdout.contains("docker:team-b/api"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ambiguous service selector"));
 }
 
 #[test]

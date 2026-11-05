@@ -1044,6 +1044,113 @@ fn path_conclusion(steps: &[PathStep], container: &docker::ContainerObservation)
 mod tests {
     use super::*;
 
+    fn snapshot_for_identities(identities: &[&str]) -> snapshot::ObservationSnapshot {
+        let docker = docker::DockerDiscoveryResult {
+            collected_at: docker::CollectionInterval {
+                started_at: 1,
+                finished_at: 2,
+            },
+            outcome: docker::CollectionOutcome::Complete,
+            completeness: docker::Completeness::Complete,
+            containers: identities
+                .iter()
+                .enumerate()
+                .map(|(index, identity)| docker::ContainerObservation {
+                    logical_identity: Some(docker::LogicalIdentity {
+                        value: (*identity).into(),
+                        source: docker::IdentitySource::ComposeLabels,
+                    }),
+                    instance: docker::ContainerInstance {
+                        id: format!("instance-{index}"),
+                        replica_key: format!("replica-{index}"),
+                    },
+                    lifecycle: docker::LifecycleState::Running,
+                    operational_status: docker::OperationalStatus::Running,
+                    network_mode: docker::NetworkMode::Bridge,
+                    configured_publications: Vec::new(),
+                    observed_endpoints: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Vec::new(),
+            provenance: docker::Provenance {
+                source: "fixture".into(),
+                operation: "read".into(),
+            },
+            limitations: Vec::new(),
+        };
+        fn dimension<T>(records: Vec<T>) -> crate::host::DimensionObservation<T> {
+            crate::host::DimensionObservation {
+                records,
+                alternative_records: Vec::new(),
+                completeness: crate::host::Completeness::Complete,
+                outcome: crate::host::CollectionOutcome::Complete,
+                interval: crate::host::CollectionInterval {
+                    started_at: 1,
+                    finished_at: 2,
+                },
+                provenance: Vec::new(),
+                alternative_provenance: Vec::new(),
+                limitations: Vec::new(),
+            }
+        }
+        let host = crate::host::HostNetworkObservation {
+            namespace: crate::host::NamespaceScope {
+                kind: crate::host::NamespaceKind::CurrentNetworkNamespace,
+                description: "fixture".into(),
+            },
+            collected_at: crate::host::CollectionInterval {
+                started_at: 1,
+                finished_at: 2,
+            },
+            interfaces: dimension(Vec::<crate::host::NetworkInterface>::new()),
+            addresses: dimension(Vec::<crate::host::InterfaceAddress>::new()),
+            listeners: dimension(Vec::<crate::host::SocketListener>::new()),
+            routes: dimension(Vec::<crate::host::NetworkRoute>::new()),
+            tailscale: dimension(Vec::<crate::host::TailscaleObservation>::new()),
+            diagnostics: Vec::new(),
+        };
+        snapshot::ObservationSnapshot::compose(docker, host)
+    }
+
+    fn empty_policy() -> NormalizedPolicy {
+        NormalizedPolicy {
+            version: 1,
+            default_action: Action::Deny,
+            zones: Default::default(),
+            rules: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn identity_resolution_rejects_ambiguous_short_selector_and_groups_replicas() {
+        let ambiguous = explain(
+            &empty_policy(),
+            &snapshot_for_identities(&["docker:team-a/api", "docker:team-b/api"]),
+            "api",
+        )
+        .unwrap();
+        assert_eq!(
+            ambiguous.identity,
+            IdentityResolution::AmbiguousIdentity {
+                candidates: vec!["docker:team-a/api".into(), "docker:team-b/api".into()]
+            }
+        );
+        assert!(ambiguous.paths.is_empty());
+        assert_eq!(ambiguous.runtime.status, RuntimeStatus::Unknown);
+
+        let resolved = explain(
+            &empty_policy(),
+            &snapshot_for_identities(&["docker:team-a/api", "docker:team-a/api"]),
+            "api",
+        )
+        .unwrap();
+        let IdentityResolution::Resolved { replicas, .. } = resolved.identity else {
+            panic!("unique logical identity should resolve")
+        };
+        assert_eq!(replicas.len(), 2);
+        assert_ne!(replicas[0].instance_id, replicas[1].instance_id);
+    }
+
     fn explanation_fixture() -> Explanation {
         Explanation {
             version: EXPLANATION_VERSION,

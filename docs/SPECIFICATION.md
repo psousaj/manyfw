@@ -271,7 +271,8 @@ Implemented commands:
 - `manyfw explain <service> --file <policy> --snapshot <snapshot.json> [--format human|json]`
   resolves a stable identity (or a unique short Docker selector) and renders a
   versioned explanation from the snapshot. Ambiguous and unresolved selectors
-  are explicit outcomes; the command performs no live collection and never
+  emit the typed explanation, candidates, and a nonzero command status; the
+  command performs no live collection and never
   claims external reachability or effective firewall enforcement. Explanations
   explicitly retain host firewall state, upstream NAT, cloud security-group
   policy, and host proxies as unknown because those systems are not inspected.

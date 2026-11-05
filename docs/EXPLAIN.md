@@ -38,3 +38,7 @@ Output ordering is deterministic for the same normalized policy and snapshot.
 Credentials, raw Docker responses, unallowlisted selectors, environment
 variables, and secret-bearing errors are excluded. See the [Explain contract](specs/issue-6-explain.md)
 for the full behavior and acceptance criteria.
+
+The CLI emits the typed explanation for unresolved or ambiguous selectors,
+including candidate identities, but exits nonzero so automation can distinguish
+a failed lookup from a resolved explanation.
