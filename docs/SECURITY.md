@@ -1,6 +1,6 @@
 # Security model
 
-**No privileged enforcement exists in v0.1.0.** The CLI validates local policy
+**No privileged enforcement exists in v0.2.0.** The CLI validates local policy
 and analyzes supplied observation snapshots. `discover` performs read-only
 Docker Engine and host-network collection; it does not inspect or modify
 firewall state.
