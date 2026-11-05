@@ -272,7 +272,9 @@ Implemented commands:
   resolves a stable identity (or a unique short Docker selector) and renders a
   versioned explanation from the snapshot. Ambiguous and unresolved selectors
   are explicit outcomes; the command performs no live collection and never
-  claims external reachability or effective firewall enforcement.
+  claims external reachability or effective firewall enforcement. Explanations
+  explicitly retain host firewall state, upstream NAT, cloud security-group
+  policy, and host proxies as unknown because those systems are not inspected.
 - `manyfw discover [--output <path|->]` performs read-only collection from the
   local Docker Engine Unix socket and the current Linux network namespace,
   composes a sanitized versioned observation snapshot, and writes JSON to the

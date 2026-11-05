@@ -508,8 +508,10 @@ pub fn explain(
     {
         unknowns.push("runtime path is not fully observed".into());
     }
-    unknowns
-        .push("external reachability and effective firewall enforcement were not probed".into());
+    unknowns.push(
+        "host firewall state and external reachability are unknown: upstream NAT, cloud security groups, host proxies, and effective firewall enforcement were not inspected"
+            .into(),
+    );
     let mut limitations = observation
         .limitations()
         .iter()
@@ -1111,7 +1113,10 @@ mod tests {
                     limitations: vec!["static policy".into()],
                 },
             ],
-            unknowns: vec!["service identity could not be uniquely resolved".into()],
+            unknowns: vec![
+                "service identity could not be uniquely resolved".into(),
+                "host firewall state and external reachability are unknown: upstream NAT, cloud security groups, host proxies, and effective firewall enforcement were not inspected".into(),
+            ],
             limitations: Vec::new(),
         }
     }
@@ -1303,6 +1308,15 @@ mod tests {
         assert_eq!(json_value["paths"][0]["policy"]["declared_action"], "allow");
         assert!(human.contains("interval=not timestamped"));
         assert!(human.contains("unknowns:"));
+        for unknown in [
+            "host firewall state",
+            "upstream NAT",
+            "cloud security groups",
+            "host proxies",
+        ] {
+            assert!(human.contains(unknown));
+            assert!(json.contains(unknown));
+        }
 
         let mut broken = explanation;
         broken.evidence.clear();
