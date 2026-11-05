@@ -81,14 +81,16 @@ compatibility coverage is required.
    workflow create an annotated `vX.Y.Z` tag at that exact commit and publish
    the GitHub Release with the archives and SHA-256 files.
 
-The first successful run publishes the current version (`0.2.0`); subsequent
-releases are triggered by bumping the workspace version and merging it. A push
-at an already released version is a no-op. The tag and release are created in
-the same workflow run so publication does not depend on a tag-push event from
-`GITHUB_TOKEN` (which would not trigger another workflow). The workflow rejects
-stale main-branch commits, non-increasing versions, and attempts to move an
-existing tag. Version numbers must use stable `X.Y.Z` form; prereleases are not
-published by this workflow.
+The first successful run published `v0.2.0` from commit `07cbf3e`; see the
+[release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0) and its
+[successful workflow run](https://github.com/psousaj/manyfw/actions/runs/42066292818).
+Subsequent releases are triggered by bumping the workspace version and merging
+it. A push at an already released version is a no-op. The tag and release are
+created in the same workflow run so publication does not depend on a tag-push
+event from `GITHUB_TOKEN` (which would not trigger another workflow). The
+workflow rejects stale main-branch commits, non-increasing versions, and
+attempts to move an existing tag. Version numbers must use stable `X.Y.Z` form;
+prereleases are not published by this workflow.
 
 The release installer at `scripts/install.sh` detects Linux architecture and
 GNU versus musl libc, selects the matching release archive, verifies its
@@ -113,7 +115,7 @@ read-only `release.yml`; that release cannot enable enforcement.
 
 ## Current local evidence
 
-Passed locally:
+Validated locally:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
@@ -123,14 +125,22 @@ Passed locally:
 - disposable read-only network-namespace discovery with
   `MANYFW_HOST_TEST_IMAGE=postgres:17.4 bash tests/host_namespace.sh`
 
-Not yet validated locally:
+Validated by the v0.2.0 GitHub Actions release run:
 
-- GitHub-hosted ARM64 runners
-- Docker execution of every distro image
-- GitHub Actions workflow execution
-- Per-target and per-distribution status artifacts on GitHub Actions
-- Tagged GitHub Release publication
-- Privileged kernel/VM recovery scenarios from issue #24
+- GitHub Actions release workflow, including release-source validation
+- Native x86_64 and aarch64 builds for GNU and musl
+- Packaged-artifact smoke tests, checksum verification, and GitHub Release publication
+
+Validated by the [v0.2.0 compatibility workflow run](https://github.com/psousaj/manyfw/actions/runs/42066292439):
+
+- Native ARM64 build jobs
+- Ubuntu, Debian, Fedora, Alpine, and Arch artifact smoke tests
+- Read-only host discovery in a disposable network namespace
+
+Not validated by these conventional workflows:
+
+- Destructive firewall mutation or privileged kernel/VM recovery scenarios from issue #24
+- Docker nftables/iptables integration requiring privileged isolation
 
 ## Scope boundary
 

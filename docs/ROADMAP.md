@@ -1,8 +1,10 @@
 # Roadmap and release gates
 
-The highest implemented roadmap milestone is **v0.2.0**. Its stacked PRs are
-open for review; merging the version bump to `main` triggers the release
-workflow. A published release is complete only after that workflow passes.
+The highest completed and published roadmap milestone is **v0.2.0**. The
+[GitHub Release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0) was
+published on 2026-11-05 from commit `07cbf3e`; the
+[release workflow](https://github.com/psousaj/manyfw/actions/runs/42066292818)
+completed successfully.
 
 ## v0.1.0 — Read-only scaffold
 - [x] Cargo workspace with one CLI binary
@@ -11,7 +13,7 @@ workflow. A published release is complete only after that workflow passes.
 - [x] CI confirmed green on GitHub (PR #27 checks)
 - [x] Cargo.lock checked in after reproducible build
 
-## v0.2.0 — Discovery and audit (implemented; release checks pending)
+## v0.2.0 — Discovery and audit (released)
 - [x] End-to-end observation of Docker publishers and host network state
   - [x] Read-only host interfaces, addresses, listeners, and routes for the current namespace
   - [x] Netlink/Socket Diagnostics primary sources with explicit sysfs/procfs fallback limitations
@@ -23,11 +25,20 @@ workflow. A published release is complete only after that workflow passes.
 - [x] Explain uncertainty and audit coverage explicitly
 - [x] No privileged firewall writes; discovery reads only and audit/explain use snapshots
 - [x] PR compatibility CI runs disposable host-namespace and distro smoke gates for stacked feature PRs
+- [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
-## v0.3.0 — Real planner (implementation present; release gate not complete)
+## v0.3.0 — Real planner (in progress; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
-- [ ] Integration tests in disposable network namespaces and VMs
+- [ ] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20))
+- [ ] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21))
+- [ ] Complete isolated integration evidence for the planner ([#7](https://github.com/psousaj/manyfw/issues/7))
+- [ ] Prove planning does not mutate observed kernel rules in disposable namespaces and, where needed, VMs
+- [ ] Publish and verify `v0.3.0`
+
+The existing capability and planning code is not, by itself, completion of these
+release gates. v0.3.0 remains read-only and does not include or authorize
+`apply`.
 
 ## v0.4.0 — Guarded enforcement, experimental (not release-ready)
 - [ ] Owned-chain isolation and reconciliation with Docker
@@ -40,6 +51,6 @@ workflow. A published release is complete only after that workflow passes.
 ## Later
 - [ ] Daemon watching Docker events; reconciliation after container changes
 - [x] Release workflow configured for x86_64/aarch64 GNU/musl archives with SHA-256 checksums
-- [ ] Publish and verify the first tagged release
+- [x] Publish and verify the first tagged release ([v0.2.0](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 - [ ] SBOM and signed release artifacts
 - [ ] Podman, WireGuard, multi-host and optional dashboard after correctness
