@@ -120,12 +120,12 @@ impl AuditReport {
                 finding.id, finding.category, finding.subject, finding.assessment, finding.severity
             ));
             out.push_str(&format!("  policy: {}\n", finding.policy.declared));
-            if !finding.limitations.is_empty() {
-                out.push_str(&format!(
-                    "  limitations: {}\n",
-                    finding.limitations.join(", ")
-                ));
-            }
+            out.push_str(&format!("  assessment: {:?}\n", finding.assessment));
+            out.push_str(&format!("  severity: {:?}\n", finding.severity));
+            out.push_str(&format!(
+                "  limitations: {}\n",
+                finding.limitations.join(", ")
+            ));
             out.push_str(&format!(
                 "  severity factors: exposure={}, coverage={}, policy={}\n",
                 finding.severity_factors.exposure,
@@ -133,6 +133,21 @@ impl AuditReport {
                 finding.severity_factors.policy
             ));
             out.push_str(&format!("  evidence: {}\n", finding.evidence.join(", ")));
+            for evidence in self
+                .evidence
+                .iter()
+                .filter(|evidence| finding.evidence.contains(&evidence.id))
+            {
+                out.push_str(&format!(
+                    "  evidence detail: {} source={} resource={} interval={}..{} limitations={}\n",
+                    evidence.id,
+                    evidence.source,
+                    evidence.resource,
+                    evidence.interval.started_at,
+                    evidence.interval.finished_at,
+                    evidence.limitations.join(", ")
+                ));
+            }
             out.push_str(&format!(
                 "  coverage: {}\n",
                 finding

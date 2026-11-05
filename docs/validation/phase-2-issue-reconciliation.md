@@ -61,6 +61,40 @@ and then removes the specifically named temporary directory. Tracker: issues
 #15 and #16 received evidence comments; parent #4 received its completed
 evidence comment and was closed as completed on 2026-11-05.
 
+### #17 — Snapshot composition and correlation graph
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Docker and host fragments compose into immutable versioned snapshot | `ObservationSnapshot::compose` owns source DTOs, exposes detached clones, and emits snapshot/graph v1 | `composed_snapshot_preserves_source_metadata_and_exposes_only_owned_copies`; `graph_order_is_deterministic` |
+| Intervals, source status, provenance, limitations, and sanitization are preserved | Composition calculates encompassing interval and retains Docker/host dimensions and limitations | Metadata/ownership test; temporal and unavailable-source tests |
+| Correlation distinguishes confirmed, potential, unknown, uncorrelated | `CorrelationEdgeStatus` graph construction uses endpoint/listener, address/route, lifecycle, temporal, and coverage facts | Exact listener, interface/route potential, protocol/family mismatch, unavailable/temporal, stopped-container, and unspecified-family tests |
+| Publication never means external reachability | Snapshot and graph retain `NoReachabilityProbe`; links are explicitly local correlation facts | Loopback and exact-listener tests assert local correlations while reachability remains unprobed; serialized snapshot has no reachability verdict |
+
+### #18 — Audit findings and report outputs
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Typed findings include assessment, severity factors, policy context, evidence, limitations, and coverage | `AuditFinding`, `Evidence`, `PolicyContext`, `Coverage`, and `SeverityFactors` in `crates/manyfw-core/src/audit.rs` | Policy-port/target test; incomplete host/docker tests; validator rejects duplicate findings and dangling evidence |
+| Distinguishes observed, potential, no-observed, and unknown without `Safe` | `Assessment` enum and correlation-driven evaluator; no Safe assessment | Exact and potential correlations, standalone listeners, incomplete sources, and deterministic endpoint tests; empty-report assertion excludes `Safe` |
+| Human and versioned JSON outputs deterministic and sanitized | `AuditReport::human/json`, report v1, stable finding/evidence IDs and ordering | Endpoint input reversal produces identical JSON; host listener input reversal stable; synthetic secret not in human output; CLI checks JSON version and human partial output |
+| Valid partial report exits zero; report production failures exit nonzero | CLI returns success for evaluator report and errors for load/parse/version/render failures | `audit_partial_report_is_successful_and_human_output_is_readable`; `audit_snapshot_failure_is_a_command_error` |
+
+### #5 — Audit report parent
+
+Parent requirements are mapped to the child evidence above plus the typed
+scenario coverage in `crates/manyfw-core/src/snapshot.rs` and
+`crates/manyfw-core/src/audit.rs`. Loopback bindings, dual-stack family and
+transport separation, source failures, temporal gaps, stopped containers,
+listener/address/route correlations, policy port matching, partial report exit
+behavior, and secret redaction are directly tested. A published endpoint is
+only an observation: absent or conflicting host correlation remains unknown or
+potential, and the report explicitly disclaims reachability and enforcement.
+Docker publishes and host discovery remain read-only. The #5 issue requests
+golden output for public bind and Tailscale-only scenarios; current tests are
+fixture-driven assertions, not checked-in golden files, and do not assert a
+complete Tailscale-only audit rendering. Those exact parent acceptance items
+are not claimed demonstrated by this ledger.
+
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 
 | Acceptance criterion | Implementation evidence | Test/evidence | Status |

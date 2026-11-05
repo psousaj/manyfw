@@ -124,6 +124,33 @@ fn audit_emits_a_valid_report_and_exits_zero() {
 }
 
 #[test]
+fn audit_partial_report_is_successful_and_human_output_is_readable() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "audit",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/partial-snapshot.json",
+            "--format",
+            "human",
+        ])
+        .output()
+        .expect("run manyfw audit");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ManyFW audit report v1"));
+    assert!(stdout.contains("READ-ONLY"));
+    assert!(stdout.contains("IncompleteObservation"));
+    assert!(stdout.contains("Unknown"));
+    assert!(stdout.contains("unavailable"));
+}
+
+#[test]
 fn audit_snapshot_failure_is_a_command_error() {
     let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
         .args([
