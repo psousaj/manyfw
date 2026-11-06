@@ -32,10 +32,12 @@ while IFS= read -r library; do
 done < <(ldd "$nft" | awk '/=>/ && $3 ~ /^\// { print $3 }')
 
 # The probe calls the real planner with a fixed in-code PlannerInput fixture;
-# its Applicable and Blocked variants are both exercised. nft reads only the
-# disposable container's network namespace. NET_ADMIN is granted only inside
-# that namespace; the development host firewall is never targeted. The
-# planner process receives no capabilities and no Docker socket.
+# its Applicable and Blocked variants are both exercised. In that same isolated
+# namespace, loopback UDP packets verify the fixture's allow-port verdict and a
+# neighboring drop-port verdict. nft reads only the disposable namespace.
+# NET_ADMIN is granted only inside that namespace; the development host
+# firewall is never targeted. The planner process receives no capabilities
+# and no Docker socket.
 docker run --rm \
   --network none \
   --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP \
@@ -46,10 +48,28 @@ docker run --rm \
   --mount "type=bind,src=$nft,dst=/mnt/nft,readonly" \
   --mount "type=bind,src=$tmp_dir/nft-libs,dst=/host-libs,readonly" \
   --entrypoint sh "$image" -ec '
-    export LD_LIBRARY_PATH=/host-libs
-    nft() { /mnt/nft "$@"; }
-    nft -j list ruleset > /tmp/before.json
+    nft() { LD_LIBRARY_PATH=/host-libs /mnt/nft "$@"; }
     command -v setpriv >/dev/null 2>&1 || { echo "setpriv is required in the test image" >&2; exit 1; }
+    # The test-only reference installer converts the actual typed planner
+    # operation into an isolated nft rule; it is not production apply code.
+    /usr/local/bin/planner_readonly_probe --install-plan
+    setpriv --bounding-set=-net_admin --inh-caps=-net_admin --ambient-caps=-net_admin \
+      --reuid=65534 --regid=65534 --clear-groups \
+      /usr/local/bin/planner_readonly_probe --packet-allow
+    setpriv --bounding-set=-net_admin --inh-caps=-net_admin --ambient-caps=-net_admin \
+      --reuid=65534 --regid=65534 --clear-groups \
+      /usr/local/bin/planner_readonly_probe --packet-drop
+    nft list chain inet manyfw_probe input > /tmp/verdict-counters.txt
+    grep -Eq '45123.*counter[[:space:]]+packets[[:space:]]+[1-9][0-9]*[[:space:]]+bytes[[:space:]]+[1-9][0-9]*.*accept' /tmp/verdict-counters.txt
+    grep -Eq '45124.*counter[[:space:]]+packets[[:space:]]+[1-9][0-9]*[[:space:]]+bytes[[:space:]]+[1-9][0-9]*.*drop' /tmp/verdict-counters.txt
+    nft -j list ruleset > /tmp/before-blocked-install.json
+    if /usr/local/bin/planner_readonly_probe --install-plan --blocked > /dev/null 2> /tmp/blocked-install.err; then
+      echo "blocked planner output must not be installed" >&2
+      exit 1
+    fi
+    nft -j list ruleset > /tmp/after-blocked-install.json
+    cmp /tmp/before-blocked-install.json /tmp/after-blocked-install.json
+    nft -j list ruleset > /tmp/before.json
     setpriv --bounding-set=-net_admin --inh-caps=-net_admin --ambient-caps=-net_admin \
       --reuid=65534 --regid=65534 --clear-groups \
       /usr/local/bin/planner_readonly_probe > /tmp/planner.out
