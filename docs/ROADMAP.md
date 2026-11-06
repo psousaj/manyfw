@@ -27,7 +27,7 @@ completed successfully.
 - [x] PR compatibility CI runs disposable host-namespace and distro smoke gates for stacked feature PRs
 - [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
-## v0.3.0 — Real planner (published; remains read-only)
+## v0.3.0 — Real planner (release candidate; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
 - [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), PR #38)
