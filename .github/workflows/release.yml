@@ -102,6 +102,17 @@ jobs:
       - if: steps.release.outputs.should_release == 'true'
         run: cargo fmt --all -- --check
       - if: steps.release.outputs.should_release == 'true'
+        name: Install isolated planner test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends nftables
+          docker pull postgres:17
+      - if: steps.release.outputs.should_release == 'true'
+        name: Verify planner packet verdicts and read-only behavior
+        env:
+          MANYFW_PLANNER_TEST_IMAGE: postgres:17
+        run: bash tests/planner_readonly_namespace.sh
+      - if: steps.release.outputs.should_release == 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - if: steps.release.outputs.should_release == 'true'
         run: cargo test --workspace --locked

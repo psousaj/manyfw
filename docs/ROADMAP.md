@@ -27,18 +27,19 @@ completed successfully.
 - [x] PR compatibility CI runs disposable host-namespace and distro smoke gates for stacked feature PRs
 - [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
-## v0.3.0 — Real planner (in progress; remains read-only)
+## v0.3.0 — Real planner (release candidate; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
-- [ ] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20))
-- [ ] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21))
-- [ ] Complete isolated integration evidence for the planner ([#7](https://github.com/psousaj/manyfw/issues/7))
-- [ ] Prove planning does not mutate observed kernel rules in disposable namespaces and, where needed, VMs
+- [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), PR #38)
+- [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), PR #38)
+- [x] Isolated planner check exercises Applicable and Blocked plans and packet verdicts ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](validation/v0.3.0-planner.md))
+- [x] Prove planning does not mutate nftables rules in a disposable namespace; compatibility and release workflows enforce it; no development-host firewall mutation
 - [ ] Publish and verify `v0.3.0`
 
-The existing capability and planning code is not, by itself, completion of these
-release gates. v0.3.0 remains read-only and does not include or authorize
-`apply`.
+Release remains gated on successful artifact build, checksum, and packaged
+smoke-test jobs. v0.3.0 remains read-only and does not include or authorize
+`apply`; the bounded loopback UDP verdict fixture is not evidence of external
+reachability or complete behavior for every firewall manager and packet path.
 
 ## v0.4.0 — Guarded enforcement, experimental (not release-ready)
 - [ ] Owned-chain isolation and reconciliation with Docker

@@ -2,22 +2,24 @@
 
 **Policy-first firewall coordination for Linux, containers and private networks.**
 
-> **Current release: v0.2.0 — read-only CLI.** ManyFW observes Docker and host network state, and can audit or explain a saved snapshot. It does not inspect firewall rules or enforce policy. Never rely on it for network protection.
+> **Current stable release: v0.2.0.** The v0.3.0 planner release candidate is being validated; it is not published until the release workflow completes successfully. ManyFW remains read-only and must never be relied on for host protection.
 
 ManyFW aims to provide one declarative policy model, a comprehensible `explain`/`audit` experience, and safe integration with existing firewall managers. It is **not** intended to overwrite Docker, UFW or firewalld rules.
 
-## v0.2.0: discovery and audit
+## v0.3.0 release candidate: backend observation and deterministic planning
 
-The [v0.2.0 GitHub Release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0)
-provides Linux binaries for x86_64 and aarch64, each built for GNU libc and
-musl. The release includes SHA-256 checksums. Its compatibility workflow builds
-and smoke-tests the packaged artifacts; this does not validate privileged
-firewall behavior or external reachability.
+The v0.3.0 release is pending. Once validated and published, it will provide
+Linux binaries for x86_64 and aarch64, each built for GNU libc and musl, with
+SHA-256 checksums. The release workflow builds and smoke-tests packaged
+artifacts; this does not validate privileged firewall behavior or external
+reachability.
 
-This release adds read-only Docker and host discovery, versioned observation
-snapshots, and audit/explain reports with explicit evidence and uncertainty.
-`discover` collects live observations; `audit` and `explain` operate on a saved
-snapshot.
+This release adds read-only nftables/iptables backend observations and a
+deterministic, typed diagnostic planner in the core library. Unknown backend
+mode, hooks, priorities, ownership, and required capabilities remain explicit
+and block applicability. The planner never mutates kernel rules. Existing
+Docker and host discovery, snapshots, and audit/explain reports remain
+read-only; they do not establish external reachability.
 
 ## CLI
 
@@ -42,7 +44,7 @@ command.
 
 ## Supported build environment
 
-The v0.2.0 release provides Linux x86_64 and aarch64 binaries for GNU libc and
+The current v0.2.0 release provides Linux x86_64 and aarch64 binaries for GNU libc and
 musl. These targets were built and their packaged artifacts smoke-tested by the
 release workflow; see the [CI/CD policy](docs/CI-CD.md) for the validation
 matrix and its limits. The minimum supported Rust version (MSRV) is 1.85.0. CI verifies the
@@ -90,15 +92,15 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-## Next: v0.3.0 planner
+## Safety and scope
 
-The next milestone completes backend observation and deterministic planning.
-It remains read-only: planning must not modify kernel rules. The integration
-gate requires disposable network namespaces and, where needed, VMs. See the
-[roadmap](docs/ROADMAP.md) and issues [#20](https://github.com/psousaj/manyfw/issues/20),
-[#21](https://github.com/psousaj/manyfw/issues/21), and
-[#7](https://github.com/psousaj/manyfw/issues/7). This work does not authorize
-or include `apply`; guarded enforcement remains a later milestone.
+Backend planning was checked in a disposable Docker network namespace for both
+applicable and blocked plans. Test-only reference translation verifies one
+IPv4 loopback UDP Allow/Deny verdict, and nftables rules remain unchanged during
+planning. This is not external-reachability or enforcement evidence. See the
+detailed [validation evidence](docs/validation/v0.3.0-planner.md).
+No `apply` command exists; guarded enforcement remains a later milestone. See
+the [roadmap](docs/ROADMAP.md) and [security model](docs/SECURITY.md).
 
 ## Direction
 
