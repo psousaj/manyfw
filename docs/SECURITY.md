@@ -1,13 +1,13 @@
 # Security model
 
-**No privileged enforcement exists in v0.2.0.** The CLI validates local policy
+**No privileged enforcement exists in v0.3.0.** The CLI validates local policy
 and analyzes supplied observation snapshots. `discover` performs read-only
-Docker Engine and host-network collection; it does not inspect or modify
-firewall state.
+Docker Engine and host-network collection; firewall observation is a separate
+read-only Linux library API. Neither path modifies firewall state.
 
 Backend observation is separate from `discover`. Linux firewall listings use
-fixed read-only argument vectors (`nft --json list ruleset`, `iptables-save`,
-and `ip6tables-save`); no shell is invoked. Missing tools, permission failures,
+fixed read-only argument vectors (`nft -j list ruleset`, `iptables-save -c`,
+and `ip6tables-save -c`); no shell is invoked. Missing tools, permission failures,
 partial families, and unrecognized state remain unknown and block applicability.
 Chain names and comments alone do not establish ownership or Docker mode.
 
