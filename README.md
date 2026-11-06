@@ -2,13 +2,13 @@
 
 **Policy-first firewall coordination for Linux, containers and private networks.**
 
-> **Current stable release: v0.2.0.** The v0.3.0 planner release candidate is being validated; it is not published until the release workflow completes successfully. ManyFW remains read-only and must never be relied on for host protection.
+> **Current stable release: [v0.3.0](https://github.com/psousaj/manyfw/releases/tag/v0.3.0).** ManyFW remains read-only and must never be relied on for host protection.
 
 ManyFW aims to provide one declarative policy model, a comprehensible `explain`/`audit` experience, and safe integration with existing firewall managers. It is **not** intended to overwrite Docker, UFW or firewalld rules.
 
-## v0.3.0 release candidate: backend observation and deterministic planning
+## v0.3.0: backend observation and deterministic planning
 
-The v0.3.0 release is pending. Once validated and published, it will provide
+The published v0.3.0 release provides
 Linux binaries for x86_64 and aarch64, each built for GNU libc and musl, with
 SHA-256 checksums. The release workflow builds and smoke-tests packaged
 artifacts; this does not validate privileged firewall behavior or external

@@ -34,10 +34,10 @@ completed successfully.
 - [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), PR #38)
 - [x] Isolated planner check exercises Applicable and Blocked plans and packet verdicts ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](validation/v0.3.0-planner.md))
 - [x] Prove planning does not mutate nftables rules in a disposable namespace; compatibility and release workflows enforce it; no development-host firewall mutation
-- [ ] Publish and verify `v0.3.0`
+- [x] Publish and verify `v0.3.0` ([release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0); [workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087))
 
-Release remains gated on successful artifact build, checksum, and packaged
-smoke-test jobs. v0.3.0 remains read-only and does not include or authorize
+Release publication passed artifact build, checksum, and packaged smoke-test
+gates. v0.3.0 remains read-only and does not include or authorize
 `apply`; the bounded loopback UDP verdict fixture is not evidence of external
 reachability or complete behavior for every firewall manager and packet path.
 
