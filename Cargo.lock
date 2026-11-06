@@ -767,6 +767,8 @@ dependencies = [
  "netlink-packet-sock-diag",
  "netlink-sys",
  "rtnetlink",
+ "serde_json",
+ "sha2",
  "tokio",
 ]
 

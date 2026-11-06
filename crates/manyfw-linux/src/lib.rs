@@ -1,8 +1,11 @@
 //! Read-only Linux network observation adapters for ManyFW. This crate owns
 //! kernel/procfs I/O; `manyfw-core` contains only the domain and source seams.
 
+mod firewall;
 mod netlink;
 mod procfs;
+
+pub use firewall::{FirewallObservationError, observe_firewall};
 
 pub(crate) struct SourceDump<T> {
     pub records: Vec<T>,

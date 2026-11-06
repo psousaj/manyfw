@@ -5,6 +5,12 @@ and analyzes supplied observation snapshots. `discover` performs read-only
 Docker Engine and host-network collection; it does not inspect or modify
 firewall state.
 
+Backend observation is separate from `discover`. Linux firewall listings use
+fixed read-only argument vectors (`nft --json list ruleset`, `iptables-save`,
+and `ip6tables-save`); no shell is invoked. Missing tools, permission failures,
+partial families, and unrecognized state remain unknown and block applicability.
+Chain names and comments alone do not establish ownership or Docker mode.
+
 ## Threat boundaries
 
 - Docker socket grants high privilege; use read-only operations where possible and document trust boundary.
