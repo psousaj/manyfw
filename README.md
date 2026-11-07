@@ -28,6 +28,7 @@ Rust workspace with a **single CLI binary** (`manyfw`) and independently testabl
 ```sh
 cargo run -p manyfw -- check --file examples/manyfw.toml
 cargo run -p manyfw -- plan --file examples/manyfw.toml
+cargo run -p manyfw -- discover
 cargo run -p manyfw -- discover --output snapshot.json
 cargo run -p manyfw -- audit --file examples/manyfw.toml --snapshot snapshot.json
 cargo run -p manyfw -- explain SERVICE --file examples/manyfw.toml --snapshot snapshot.json
@@ -35,7 +36,13 @@ cargo test --workspace
 ```
 
 `discover` reads the local Docker Engine through its Unix socket and host network
-sources in the current namespace, then writes a sanitized, versioned snapshot.
+sources in the current namespace, then presents a concise human report in an
+interactive terminal or writes a sanitized, versioned JSON snapshot when output
+is redirected or `--output` names a file. Use `--format json` for machine-readable
+stdout and `--color never` to disable ANSI styling. Human-readable CLI commands
+support `--color auto|always|never` (`auto` respects `NO_COLOR`).
+Use `discover --verbose` when you need individual host records rather than the
+concise summary.
 `audit` and `explain` analyze a saved snapshot; neither performs live collection.
 `explain` reports observed paths, policy evaluation, evidence, and unknowns; it
 does not establish external reachability. `plan` currently prints a **policy

@@ -279,12 +279,28 @@ Implemented commands:
 - `manyfw discover [--output <path|->]` performs read-only collection from the
   local Docker Engine Unix socket and the current Linux network namespace,
   composes a sanitized versioned observation snapshot, and writes JSON to the
-  requested file or stdout (`-`). Docker socket, permission, and partial-source
-  failures remain represented in the snapshot; discovery never reads or writes
-  firewall rules.
+  requested file or stdout (`-`). On an interactive terminal, stdout defaults
+  to a concise human-readable report; when stdout is redirected or piped, it
+  defaults to JSON. `--format human|json` selects the stdout format explicitly,
+  while `--verbose` includes per-record detail in human mode. File output is
+  always JSON. Docker socket, permission, and partial-source
+  failures remain represented in the report or snapshot; discovery never reads
+  or writes firewall rules.
+
+All human-readable CLI commands accept `--color auto|always|never`. `auto`
+colors only terminal output, respects `NO_COLOR`, and leaves JSON untouched.
 
 The CLI must present diagnostic codes and actionable messages. Diagnostic data
 must remain suitable for future JSON output and CI automation.
+
+Discovery examples:
+
+```sh
+manyfw discover                         # human report in a terminal
+manyfw discover --format json           # JSON to stdout
+manyfw discover --output snapshot.json  # JSON file
+manyfw discover --format human --color always
+```
 
 ## Testing contract
 

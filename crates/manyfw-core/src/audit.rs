@@ -15,6 +15,17 @@ pub enum Assessment {
     Unknown,
 }
 
+impl std::fmt::Display for Assessment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ObservedExposure => "observed exposure",
+            Self::PotentialExposure => "potential exposure",
+            Self::NoObservedExposure => "no observed exposure",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditSeverity {
@@ -23,6 +34,18 @@ pub enum AuditSeverity {
     Medium,
     High,
     Critical,
+}
+
+impl std::fmt::Display for AuditSeverity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Informational => "informational",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,12 +139,12 @@ impl AuditReport {
         );
         for finding in &self.findings {
             out.push_str(&format!(
-                "{} [{}] {} — {:?} ({:?})\n",
+                "{} [{}] {} — {} ({})\n",
                 finding.id, finding.category, finding.subject, finding.assessment, finding.severity
             ));
             out.push_str(&format!("  policy: {}\n", finding.policy.declared));
-            out.push_str(&format!("  assessment: {:?}\n", finding.assessment));
-            out.push_str(&format!("  severity: {:?}\n", finding.severity));
+            out.push_str(&format!("  assessment: {}\n", finding.assessment));
+            out.push_str(&format!("  severity: {}\n", finding.severity));
             out.push_str(&format!(
                 "  limitations: {}\n",
                 finding.limitations.join(", ")

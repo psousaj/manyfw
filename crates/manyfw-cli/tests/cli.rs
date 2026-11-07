@@ -9,7 +9,7 @@ fn check_reports_valid_policy_and_exits_zero() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Valid schema v1: 2 zones, 3 rules"));
+    assert!(stdout.contains("Valid schema v1 — 2 zones, 3 rules"));
 }
 
 #[test]
@@ -63,7 +63,9 @@ fn plan_prints_normalized_rules_in_priority_order() {
     assert!(lan < tailscale);
     assert!(stdout.contains("PREVIEW ONLY"));
     assert!(stdout.contains("priority=100"));
-    assert!(stdout.contains("ports=Specific"));
+    assert!(stdout.contains("ports=5432"));
+    assert!(stdout.contains("action=allow"));
+    assert!(!stdout.contains("Zone("));
 }
 
 #[test]
@@ -241,9 +243,10 @@ fn explain_rejects_unknown_format() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn discover_writes_a_versioned_snapshot_json() {
     let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
-        .args(["discover", "--output", "-"])
+        .args(["discover", "--output", "-", "--color", "always"])
         .output()
         .expect("run manyfw discover");
 
@@ -259,4 +262,189 @@ fn discover_writes_a_versioned_snapshot_json() {
         manyfw_core::snapshot::OBSERVATION_SNAPSHOT_VERSION
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("Safe"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\u{1b}["));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn discover_supports_a_human_report_for_terminal_use() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "discover", "--output", "-", "--format", "human", "--color", "never",
+        ])
+        .output()
+        .expect("run manyfw discover");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ManyFW discovery snapshot v1"));
+    assert!(stdout.contains("Docker"));
+    assert!(stdout.contains("Host network"));
+    assert!(!stdout.trim_start().starts_with('{'));
+    assert!(!stdout.contains("\u{1b}["));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn discover_can_force_color_in_captured_terminal_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "discover", "--output", "-", "--format", "human", "--color", "always",
+        ])
+        .output()
+        .expect("run manyfw discover");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\u{1b}["));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn discover_human_output_is_concise_by_default_and_verbose_on_request() {
+    let summary = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "discover", "--output", "-", "--format", "human", "--color", "never",
+        ])
+        .output()
+        .expect("run summary discovery");
+    let summary = String::from_utf8_lossy(&summary.stdout);
+    assert!(summary.contains("interfaces:"));
+    assert!(!summary.contains("    route "));
+
+    let details = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "discover",
+            "--output",
+            "-",
+            "--format",
+            "human",
+            "--color",
+            "never",
+            "--verbose",
+        ])
+        .output()
+        .expect("run detailed discovery");
+    assert!(
+        details.status.success(),
+        "{}",
+        String::from_utf8_lossy(&details.stderr)
+    );
+    let details = String::from_utf8_lossy(&details.stdout);
+    assert!(details.contains("ManyFW discovery snapshot v1"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn discover_keeps_json_as_the_non_terminal_default() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args(["discover", "--output", "-", "--color", "always"])
+        .output()
+        .expect("run manyfw discover");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("discovery JSON for non-terminal output");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\u{1b}["));
+    assert_eq!(snapshot["version"], 1);
+    assert!(snapshot.get("docker").is_some());
+    assert!(snapshot.get("host").is_some());
+}
+
+#[test]
+fn discover_rejects_human_format_for_snapshot_files() {
+    let target = std::env::temp_dir().join(format!("manyfw-human-{}.json", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args(["discover", "--output"])
+        .arg(&target)
+        .args(["--format", "human"])
+        .output()
+        .expect("run manyfw discover");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("only supported on stdout"));
+    assert!(!target.exists());
+}
+
+#[test]
+fn global_color_option_styles_check_and_plan_output() {
+    for args in [
+        vec![
+            "check",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--color",
+            "always",
+        ],
+        vec![
+            "plan",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--color",
+            "always",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+            .args(args)
+            .output()
+            .expect("run human-readable command");
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\u{1b}["),
+            "command output was not colorized"
+        );
+    }
+}
+
+#[test]
+fn global_color_option_styles_audit_and_explain_human_output() {
+    let audit = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "audit",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/partial-snapshot.json",
+            "--format",
+            "human",
+            "--color",
+            "always",
+        ])
+        .output()
+        .expect("run manyfw audit");
+    assert!(audit.status.success());
+    let audit_stdout = String::from_utf8_lossy(&audit.stdout);
+    assert!(audit_stdout.contains("\u{1b}["));
+    assert!(audit_stdout.contains("Summary:"));
+    assert!(audit_stdout.contains("\u{1b}[33mUnknown\u{1b}[0m: 1"));
+    assert!(!audit_stdout.contains("ObservedExposure"));
+    assert!(!audit_stdout.contains("Critical"));
+
+    let explain = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args([
+            "explain",
+            "missing",
+            "--file",
+            "../../examples/manyfw.toml",
+            "--snapshot",
+            "../../examples/empty-snapshot.json",
+            "--format",
+            "human",
+            "--color",
+            "always",
+        ])
+        .output()
+        .expect("run manyfw explain");
+    assert!(!explain.status.success());
+    let explain_stdout = String::from_utf8_lossy(&explain.stdout);
+    assert!(explain_stdout.contains("\u{1b}["));
+    assert!(explain_stdout.contains("Summary:"));
+    assert!(explain_stdout.contains("runtime unknown"));
 }
