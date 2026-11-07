@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "applicability": "Applicable",
+  "operations": [
+    {
+      "EnsureRule": {
+        "rule_id": "r1",
+        "source": {
+          "Zone": "lan"
+        },
+        "source_interfaces": [
+          {
+            "Exact": "eth0"
+          }
+        ],
+        "source_subnets": [],
+        "destination": {
+          "Docker": "web"
+        },
+        "priority": 10,
+        "requires_dnat_original_destination": false,
+        "requires_conntrack": false,
+        "path": "input",
+        "family": "ipv4",
+        "action": "Allow",
+        "protocol": "Tcp",
+        "ports": "Any",
+        "host_port": 18080,
+        "container_port": 8080,
+        "publication": "UserlandProxy",
+        "container_targets": [
+          {
+            "network": "bridge",
+            "address": "172.18.0.20",
+            "provenance": "DockerInspection"
+          }
+        ],
+        "host_address": "192.0.2.20",
+        "managed_resource": "manyfw-input-v4"
+      }
+    },
+    {
+      "SetManagedDefault": {
+        "action": "Deny",
+        "path": "input",
+        "family": "ipv4",
+        "managed_resource": "manyfw-input-v4"
+      }
+    }
+  ],
+  "preconditions": {
+    "input_fingerprint": "fnv1a64:a0d37f21de6a0662",
+    "observation_generation": 7,
+    "backend_identity": "nftables",
+    "backend_version": "1",
+    "required_hooks": [
+      "input"
+    ],
+    "required_priorities": [
+      0
+    ],
+    "policy_priorities": [
+      10
+    ],
+    "backend": "nftables",
+    "mode": "native_nftables"
+  },
+  "ownership": [
+    {
+      "resource": "manyfw-input-v4",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "r1",
+      "owner": "manyfw",
+      "reason": "planned operation is scoped to the ManyFW ownership boundary"
+    }
+  ],
+  "unknowns": [],
+  "explanations": [
+    "plan generation is read-only and produces typed diagnostic operations",
+    "native nftables mode is evaluated independently and does not require DOCKER-USER",
+    "foreign manager resources are preserved and global atomicity is not assumed"
+  ]
+}

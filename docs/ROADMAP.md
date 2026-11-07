@@ -35,6 +35,8 @@ completed successfully.
 - [x] Isolated planner check exercises Applicable and Blocked plans and packet verdicts ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](validation/v0.3.0-planner.md))
 - [x] Prove planning does not mutate nftables rules in a disposable namespace; compatibility and release workflows enforce it; no development-host firewall mutation
 - [x] Publish and verify `v0.3.0` ([release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0); [workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087))
+- [ ] Complete isolated integration evidence for the planner beyond the published v0.3.0 fixture ([#7](https://github.com/psousaj/manyfw/issues/7))
+- [ ] Prove planning does not mutate observed kernel rules across remaining disposable namespaces and VMs
 
 Release publication passed artifact build, checksum, and packaged smoke-test
 gates. v0.3.0 remains read-only and does not include or authorize

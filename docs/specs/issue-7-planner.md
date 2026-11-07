@@ -47,11 +47,27 @@ the kernel.
   emulate native nftables as a textual iptables translation.
 - Use `DOCKER-USER` only if its existence, ownership, hook placement, and
   applicability are verified.
+- Observing Docker-owned `DOCKER-USER` does not grant ManyFW write ownership.
+  With the current typed resource contract, Docker-iptables plans remain
+  diagnostic-only/blocked when that foreign chain is in the relevant path;
+  the planner must not invent a separate insertion point or claim applicability
+  without an independently observed ManyFW-owned path and verified ordering.
 - Never flush global tables or modify foreign chains. A ManyFW-named resource
   is not automatically owned by ManyFW.
 - Record deterministic precondition fingerprints without implementing
   cryptographic fingerprinting in this issue. Revalidate critical conditions
   immediately before any future application.
+- Represent the configured default action only within explicit ManyFW-owned
+  path/family scopes; never set a global host INPUT/FORWARD policy.
+  For an empty rule set, scope the default only to observed ManyFW-owned
+  resources; if none exist, block rather than omit the configured action.
+- Preserve each rule's typed source-interface selectors and family-matched
+  source subnets in its operation so a plan cannot lose zone match semantics.
+- Resolve Docker rules against observed, running-container publication records.
+  Preserve host bind address, host/container ports, and family-specific target
+  addresses; NAT uses FORWARD with original-destination/conntrack requirements,
+  while observed userland-proxy publication uses host INPUT. Unsupported,
+  cross-family NAT, or unobserved paths block.
 - Preserve unknowns and evidence in plan output; unknown capabilities needed for
   safety block applicability.
 - Keep plan generation read-only and independent of root privileges.

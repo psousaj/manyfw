@@ -29,9 +29,13 @@ critical scenario blocks release approval.
 | IPv4/IPv6 backend matrix | NotApplicable | Requires disposable VM |
 | No-global-flush invariant | NotApplicable | Requires disposable VM and backend adapters |
 | QEMU guest recovery matrix | NotApplicable | QEMU kernel/initrd artifacts are not configured locally |
+| Planner INPUT explicit-allow/default-deny verdict and nftables no-mutation check | Passed | `scripts/integration/planner-vm-test.sh`; evidence: `/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/test.log`; test binary SHA-256 is recorded in adjacent `metadata.txt` |
 
-The fixture tests use injected test-only backends and stores. They do not
-modify the development host or simulate a production backend.
+The fixture tests use injected test-only backend observations and stores. They
+do not modify the development host or simulate a production backend. The
+planner packet test translates typed plan operations in a test fixture,
+configures nftables only inside a separate KVM guest, and checks that planning
+leaves that namespace's ruleset unchanged.
 
 ## Disposable VM execution
 

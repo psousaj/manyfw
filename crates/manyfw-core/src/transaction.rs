@@ -48,24 +48,51 @@ impl TransactionPlan {
             return Err(TransactionError::InvalidState);
         }
         for operation in &plan.operations {
-            if let PlanOperation::EnsureRule { rule_id, .. } = operation {
-                let matching = plan
-                    .ownership
-                    .iter()
-                    .filter(|boundary| boundary.resource == *rule_id)
-                    .collect::<Vec<_>>();
-                if matching.len() != 1 || matching[0].owner != Ownership::Manyfw {
-                    return Err(TransactionError::OwnershipChanged);
-                }
+            let resource = match operation {
+                PlanOperation::EnsureRule {
+                    managed_resource, ..
+                } => managed_resource
+                    .clone()
+                    .ok_or(TransactionError::OwnershipChanged)?,
+                PlanOperation::SetManagedDefault {
+                    managed_resource, ..
+                } => managed_resource
+                    .clone()
+                    .ok_or(TransactionError::OwnershipChanged)?,
+                PlanOperation::Diagnostic { .. } => continue,
+            };
+            let matching = plan
+                .ownership
+                .iter()
+                .filter(|boundary| boundary.resource == resource)
+                .collect::<Vec<_>>();
+            if matching.len() != 1 || matching[0].owner != Ownership::Manyfw {
+                return Err(TransactionError::OwnershipChanged);
             }
         }
         let operations = plan
             .operations
             .iter()
             .map(|operation| match operation {
-                PlanOperation::EnsureRule { rule_id, .. } => Ok(Operation {
-                    resource: rule_id.clone(),
-                    description: "ensure planned ManyFW-owned rule".into(),
+                PlanOperation::EnsureRule {
+                    rule_id,
+                    managed_resource,
+                    ..
+                } => Ok(Operation {
+                    resource: managed_resource
+                        .clone()
+                        .ok_or(TransactionError::OwnershipChanged)?,
+                    description: format!("ensure planned ManyFW-owned rule {rule_id}"),
+                }),
+                PlanOperation::SetManagedDefault {
+                    action,
+                    managed_resource,
+                    ..
+                } => Ok(Operation {
+                    resource: managed_resource
+                        .clone()
+                        .ok_or(TransactionError::OwnershipChanged)?,
+                    description: format!("set ManyFW-managed default action to {action:?}"),
                 }),
                 PlanOperation::Diagnostic { detail, .. } => {
                     Err(TransactionError::Backend(detail.clone()))
@@ -1249,6 +1276,7 @@ mod tests {
     #[test]
     fn planner_conversion_refuses_blocked_or_foreign_plans() {
         let preconditions = crate::backend::Preconditions {
+            input_fingerprint: "fnv1a64:test".into(),
             observation_generation: 1,
             backend_identity: "test".into(),
             backend_version: None,
@@ -1279,14 +1307,58 @@ mod tests {
             )
             .is_err()
         );
-        let foreign = DiagnosticPlan {
+        let operation = PlanOperation::EnsureRule {
+            rule_id: "allow-web".into(),
+            source: crate::Selector::Cidr("192.0.2.0/24".parse().unwrap()),
+            source_interfaces: Vec::new(),
+            source_subnets: vec!["192.0.2.0/24".parse().unwrap()],
+            destination: crate::Selector::Host("web".into()),
+            priority: 10,
+            requires_dnat_original_destination: false,
+            requires_conntrack: false,
+            path: crate::backend::PacketPath::Input,
+            family: crate::backend::AddressFamily::Ipv4,
+            action: crate::Action::Allow,
+            protocol: crate::Protocol::Tcp,
+            ports: crate::PortScope::Specific(vec![crate::PortRange {
+                start: 443,
+                end: 443,
+            }]),
+            host_port: None,
+            container_port: None,
+            host_address: Box::new(None),
+            publication: None,
+            container_targets: Box::default(),
+            managed_resource: Some("manyfw-input-v4".into()),
+        };
+        let applicable = DiagnosticPlan {
             applicability: PlanApplicability::Applicable,
             ownership: vec![crate::backend::OwnershipBoundary {
-                resource: "foreign".into(),
-                owner: Ownership::Foreign,
-                reason: "test".into(),
+                resource: "manyfw-input-v4".into(),
+                owner: Ownership::Manyfw,
+                reason: "observed managed resource".into(),
             }],
-            ..blocked
+            operations: vec![operation.clone()],
+            ..blocked.clone()
+        };
+        let converted = TransactionPlan::from_diagnostic_plan(
+            &applicable,
+            "tx".into(),
+            "domain".into(),
+            "fingerprint".into(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(converted.operations[0].resource, "manyfw-input-v4");
+        assert!(converted.operations[0].description.contains("allow-web"));
+
+        let foreign = DiagnosticPlan {
+            ownership: vec![crate::backend::OwnershipBoundary {
+                resource: "manyfw-input-v4".into(),
+                owner: Ownership::Docker,
+                reason: "foreign owner".into(),
+            }],
+            ..applicable
         };
         assert!(
             TransactionPlan::from_diagnostic_plan(
@@ -1296,7 +1368,7 @@ mod tests {
                 "fingerprint".into(),
                 10,
             )
-            .is_ok()
+            .is_err()
         );
     }
 

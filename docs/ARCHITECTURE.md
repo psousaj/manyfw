@@ -15,6 +15,11 @@ ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel
 
 Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic.
 
+Observing Docker-owned DOCKER-USER does not grant ManyFW write ownership.
+Current planner output remains diagnostic-only when that foreign resource is
+required and no independent ManyFW-owned insertion point and ordering are
+verified.
+
 Service identity must not depend on changing container IPs; use Docker metadata, labels and publish mappings and reconcile on events. Conntrack original-destination matching is a possible backend mechanism, not the service identity model.
 
 **Do not modify external managers' owned chains**, flush global tables, assume hook order, or claim that a static scan proves remote exposure. Require IPv4/IPv6 coverage and provide uncertainty when upstream rules cannot be inspected.

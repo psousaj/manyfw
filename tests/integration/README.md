@@ -48,3 +48,31 @@ binding; it never counts that as an IPv6 pass. Captured evidence lives under
 No firewall mutation is performed by ManyFW or the harness. Docker's own
 container lifecycle operations necessarily create/remove Docker-owned guest
 networking state; this is isolated to the disposable guest.
+
+## Planner packet-verdict and no-mutation check (issue #7)
+
+The planner's privileged contract test runs only inside a separate KVM guest.
+It builds a host-only typed plan, creates two temporary network namespaces in
+the guest, and translates that plan's explicit allow and scoped default-deny
+operations into a test-only nftables verdict fixture. Allowed and unmatched TCP
+probes must match those operations. It snapshots the guest namespace's nftables
+JSON ruleset immediately before and after planning and requires identical
+parsed state. It never touches the development host firewall or the pre-existing
+Docker test guest.
+
+```sh
+MANYFW_VM_ROOT=/tmp/opencode/manyfw-planner-issue7 \
+  scripts/integration/planner-vm-up.sh
+MANYFW_VM_ROOT=/tmp/opencode/manyfw-planner-issue7 \
+  scripts/integration/planner-vm-test.sh
+MANYFW_VM_ROOT=/tmp/opencode/manyfw-planner-issue7 \
+  scripts/integration/vm-down.sh
+```
+
+The ignored test `crates/manyfw-core/tests/planner_netns.rs` requires root and
+`CAP_NET_ADMIN`, so the runner builds it locally and copies only that test
+executable into the verified KVM guest. The test itself checks KVM virtualization
+and the exact disposable-guest marker before privileged setup; its two named
+namespaces and nftables table are guest-local and removed with the test. The
+result is `NotApplicable` when KVM or required guest tools are unavailable; it
+refuses to proceed outside the verified guest.

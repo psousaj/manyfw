@@ -166,15 +166,45 @@ task sections above. No issue state was changed by this final audit.
 | #3 | OPEN | Parent Docker integration criterion still lacks safely isolated disposable-Docker evidence; rootful development-daemon networking is not exercised |
 | #4 | CLOSED | Parent host discovery criteria demonstrated and evidence commented; closed 2026-11-05 |
 | #5 | OPEN | Local follow-up now checks in public IPv4, loopback, Tailscale-only, and dual-stack audit JSON goldens; the tracker remains open pending full parent acceptance review |
-| #6 | OPEN | Required NAT, host-network, multiple-mapping, and conflicting-policy golden outputs remain incomplete |
-| #7, #20, #21 | OPEN | v0.3.0 planner release gates intentionally remain open |
+| #6 | OPEN | Local NAT, host-network, multiple-mapping, and conflicting-policy JSON goldens are committed; tracker remains open pending full parent acceptance review |
+| #7 | OPEN | #20 and #21 are CLOSED; parent golden plans and disposable packet-verdict/no-mutation evidence are recorded below; full parent acceptance remains under review |
+| #20, #21 | CLOSED | Child implementation contracts completed; #7's parent-level isolated acceptance remains separate |
 | #8, #22–#24 | OPEN | v0.4.0 enforcement/rollback and privileged VM recovery gates intentionally remain open; #24 evidence is NotApplicable in hosted CI |
 | #26 | OPEN | Release/matrix evidence is positive, but PR-matrix gating change awaits hosted workflow verification |
 
 No planner or enforcement issue was closed based solely on fixture tests or
 artifact smoke. Repository remains on local reconciliation branch
-`chore/phase-2-issue-reconciliation`; it is ten commits ahead of `main` and was
-not pushed.
+`chore/phase-2-issue-reconciliation`; no changes were pushed or made to GitHub.
+
+### #7 — Planner parent acceptance work in progress
+
+Checked-in versioned plan JSON fixtures under
+`crates/manyfw-core/tests/golden/planner/` cover host-only, Docker iptables
+with/without observed `DOCKER-USER`, Docker native nftables, mixed managers,
+unknown capability, userland-proxy publication, and conflicting hook priorities.
+They preserve source-interface/subnet matching, typed paths, IPv4/IPv6
+operations, observed host/container port mappings, DNAT/conntrack requirements,
+explicit ManyFW resource scopes for rules/defaults, preconditions, explanations,
+unknowns, and applicability. Foreign ownership and unobserved `DOCKER-USER`
+remain blocked; native nftables does not require `DOCKER-USER`. Deterministic
+input fingerprints include the normalized policy, discovery snapshot, backend
+observation and capabilities; `DiagnosticPlan::matches_input` invalidates a
+plan when any of those inputs change. It is a comparison token, not an
+authenticity mechanism, and no apply path is implemented. Docker-iptables plans
+are diagnostic-only when they depend on Docker-owned `DOCKER-USER`: observation
+does not grant write ownership, and the current typed resource contract cannot
+prove an independent ManyFW insertion point and ordering.
+
+The ignored privileged test `crates/manyfw-core/tests/planner_netns.rs` ran in a
+separate Ubuntu 24.04 KVM guest after checking virtualization and an exact
+disposable-guest marker before privileged setup. It created two guest-local
+network namespaces, derived test-only nftables verdict rules from the typed
+host INPUT allow and scoped default-deny operations, compared accepted TCP/8080
+and denied TCP/8081 packet probes, and asserted the target namespace's
+nftables JSON ruleset was unchanged across plan generation. Current evidence is at
+`/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/`.
+This demonstrates one read-only host INPUT scenario only; it does not claim
+Docker packet-path or privileged enforcement coverage and does not close #7.
 
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 
