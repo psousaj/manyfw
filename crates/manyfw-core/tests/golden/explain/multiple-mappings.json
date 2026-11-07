@@ -1,0 +1,329 @@
+{
+  "version": 3,
+  "snapshot_version": 1,
+  "subject": {
+    "selector": "[redacted]"
+  },
+  "identity": {
+    "outcome": "resolved",
+    "identity": "docker:demo/web",
+    "replicas": [
+      {
+        "instance_id": "replica-1",
+        "replica_key": "replica-key-1",
+        "lifecycle": "running",
+        "operational_status": "running"
+      }
+    ]
+  },
+  "identity_evidence": [
+    "evidence-1"
+  ],
+  "paths": [
+    {
+      "id": "evidence-13",
+      "instance_id": "replica-1",
+      "family": "ipv4",
+      "protocol": "tcp",
+      "host_binding": {
+        "address": "203.0.113.10",
+        "port": 9443
+      },
+      "container_addresses": [
+        {
+          "network": "bridge",
+          "address": "172.20.0.2",
+          "provenance": "DockerInspection"
+        }
+      ],
+      "host_port": 9443,
+      "container_port": 9443,
+      "lifecycle": "running",
+      "operational_status": "running",
+      "steps": [
+        {
+          "kind": "docker_publication",
+          "status": "observed",
+          "detail": "published 203.0.113.10:9443 to container port 9443 (Tcp)",
+          "evidence": [
+            "evidence-8"
+          ]
+        },
+        {
+          "kind": "family",
+          "status": "observed",
+          "detail": "ipv4",
+          "evidence": [
+            "evidence-9"
+          ]
+        },
+        {
+          "kind": "nat_proxy",
+          "status": "observed",
+          "detail": "Nat",
+          "evidence": [
+            "evidence-10"
+          ]
+        },
+        {
+          "kind": "unknown_mechanism",
+          "status": "unknown",
+          "detail": "correlation target unavailable",
+          "evidence": [
+            "evidence-11"
+          ]
+        }
+      ],
+      "evidence": [
+        "evidence-8",
+        "evidence-9",
+        "evidence-10",
+        "evidence-11"
+      ],
+      "policy": {
+        "matching_rule_count": 1,
+        "declared_action": "allow",
+        "precedence": [
+          50
+        ],
+        "static_conclusion": "policy_match_only",
+        "runtime_enforcement": "unverified",
+        "evidence": [
+          "evidence-12"
+        ]
+      },
+      "conclusion": "unknown"
+    },
+    {
+      "id": "evidence-7",
+      "instance_id": "replica-1",
+      "family": "ipv4",
+      "protocol": "tcp",
+      "host_binding": {
+        "address": "203.0.113.10",
+        "port": 8443
+      },
+      "container_addresses": [
+        {
+          "network": "bridge",
+          "address": "172.20.0.2",
+          "provenance": "DockerInspection"
+        }
+      ],
+      "host_port": 8443,
+      "container_port": 8080,
+      "lifecycle": "running",
+      "operational_status": "running",
+      "steps": [
+        {
+          "kind": "docker_publication",
+          "status": "observed",
+          "detail": "published 203.0.113.10:8443 to container port 8080 (Tcp)",
+          "evidence": [
+            "evidence-2"
+          ]
+        },
+        {
+          "kind": "family",
+          "status": "observed",
+          "detail": "ipv4",
+          "evidence": [
+            "evidence-3"
+          ]
+        },
+        {
+          "kind": "nat_proxy",
+          "status": "observed",
+          "detail": "Nat",
+          "evidence": [
+            "evidence-4"
+          ]
+        },
+        {
+          "kind": "unknown_mechanism",
+          "status": "unknown",
+          "detail": "correlation target unavailable",
+          "evidence": [
+            "evidence-5"
+          ]
+        }
+      ],
+      "evidence": [
+        "evidence-2",
+        "evidence-3",
+        "evidence-4",
+        "evidence-5"
+      ],
+      "policy": {
+        "matching_rule_count": 1,
+        "declared_action": "allow",
+        "precedence": [
+          50
+        ],
+        "static_conclusion": "policy_match_only",
+        "runtime_enforcement": "unverified",
+        "evidence": [
+          "evidence-6"
+        ]
+      },
+      "conclusion": "unknown"
+    }
+  ],
+  "policy": {
+    "matching_rule_count": 1,
+    "declared_action": "allow",
+    "precedence": [
+      50
+    ],
+    "static_conclusion": "policy_match_only",
+    "runtime_enforcement": "unverified",
+    "evidence": [
+      "evidence-12",
+      "evidence-14",
+      "evidence-6"
+    ]
+  },
+  "runtime": {
+    "status": "unknown",
+    "statement": "the runtime path remains unknown",
+    "evidence": [
+      "evidence-8",
+      "evidence-9",
+      "evidence-10",
+      "evidence-11",
+      "evidence-2",
+      "evidence-3",
+      "evidence-4",
+      "evidence-5"
+    ]
+  },
+  "evidence": [
+    {
+      "id": "evidence-1",
+      "source": "docker_identity",
+      "resource": "service selector (redacted)",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-10",
+      "source": "docker_publication",
+      "resource": "mechanism:Nat",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-11",
+      "source": "correlation_graph",
+      "resource": "correlation target unavailable",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-12",
+      "source": "policy_evaluation",
+      "resource": "declared endpoint policy outcome: allow",
+      "interval": null,
+      "limitations": [
+        "policy is static and has no collection timestamp",
+        "effective runtime enforcement is unverified"
+      ]
+    },
+    {
+      "id": "evidence-14",
+      "source": "policy_evaluation",
+      "resource": "declared policy summary; runtime enforcement unverified",
+      "interval": null,
+      "limitations": [
+        "policy is static and has no collection timestamp",
+        "policy evidence describes declared intent only"
+      ]
+    },
+    {
+      "id": "evidence-2",
+      "source": "docker_publication",
+      "resource": "endpoint:203.0.113.10:8443->container:[\"bridge:172.20.0.2\"]/8080:Tcp",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-3",
+      "source": "docker_publication",
+      "resource": "family:ipv4",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-4",
+      "source": "docker_publication",
+      "resource": "mechanism:Nat",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-5",
+      "source": "correlation_graph",
+      "resource": "correlation target unavailable",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-6",
+      "source": "policy_evaluation",
+      "resource": "declared endpoint policy outcome: allow",
+      "interval": null,
+      "limitations": [
+        "policy is static and has no collection timestamp",
+        "effective runtime enforcement is unverified"
+      ]
+    },
+    {
+      "id": "evidence-8",
+      "source": "docker_publication",
+      "resource": "endpoint:203.0.113.10:9443->container:[\"bridge:172.20.0.2\"]/9443:Tcp",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-9",
+      "source": "docker_publication",
+      "resource": "family:ipv4",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    }
+  ],
+  "unknowns": [
+    "runtime path is not fully observed",
+    "host firewall state and external reachability are unknown: upstream NAT, cloud security groups, host proxies, and effective firewall enforcement were not inspected"
+  ],
+  "limitations": [
+    "NoReachabilityProbe"
+  ]
+}

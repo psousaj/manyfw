@@ -34,6 +34,12 @@ not produce an observed runtime path, even if a Docker publication is recorded.
 Configured policy and observed Docker publication are not evidence of effective
 firewall enforcement or external reachability.
 
+For a container using host networking, host listeners remain separate host
+observations. Explain does not attribute a listener to a container unless the
+snapshot contains a supported correlation; without process-ownership evidence,
+the path and runtime conclusion remain unknown rather than inferring a host
+input path from the shared network namespace alone.
+
 Output ordering is deterministic for the same normalized policy and snapshot.
 Credentials, raw Docker responses, unallowlisted selectors, environment
 variables, and secret-bearing errors are excluded. See the [Explain contract](specs/issue-6-explain.md)

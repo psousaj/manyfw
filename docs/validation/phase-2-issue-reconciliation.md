@@ -121,11 +121,18 @@ The read-only snapshot path, typed identity outcomes, policy/runtime distinction
 evidence links, secret redaction, and uncertainty are demonstrated by the
 implementation and child evidence above. The parent ticket also specifically
 requires golden fixtures for NAT, host-network, multiple mappings, and
-conflicting policies. The current tests exercise endpoint policy, target and
-provenance matching, stopped lifecycle, IPv6 formatting, and mixed endpoint
-policy actions, but do not provide complete golden artifacts for each of those
-four parent scenarios. Parent #6 therefore remains open; no closure claim is
-made for those missing acceptance artifacts.
+conflicting policies. `crates/manyfw-core/tests/golden/explain/` now contains a
+complete versioned JSON artifact for each case, rebuilt from deterministic
+policy and observation fixtures and compared byte-for-byte by a core test.
+The host-network case deliberately keeps an observed host listener unattributed
+to the service: without process-ownership evidence, it records an explicit
+unknown instead of fabricating a host-input path. The conflicting-policy case
+shows both matching rules and their distinct priorities while keeping effective
+runtime enforcement unverified. Existing tests continue to cover identity
+resolution, replicas, evidence references, stopped lifecycle, IPv6 formatting,
+and renderer semantics. These local artifacts address the identified golden
+gap; the GitHub parent remains open because this run does not mutate tracker
+state.
 
 ### #26 — Linux CI/CD and v0.2.0 release
 

@@ -303,6 +303,11 @@ fn correlate_endpoint(
     source: CorrelationNode,
 ) -> Vec<CorrelationEdge> {
     let mut edges = Vec::new();
+    // Host-network containers share the host namespace. A matching socket
+    // tuple alone does not attribute a host listener to this container.
+    if endpoint.network_mode == docker::NetworkMode::Host {
+        return edges;
+    }
     let addresses_uncertain = dimension_uncertain(&host.addresses)
         || !dimension_intersects(&host.addresses, docker_interval);
     let routes_uncertain =
@@ -779,6 +784,31 @@ mod tests {
         );
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.to_ascii_lowercase().contains("reachable"));
+    }
+
+    #[test]
+    fn host_network_endpoint_tuple_does_not_attribute_a_host_listener() {
+        let mut endpoint = endpoint(
+            Some("203.0.113.10"),
+            docker::IpFamily::Ipv4,
+            docker::TransportProtocol::Tcp,
+        );
+        endpoint.network_mode = docker::NetworkMode::Host;
+        let snapshot = ObservationSnapshot::compose(
+            docker_result(endpoint),
+            host_result(
+                vec![listener(
+                    "203.0.113.10".parse().unwrap(),
+                    host::IpFamily::Ipv4,
+                    host::TransportProtocol::Tcp,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        assert!(snapshot.correlations.edges.iter().all(|edge| {
+            edge.target.is_none() && edge.status != CorrelationEdgeStatus::Confirmed
+        }));
     }
 
     #[test]
