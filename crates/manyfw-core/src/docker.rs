@@ -958,7 +958,7 @@ fn transport_error_message(outcome: &CollectionOutcome) -> &'static str {
         CollectionOutcome::Interrupted => "collection interrupted",
         CollectionOutcome::Malformed => "malformed response",
         CollectionOutcome::TemporalInconsistency => "temporal inconsistency",
-        CollectionOutcome::Partial => "partial collection",
+        CollectionOutcome::Partial => "partial collection; some Docker observations may be missing",
         CollectionOutcome::Complete => "complete",
     }
 }
