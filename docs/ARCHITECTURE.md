@@ -9,7 +9,7 @@ ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel
 - **Docker adapter**: the CLI uses Bollard for read-only `list`/`inspect` operations over a local Unix socket and projects only allowlisted fields.
 - **Linux host adapter**: the separate `manyfw-linux` crate uses Netlink for interfaces, addresses, and routes, and Socket Diagnostics for TCP/UDP sockets. Read-only sysfs/procfs fallbacks are explicitly partial; the core contains only typed source contracts and normalization.
 - **Backends**: typed capability/feasibility planning in the core. The Linux adapter may collect nftables and iptables listings using fixed, read-only invocations; collection failures and unverified mode/ownership remain unknown. No nftables or iptables mutation adapter is approved.
-- **Transaction runner**: durable state-machine primitives and fixture tests exist, but no production apply command or independent recovery supervisor is shipped.
+- **Transaction runner**: durable state-machine primitives and a recovery-only supervisor seam are fixture-tested against injected backends/stores. Confirmation deadlines retain wall-clock metadata and use boot-scoped monotonic time; a boot change expires pending confirmation conservatively. A host can launch recovery independently of the runner, but no production apply command or independently supervised OS service is shipped.
 
 ## Integration constraints
 

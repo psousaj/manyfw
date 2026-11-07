@@ -748,6 +748,7 @@ name = "manyfw-core"
 version = "0.3.0"
 dependencies = [
  "ipnet",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

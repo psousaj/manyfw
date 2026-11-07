@@ -19,6 +19,15 @@ critical scenario blocks release approval.
 | Durable restart and recovery fixture | Passed | `cargo test -p manyfw-core --test recovery_matrix` |
 | Partial apply rollback | Passed | `cargo test -p manyfw-core --test recovery_matrix` |
 | Rollback failure terminal evidence | Passed | `cargo test -p manyfw-core --test recovery_matrix` |
+| Independent recovery supervisor resumes durable pending transaction without runner | Passed | `independent_supervisor_recovers_durable_transaction_without_runner` uses `FileStore`, a simulated dead-process lock owner, and an injected backend; confirms deadline wait/expiry, rollback, and idempotent repeat recovery |
+| Reboot, unavailable clock, or legacy wall-only deadline expires conservatively | Passed | `reboot_expires_confirmation_even_when_wall_clock_moves_backwards`; `unavailable_clock_rolls_back_pending_confirmation_and_sanitizes_error`; `legacy_wall_only_deadline_deserializes_as_expired`; `linux_clock_reads_boot_scoped_monotonic_time` |
+| Concurrent recovery supervisors serialize by ownership domain | Passed | `concurrent_supervisor_recovery_is_exclusive_across_instances` blocks one recovery in the backend and verifies the second returns `Busy` |
+| Unresolved durable transaction reserves its ownership domain after process lock release | Passed | `pending_record_reserves_domain_after_process_lock_is_released` rejects a new transaction ID until recovery resolves the existing record |
+| Terminal confirmation releases its durable ownership-domain lock | Passed | `confirming_file_store_transaction_releases_domain_for_next_transaction` confirms a FileStore transaction and then starts another transaction in the same domain |
+| Same-runner recovery releases both transaction and recovery lock acquisitions | Passed | `runner_recovery_releases_original_and_recovery_domain_locks` recovers an expired confirmation through the initiating runner and starts a subsequent transaction |
+| Explicit rollback releases both transaction and rollback lock acquisitions | Passed | `explicit_rollback_releases_original_and_operation_domain_locks` rolls back through the initiating runner and starts a subsequent transaction |
+| Failed rollback reserves ownership domain for administrative recovery | Passed | `rollback_failure_keeps_domain_reserved_for_administrative_recovery` persists `RollbackFailure` and rejects a subsequent transaction in that domain |
+| Crash after mutation before post-apply fingerprint persistence | Passed | `crash_after_mutation_without_fingerprint_is_visible_and_fails_closed` records `RollbackFailure` and leaves divergent backend state untouched rather than blindly restoring |
 | SSH loss | NotApplicable | Requires disposable VM/network namespace |
 | Reboot during backend mutation | NotApplicable | Requires disposable VM |
 | Docker, UFW, firewalld, Tailscale privileged matrix | NotApplicable | Requires dedicated privileged lab |

@@ -156,6 +156,25 @@ claimed: the existing PR run above used a workflow revision without the guard.
 No GitHub release, issue, workflow dispatch, or host firewall state was modified
 during this audit.
 
+### #22 — Durable transaction state machine (simulation contract)
+
+| Acceptance criterion | Implementation evidence | Test/evidence |
+|---|---|---|
+| Durable transaction states cover preflight through terminal failure outcomes | `TransactionRecord` persists each state in `FileStore`; `TransactionState` distinguishes preflight, checkpoint, applying, verifying, confirmation, rollback, confirmed, rolled back, abort, failure, and rollback failure | `file_store_round_trips_durable_record`; transaction transition tests in `crates/manyfw-core/src/transaction.rs` |
+| Checkpoints, tokens, deadlines, persistence, ownership, concurrency, sanitization, and rollback outcomes are verified with simulated backends | `TransactionBackend`, `Clock`, `TokenSource`, and `TransactionStore` are injected interfaces; Linux clock reads wall time, boot-scoped monotonic uptime, and boot identity; reboot, unavailable-clock, or legacy wall-only records expire conservatively | `cargo test -p manyfw-core --lib --locked`; `cargo test -p manyfw-core --test recovery_matrix --locked` |
+| A recovery-only supervisor resumes pending state without the transaction runner or CLI | `RecoverySupervisor` exposes only recovery, with no token source, apply, or confirm methods, and requires an exclusive durable ownership-domain lock; a pending nonterminal record reserves its domain from new transactions after process exit | `independent_supervisor_recovers_durable_transaction_without_runner` restarts from `FileStore`, preserves a pending transaction before its same-boot monotonic deadline, rolls back after expiry, and proves retry is idempotent; `concurrent_supervisor_recovery_is_exclusive_across_instances` verifies competing supervisors serialize; `pending_record_reserves_domain_after_process_lock_is_released` verifies a distinct transaction cannot supersede unresolved state; reboot behavior is covered separately |
+| The simulation is not represented as production recovery or enforcement evidence | Architecture and test matrix distinguish the injected supervisor seam from an independently managed OS process; SSH loss, reboot, and privileged backend tests remain NotApplicable | No apply CLI or production firewall backend exists; #24 VM evidence remains required before enforcement release |
+
+If the applying process fails after mutation but before persisting its resulting
+ownership fingerprint, recovery refuses a blind restore and records
+`RollbackFailure`; this conservative case is covered by
+`crash_after_mutation_without_fingerprint_is_visible_and_fails_closed` and
+requires administrative recovery.
+
+This completes only the deterministic transaction/supervisor component contract.
+It does not implement a real process watchdog, system service, CLI apply flow, or
+privileged backend, and does not satisfy issue #24's isolated recovery gate.
+
 ## Final tracker reconciliation
 
 Read-only GitHub issue audit on 2026-11-05 recorded the tracker statuses at that

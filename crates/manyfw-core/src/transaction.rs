@@ -13,6 +13,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs::File, os::fd::AsRawFd};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -210,7 +212,8 @@ pub struct TransactionRecord {
     pub state: TransactionState,
     pub checkpoint: Option<Checkpoint>,
     pub confirmation_token_hash: Option<String>,
-    pub confirmed_deadline: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_confirmation_deadline")]
+    pub confirmed_deadline: Option<ConfirmationDeadline>,
     pub post_apply_fingerprint: Option<String>,
     pub progress: Vec<String>,
     pub diagnostics: Vec<String>,
@@ -243,6 +246,11 @@ pub trait TransactionStore: Send + Sync {
             "store does not provide domain locking".into(),
         ))
     }
+    fn acquire_domain_exclusive(&self, _domain: &str, _owner: &str) -> Result<()> {
+        Err(TransactionError::Store(
+            "store does not provide exclusive domain locking".into(),
+        ))
+    }
     fn release_domain(&self, _domain: &str, _owner: &str) {}
 }
 
@@ -261,6 +269,9 @@ impl<T: TransactionStore + ?Sized> TransactionStore for Arc<T> {
     }
     fn acquire_domain(&self, domain: &str, owner: &str) -> Result<()> {
         (**self).acquire_domain(domain, owner)
+    }
+    fn acquire_domain_exclusive(&self, domain: &str, owner: &str) -> Result<()> {
+        (**self).acquire_domain_exclusive(domain, owner)
     }
     fn release_domain(&self, domain: &str, owner: &str) {
         (**self).release_domain(domain, owner)
@@ -312,6 +323,17 @@ impl TransactionStore for MemoryStore {
             }
         }
     }
+    fn acquire_domain_exclusive(&self, domain: &str, owner: &str) -> Result<()> {
+        let mut domains = self
+            .domains
+            .lock()
+            .map_err(|_| TransactionError::Store("store lock poisoned".into()))?;
+        if domains.contains_key(domain) {
+            return Err(TransactionError::Busy);
+        }
+        domains.insert(domain.into(), owner.into());
+        Ok(())
+    }
     fn save_if_state(&self, record: &TransactionRecord, expected: TransactionState) -> Result<()> {
         let mut records = self
             .records
@@ -340,12 +362,21 @@ impl TransactionStore for MemoryStore {
 #[derive(Debug)]
 pub struct FileStore {
     directory: PathBuf,
+    domain_locks: Arc<Mutex<BTreeMap<String, HeldDomainLock>>>,
+}
+
+#[derive(Debug)]
+struct HeldDomainLock {
+    owner: String,
+    acquisitions: usize,
+    _file: File,
 }
 
 impl Clone for FileStore {
     fn clone(&self) -> Self {
         Self {
             directory: self.directory.clone(),
+            domain_locks: Arc::clone(&self.domain_locks),
         }
     }
 }
@@ -354,11 +385,67 @@ impl FileStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
+            domain_locks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
     fn path(&self, id: &str) -> PathBuf {
         self.directory
             .join(format!("{}.json", safe_file_component(id)))
+    }
+
+    fn acquire_domain_lock(&self, domain: &str, owner: &str, reentrant: bool) -> Result<()> {
+        let mut held_locks = self
+            .domain_locks
+            .lock()
+            .map_err(|_| TransactionError::Store("domain lock table poisoned".into()))?;
+        if let Some(held) = held_locks.get(domain) {
+            if reentrant && held.owner == owner {
+                let held = held_locks.get_mut(domain).expect("lock was just observed");
+                held.acquisitions += 1;
+                return Ok(());
+            }
+            return Err(TransactionError::Busy);
+        }
+
+        let lock = self
+            .directory
+            .join(format!("{}.lock", safe_file_component(domain)));
+        fs::create_dir_all(&self.directory).map_err(|e| TransactionError::Store(e.to_string()))?;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .map_err(|error| TransactionError::Store(error.to_string()))?;
+        // SAFETY: flock only reads the valid descriptor owned by `file`; the
+        // lock is released automatically when that descriptor closes/process exits.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(TransactionError::Busy);
+            }
+            return Err(TransactionError::Store(error.to_string()));
+        }
+        file.set_len(0)
+            .and_then(|()| std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0)))
+            .map_err(|error| TransactionError::Store(error.to_string()))?;
+        std::io::Write::write_all(
+            &mut file,
+            format!("{}:{}", std::process::id(), owner).as_bytes(),
+        )
+        .and_then(|()| file.sync_all())
+        .map_err(|error| TransactionError::Store(error.to_string()))?;
+        held_locks.insert(
+            domain.into(),
+            HeldDomainLock {
+                owner: owner.into(),
+                acquisitions: 1,
+                _file: file,
+            },
+        );
+        Ok(())
     }
 }
 
@@ -416,79 +503,140 @@ impl TransactionStore for FileStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(TransactionError::Store(e.to_string())),
         };
-        entries
-            .filter_map(|entry| entry.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .map(|entry| {
-                fs::read(entry.path())
-                    .map_err(|e| TransactionError::Store(e.to_string()))
-                    .and_then(|b| {
-                        serde_json::from_slice(&b)
-                            .map_err(|e| TransactionError::Store(e.to_string()))
-                    })
-            })
-            .collect()
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| TransactionError::Store(error.to_string()))?;
+            if entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            let bytes = fs::read(entry.path())
+                .map_err(|error| TransactionError::Store(error.to_string()))?;
+            let record = serde_json::from_slice(&bytes)
+                .map_err(|error| TransactionError::Store(error.to_string()))?;
+            records.push(record);
+        }
+        Ok(records)
     }
     fn acquire_domain(&self, domain: &str, owner: &str) -> Result<()> {
-        let lock = self
-            .directory
-            .join(format!("{}.lock", safe_file_component(domain)));
-        fs::create_dir_all(&self.directory).map_err(|e| TransactionError::Store(e.to_string()))?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(mut file) => {
-                if let Err(error) = std::io::Write::write_all(
-                    &mut file,
-                    format!("{}:{}", std::process::id(), owner).as_bytes(),
-                ) {
-                    let _ = fs::remove_file(&lock);
-                    return Err(TransactionError::Store(error.to_string()));
-                }
-                if let Err(error) = file.sync_all() {
-                    let _ = fs::remove_file(&lock);
-                    return Err(TransactionError::Store(error.to_string()));
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let path = self
-                    .directory
-                    .join(format!("{}.lock", safe_file_component(domain)));
-                let existing = fs::read_to_string(&path).unwrap_or_default();
-                if existing == format!("{}:{}", std::process::id(), owner) {
-                    return Ok(());
-                }
-                let stale = existing
-                    .split_once(':')
-                    .and_then(|(pid, _)| pid.parse::<u32>().ok())
-                    .is_some_and(|pid| !PathBuf::from(format!("/proc/{pid}")).exists());
-                if stale {
-                    let _ = fs::remove_file(path);
-                    return self.acquire_domain(domain, owner);
-                }
-                Err(TransactionError::Busy)
-            }
-            Err(e) => Err(TransactionError::Store(e.to_string())),
-        }
+        self.acquire_domain_lock(domain, owner, true)
+    }
+    fn acquire_domain_exclusive(&self, domain: &str, owner: &str) -> Result<()> {
+        self.acquire_domain_lock(domain, owner, false)
     }
     fn release_domain(&self, domain: &str, owner: &str) {
-        let path = self
-            .directory
-            .join(format!("{}.lock", safe_file_component(domain)));
-        if fs::read_to_string(&path)
-            .ok()
-            .is_some_and(|value| value == format!("{}:{}", std::process::id(), owner))
-        {
-            let _ = fs::remove_file(path);
+        if let Ok(mut held_locks) = self.domain_locks.lock() {
+            if let Some(held) = held_locks
+                .get_mut(domain)
+                .filter(|held| held.owner == owner)
+            {
+                held.acquisitions = held.acquisitions.saturating_sub(1);
+                if held.acquisitions == 0 {
+                    held_locks.remove(domain);
+                }
+            }
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmationDeadline {
+    /// Persisted for audit and cross-boot diagnosis, not used for same-boot expiry.
+    pub wall_clock_deadline_seconds: u64,
+    /// Compared only when `boot_id` matches, avoiding wall-clock adjustments.
+    pub monotonic_deadline_seconds: u64,
+    pub boot_id: String,
+}
+
+impl ConfirmationDeadline {
+    fn after(reading: &ClockReading, duration_seconds: u64) -> Self {
+        Self {
+            wall_clock_deadline_seconds: reading
+                .wall_clock_seconds
+                .saturating_add(duration_seconds),
+            monotonic_deadline_seconds: reading.monotonic_seconds.saturating_add(duration_seconds),
+            boot_id: reading.boot_id.clone(),
+        }
+    }
+
+    fn is_expired_at(&self, reading: &ClockReading) -> bool {
+        self.boot_id.is_empty()
+            || self.boot_id != reading.boot_id
+            || reading.monotonic_seconds >= self.monotonic_deadline_seconds
+    }
+}
+
+fn deserialize_confirmation_deadline<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ConfirmationDeadline>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredDeadline {
+        Current(ConfirmationDeadline),
+        LegacyWallClock(u64),
+    }
+
+    Option::<StoredDeadline>::deserialize(deserializer).map(|stored| {
+        stored.map(|deadline| match deadline {
+            StoredDeadline::Current(deadline) => deadline,
+            // Old records have no boot/monotonic identity. Expire them on recovery.
+            StoredDeadline::LegacyWallClock(wall_clock_deadline_seconds) => ConfirmationDeadline {
+                wall_clock_deadline_seconds,
+                monotonic_deadline_seconds: 0,
+                boot_id: String::new(),
+            },
+        })
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockReading {
+    pub wall_clock_seconds: u64,
+    pub monotonic_seconds: u64,
+    pub boot_id: String,
+}
+
 pub trait Clock: Send + Sync {
-    fn now_seconds(&self) -> u64;
+    fn now(&self) -> Result<ClockReading>;
+}
+
+/// Read-only Linux clock source. The boot identifier scopes monotonic values
+/// across reboots; if any source is unavailable, callers fail closed.
+pub struct LinuxClock;
+
+impl Clock for LinuxClock {
+    fn now(&self) -> Result<ClockReading> {
+        let wall_clock_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| TransactionError::Clock(error.to_string()))?
+            .as_secs();
+        let uptime = fs::read_to_string("/proc/uptime")
+            .map_err(|error| TransactionError::Clock(error.to_string()))?;
+        let monotonic_seconds = uptime
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.split('.').next())
+            .and_then(|seconds| seconds.parse::<u64>().ok())
+            .ok_or_else(|| TransactionError::Clock("invalid /proc/uptime".into()))?;
+        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| TransactionError::Clock(error.to_string()))?
+            .trim()
+            .to_owned();
+        if boot_id.is_empty() {
+            return Err(TransactionError::Clock("empty Linux boot ID".into()));
+        }
+        Ok(ClockReading {
+            wall_clock_seconds,
+            monotonic_seconds,
+            boot_id,
+        })
+    }
 }
 pub trait TokenSource: Send + Sync {
     fn token(&self) -> Result<String>;
@@ -547,6 +695,8 @@ pub enum TransactionError {
     Store(String),
     #[error("token source: {0}")]
     Token(String),
+    #[error("clock source: {0}")]
+    Clock(String),
 }
 
 #[derive(Debug, Default)]
@@ -582,6 +732,40 @@ pub struct TransactionRunner<B, S, C, T> {
     tokens: T,
     locks: Arc<DomainLocks>,
 }
+
+/// A recovery-only process boundary. It owns the durable store and backend
+/// capabilities needed to resume transactions, but has no token source and
+/// exposes no apply or confirmation operations. A host may launch this
+/// component independently; this type does not install or supervise an OS
+/// process itself.
+pub struct RecoverySupervisor<B, S, C> {
+    backend: B,
+    store: S,
+    clock: C,
+    locks: Arc<DomainLocks>,
+}
+
+impl<B, S, C> RecoverySupervisor<B, S, C>
+where
+    B: TransactionBackend,
+    S: TransactionStore,
+    C: Clock,
+{
+    pub fn new(backend: B, store: S, clock: C) -> Self {
+        Self {
+            backend,
+            store,
+            clock,
+            locks: Arc::new(DomainLocks::default()),
+        }
+    }
+
+    /// Recover durable transactions that were interrupted before confirmation.
+    pub fn recover(&self) -> Result<Vec<String>> {
+        recover_pending(&self.backend, &self.store, &self.clock, &self.locks, true)
+    }
+}
+
 impl<B, S, C, T> TransactionRunner<B, S, C, T>
 where
     B: TransactionBackend,
@@ -609,7 +793,10 @@ where
         }
         let domain = plan.ownership_domain.clone();
         let transaction_id = plan.transaction_id.clone();
-        self.locks.acquire(&domain, &plan.transaction_id)?;
+        let newly_acquired = self.locks.acquire(&domain, &plan.transaction_id)?;
+        if !newly_acquired {
+            return Err(TransactionError::Busy);
+        }
         if let Err(error) = self.store.acquire_domain(&domain, &plan.transaction_id) {
             self.locks.release(&domain, &plan.transaction_id);
             return Err(error);
@@ -621,6 +808,25 @@ where
                 return Err(TransactionError::InvalidState);
             }
             Ok(None) => {}
+            Err(error) => {
+                self.locks.release(&domain, &transaction_id);
+                self.store.release_domain(&domain, &transaction_id);
+                return Err(error);
+            }
+        }
+        match self.store.list() {
+            Ok(records)
+                if records.iter().any(|record| {
+                    record.plan.ownership_domain == domain
+                        && (!record.state.is_terminal()
+                            || record.state == TransactionState::RollbackFailure)
+                }) =>
+            {
+                self.locks.release(&domain, &transaction_id);
+                self.store.release_domain(&domain, &transaction_id);
+                return Err(TransactionError::Busy);
+            }
+            Ok(_) => {}
             Err(error) => {
                 self.locks.release(&domain, &transaction_id);
                 self.store.release_domain(&domain, &transaction_id);
@@ -753,11 +959,14 @@ where
             Err(error) => return self.recover_record(record, error),
         };
         record.confirmation_token_hash = Some(token_hash(&record.plan.transaction_id, &token));
-        record.confirmed_deadline = Some(
-            self.clock
-                .now_seconds()
-                .saturating_add(record.plan.deadline_seconds),
-        );
+        let reading = match self.clock.now() {
+            Ok(reading) => reading,
+            Err(error) => return self.recover_record(record, error),
+        };
+        record.confirmed_deadline = Some(ConfirmationDeadline::after(
+            &reading,
+            record.plan.deadline_seconds,
+        ));
         record.state = TransactionState::Confirmation;
         if let Err(error) = self.store.save(&record) {
             return self.recover_record(record, error);
@@ -783,8 +992,10 @@ where
         record.state = TransactionState::Rollback;
         record.diagnostics.push(sanitize(&error.to_string()));
         let persistence_error = self.store.save(&record).err();
-        match self.rollback_record(&mut record) {
+        match rollback_record(&self.backend, &self.store, &mut record) {
             Ok(()) => {
+                self.store
+                    .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
                 self.store
                     .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
                 self.locks
@@ -795,6 +1006,8 @@ where
                 record.state = TransactionState::RollbackFailure;
                 record.diagnostics.push(sanitize(&rollback.to_string()));
                 let _ = self.store.save(&record);
+                self.store
+                    .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
                 self.store
                     .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
                 self.locks
@@ -852,13 +1065,20 @@ where
             release_lock(&self.locks, &record);
             return Err(TransactionError::InvalidState);
         }
-        let Some(deadline) = record.confirmed_deadline else {
+        let Some(deadline) = record.confirmed_deadline.as_ref() else {
             let result = self
                 .recover_record(record, TransactionError::Expired)
                 .map(|_| ());
             return result;
         };
-        if self.clock.now_seconds() >= deadline {
+        let reading = match self.clock.now() {
+            Ok(reading) => reading,
+            Err(error) => {
+                let result = self.recover_record(record, error).map(|_| ());
+                return result;
+            }
+        };
+        if deadline.is_expired_at(&reading) {
             let result = self
                 .recover_record(record, TransactionError::Expired)
                 .map(|_| ());
@@ -904,6 +1124,8 @@ where
             return Err(error);
         }
         release_lock(&self.locks, &record);
+        self.store
+            .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
         self.store
             .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
         Ok(())
@@ -1007,7 +1229,7 @@ where
                 .release(&record.plan.ownership_domain, &record.plan.transaction_id);
             return Err(error);
         }
-        let result = self.rollback_record(&mut record);
+        let result = rollback_record(&self.backend, &self.store, &mut record);
         if result.is_err() {
             record.state = TransactionState::RollbackFailure;
             record
@@ -1023,147 +1245,171 @@ where
         }
         self.store
             .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+        self.store
+            .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
         self.locks
             .release(&record.plan.ownership_domain, &record.plan.transaction_id);
         result
     }
 
     pub fn recover(&self) -> Result<Vec<String>> {
-        let mut recovered = Vec::new();
-        for mut record in self.store.list()? {
-            if matches!(
-                record.state,
-                TransactionState::Preflight
-                    | TransactionState::Checkpoint
-                    | TransactionState::Applying
-                    | TransactionState::Verifying
-                    | TransactionState::Confirmation
-                    | TransactionState::Rollback
-            ) {
-                if record.state == TransactionState::Confirmation
-                    && record
-                        .confirmed_deadline
-                        .is_some_and(|deadline| self.clock.now_seconds() < deadline)
-                {
-                    continue;
-                }
-                self.locks
-                    .acquire(&record.plan.ownership_domain, &record.plan.transaction_id)?;
-                if let Err(error) = self
-                    .store
-                    .acquire_domain(&record.plan.ownership_domain, &record.plan.transaction_id)
-                {
-                    self.locks
-                        .release(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    return Err(error);
-                }
-                if matches!(
-                    record.state,
-                    TransactionState::Preflight | TransactionState::Checkpoint
-                ) {
-                    let previous_state = record.state;
-                    record.state = TransactionState::Failure;
-                    record.diagnostics.push("recovered before mutation".into());
-                    let result = self.store.save_if_state(&record, previous_state);
-                    self.locks
-                        .release(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    self.store
-                        .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    result?;
-                    recovered.push(record.plan.transaction_id.clone());
-                    continue;
-                }
-                if record.state == TransactionState::Applying
-                    && !record.progress.iter().any(|step| step == "apply_started")
-                {
-                    let previous_state = record.state;
-                    record.state = TransactionState::Failure;
-                    record.diagnostics.push("recovered before mutation".into());
-                    let result = self.store.save_if_state(&record, previous_state);
-                    self.locks
-                        .release(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    self.store
-                        .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    result?;
-                    recovered.push(record.plan.transaction_id.clone());
-                    continue;
-                }
-                if record.state != TransactionState::Rollback {
-                    let previous_state = record.state;
-                    record.state = TransactionState::Rollback;
-                    if let Err(error) = self.store.save_if_state(&record, previous_state) {
-                        self.locks
-                            .release(&record.plan.ownership_domain, &record.plan.transaction_id);
-                        self.store.release_domain(
-                            &record.plan.ownership_domain,
-                            &record.plan.transaction_id,
-                        );
-                        return Err(error);
+        recover_pending(&self.backend, &self.store, &self.clock, &self.locks, false)
+    }
+}
+
+fn recover_pending<B, S, C>(
+    backend: &B,
+    store: &S,
+    clock: &C,
+    locks: &DomainLocks,
+    exclusive_domain_lock: bool,
+) -> Result<Vec<String>>
+where
+    B: TransactionBackend,
+    S: TransactionStore,
+    C: Clock,
+{
+    let mut recovered = Vec::new();
+    for mut record in store.list()? {
+        if !matches!(
+            record.state,
+            TransactionState::Preflight
+                | TransactionState::Checkpoint
+                | TransactionState::Applying
+                | TransactionState::Verifying
+                | TransactionState::Confirmation
+                | TransactionState::Rollback
+        ) {
+            continue;
+        }
+        if record.state == TransactionState::Confirmation {
+            let expired = match record.confirmed_deadline.as_ref() {
+                Some(deadline) => match clock.now() {
+                    Ok(reading) => deadline.is_expired_at(&reading),
+                    Err(error) => {
+                        record.diagnostics.push(sanitize(&error.to_string()));
+                        true
                     }
-                }
-                if let Err(rollback_error) = self.rollback_record(&mut record) {
-                    record.state = TransactionState::RollbackFailure;
+                },
+                None => {
                     record
                         .diagnostics
-                        .push(sanitize(&rollback_error.to_string()));
-                    let _ = self.store.save(&record);
-                    self.locks
-                        .release(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    self.store
-                        .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
-                    return Err(rollback_error);
+                        .push("confirmation deadline missing; expiring conservatively".into());
+                    true
                 }
-                recovered.push(record.plan.transaction_id.clone());
-                self.locks
-                    .release(&record.plan.ownership_domain, &record.plan.transaction_id);
-                self.store
-                    .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+            };
+            if !expired {
+                continue;
             }
         }
-        Ok(recovered)
-    }
-
-    fn rollback_record(&self, record: &mut TransactionRecord) -> Result<()> {
-        let checkpoint = record
-            .checkpoint
-            .as_ref()
-            .ok_or(TransactionError::CorruptCheckpoint)?;
-        if checkpoint.owner_fingerprint != record.plan.ownership_fingerprint {
-            return Err(TransactionError::OwnershipChanged);
+        let newly_acquired =
+            locks.acquire(&record.plan.ownership_domain, &record.plan.transaction_id)?;
+        if exclusive_domain_lock && !newly_acquired {
+            return Err(TransactionError::Busy);
         }
-        if record.post_apply_fingerprint.is_none() {
-            return Err(TransactionError::PostApplyFingerprintUnavailable);
+        let store_lock = if exclusive_domain_lock {
+            store.acquire_domain_exclusive(
+                &record.plan.ownership_domain,
+                &record.plan.transaction_id,
+            )
+        } else {
+            store.acquire_domain(&record.plan.ownership_domain, &record.plan.transaction_id)
+        };
+        if let Err(error) = store_lock {
+            if newly_acquired {
+                locks.release(&record.plan.ownership_domain, &record.plan.transaction_id);
+            }
+            return Err(error);
         }
-        if !checkpoint.is_intact() {
-            return Err(TransactionError::CorruptCheckpoint);
-        }
-        let expected = record
-            .post_apply_fingerprint
-            .as_ref()
-            .ok_or(TransactionError::PostApplyFingerprintUnavailable)?;
-        let current = self
-            .backend
-            .current_fingerprint(&record.plan.ownership_domain)?;
-        if current == record.plan.ownership_fingerprint {
-            record.state = TransactionState::RolledBack;
-            self.store.save(record)?;
-            return Ok(());
-        }
-        if current != *expected {
-            return Err(TransactionError::OwnershipChanged);
-        }
-        self.backend.rollback(checkpoint)?;
-        if self
-            .backend
-            .current_fingerprint(&record.plan.ownership_domain)?
-            != record.plan.ownership_fingerprint
+        if matches!(
+            record.state,
+            TransactionState::Preflight | TransactionState::Checkpoint
+        ) || (record.state == TransactionState::Applying
+            && !record.progress.iter().any(|step| step == "apply_started"))
         {
-            return Err(TransactionError::OwnershipChanged);
+            let previous_state = record.state;
+            record.state = TransactionState::Failure;
+            record.diagnostics.push("recovered before mutation".into());
+            let result = store.save_if_state(&record, previous_state);
+            locks.release(&record.plan.ownership_domain, &record.plan.transaction_id);
+            store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+            if !exclusive_domain_lock {
+                store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+            }
+            result?;
+            recovered.push(record.plan.transaction_id.clone());
+            continue;
         }
-        record.state = TransactionState::RolledBack;
-        self.store.save(record)?;
-        Ok(())
+        if record.state != TransactionState::Rollback {
+            let previous_state = record.state;
+            record.state = TransactionState::Rollback;
+            if let Err(error) = store.save_if_state(&record, previous_state) {
+                locks.release(&record.plan.ownership_domain, &record.plan.transaction_id);
+                store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+                return Err(error);
+            }
+        }
+        if let Err(rollback_error) = rollback_record(backend, store, &mut record) {
+            record.state = TransactionState::RollbackFailure;
+            record
+                .diagnostics
+                .push(sanitize(&rollback_error.to_string()));
+            let _ = store.save(&record);
+            locks.release(&record.plan.ownership_domain, &record.plan.transaction_id);
+            store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+            if !exclusive_domain_lock {
+                store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+            }
+            return Err(rollback_error);
+        }
+        recovered.push(record.plan.transaction_id.clone());
+        locks.release(&record.plan.ownership_domain, &record.plan.transaction_id);
+        store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+        store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
     }
+    Ok(recovered)
+}
+
+fn rollback_record<B, S>(backend: &B, store: &S, record: &mut TransactionRecord) -> Result<()>
+where
+    B: TransactionBackend,
+    S: TransactionStore,
+{
+    let checkpoint = record
+        .checkpoint
+        .as_ref()
+        .ok_or(TransactionError::CorruptCheckpoint)?;
+    if checkpoint.owner_fingerprint != record.plan.ownership_fingerprint {
+        return Err(TransactionError::OwnershipChanged);
+    }
+    if record.post_apply_fingerprint.is_none() {
+        return Err(TransactionError::PostApplyFingerprintUnavailable);
+    }
+    if !checkpoint.is_intact() {
+        return Err(TransactionError::CorruptCheckpoint);
+    }
+    let expected = record
+        .post_apply_fingerprint
+        .as_ref()
+        .ok_or(TransactionError::PostApplyFingerprintUnavailable)?;
+    let current = backend.current_fingerprint(&record.plan.ownership_domain)?;
+    if current == record.plan.ownership_fingerprint {
+        record.state = TransactionState::RolledBack;
+        store.save(record)?;
+        return Ok(());
+    }
+    if current != *expected {
+        return Err(TransactionError::OwnershipChanged);
+    }
+    backend.rollback(checkpoint)?;
+    if backend.current_fingerprint(&record.plan.ownership_domain)?
+        != record.plan.ownership_fingerprint
+    {
+        return Err(TransactionError::OwnershipChanged);
+    }
+    record.state = TransactionState::RolledBack;
+    store.save(record)?;
+    Ok(())
 }
 
 fn token_hash(id: &str, token: &str) -> String {
@@ -1196,10 +1442,23 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Clone)]
-    struct TestClock(u64);
+    struct TestClock(ClockReading);
+    impl TestClock {
+        fn at(seconds: u64) -> Self {
+            Self::with_boot(seconds, seconds, "test-boot")
+        }
+
+        fn with_boot(wall_clock_seconds: u64, monotonic_seconds: u64, boot_id: &str) -> Self {
+            Self(ClockReading {
+                wall_clock_seconds,
+                monotonic_seconds,
+                boot_id: boot_id.into(),
+            })
+        }
+    }
     impl Clock for TestClock {
-        fn now_seconds(&self) -> u64 {
-            self.0
+        fn now(&self) -> Result<ClockReading> {
+            Ok(self.0.clone())
         }
     }
     struct TestTokens;
@@ -1376,7 +1635,7 @@ mod tests {
     fn successful_transaction_requires_bound_confirmation_and_is_idempotent() {
         let store = Arc::new(MemoryStore::default());
         let backend = Backend::new();
-        let runner = TransactionRunner::new(backend, store.clone(), TestClock(1), TestTokens);
+        let runner = TransactionRunner::new(backend, store.clone(), TestClock::at(1), TestTokens);
         let token = runner.start(plan("one")).unwrap();
         assert_eq!(
             store.load("one").unwrap().unwrap().state,
@@ -1407,7 +1666,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let backend = Backend::new();
         let runner =
-            TransactionRunner::new(backend.clone(), store.clone(), TestClock(1), TestTokens);
+            TransactionRunner::new(backend.clone(), store.clone(), TestClock::at(1), TestTokens);
         let _ = runner.start(plan("two")).unwrap();
         let mut record = store.load("two").unwrap().unwrap();
         record
@@ -1417,7 +1676,8 @@ mod tests {
             .owned_resources
             .insert("owned".into(), "tampered".into());
         store.save(&record).unwrap();
-        let supervisor = TransactionRunner::new(backend, store.clone(), TestClock(200), TestTokens);
+        let supervisor =
+            TransactionRunner::new(backend, store.clone(), TestClock::at(200), TestTokens);
         assert!(supervisor.recover().is_err());
         assert_eq!(
             store.load("two").unwrap().unwrap().state,
@@ -1430,7 +1690,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let backend = Backend::new();
         backend.partial.store(true, Ordering::Relaxed);
-        let runner = TransactionRunner::new(backend, store.clone(), TestClock(1), TestTokens);
+        let runner = TransactionRunner::new(backend, store.clone(), TestClock::at(1), TestTokens);
         assert!(runner.start(plan("three")).is_err());
         assert_eq!(
             store.load("three").unwrap().unwrap().state,
@@ -1445,7 +1705,7 @@ mod tests {
         let backend = Backend::new();
         backend.fail_rollback.store(true, Ordering::Relaxed);
         backend.partial.store(true, Ordering::Relaxed);
-        let runner = TransactionRunner::new(backend, store.clone(), TestClock(1), TestTokens);
+        let runner = TransactionRunner::new(backend, store.clone(), TestClock::at(1), TestTokens);
         assert!(runner.start(plan("four")).is_err());
         let record = store.load("four").unwrap().unwrap();
         assert_eq!(record.state, TransactionState::RollbackFailure);
@@ -1456,10 +1716,15 @@ mod tests {
     fn expired_confirmation_is_recovered_after_restart() {
         let store = Arc::new(MemoryStore::default());
         let backend = Backend::new();
-        let runner =
-            TransactionRunner::new(backend.clone(), store.clone(), TestClock(100), TestTokens);
+        let runner = TransactionRunner::new(
+            backend.clone(),
+            store.clone(),
+            TestClock::at(100),
+            TestTokens,
+        );
         let _ = runner.start(plan("five")).unwrap();
-        let restarted = TransactionRunner::new(backend, store.clone(), TestClock(201), TestTokens);
+        let restarted =
+            TransactionRunner::new(backend, store.clone(), TestClock::at(201), TestTokens);
         restarted.recover().unwrap();
         assert_eq!(
             store.load("five").unwrap().unwrap().state,
@@ -1471,7 +1736,7 @@ mod tests {
     fn concurrent_domains_are_serialized_without_blocking_unrelated_domain() {
         let store = Arc::new(MemoryStore::default());
         let runner =
-            TransactionRunner::new(Backend::new(), store.clone(), TestClock(1), TestTokens);
+            TransactionRunner::new(Backend::new(), store.clone(), TestClock::at(1), TestTokens);
         let _token = runner.start(plan("six")).unwrap();
         assert!(matches!(
             runner.start(plan("seven")),
@@ -1501,5 +1766,77 @@ mod tests {
         store.save(&record).unwrap();
         assert_eq!(store.load("nine").unwrap(), Some(record));
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn file_store_domain_locks_are_kernel_exclusive_across_store_instances() {
+        let directory =
+            std::env::temp_dir().join(format!("manyfw-domain-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let first = FileStore::new(&directory);
+        let second = FileStore::new(&directory);
+
+        first
+            .acquire_domain_exclusive("shared-domain", "first")
+            .unwrap();
+        assert_eq!(
+            second.acquire_domain_exclusive("shared-domain", "second"),
+            Err(TransactionError::Busy)
+        );
+        first.release_domain("shared-domain", "first");
+        second
+            .acquire_domain_exclusive("shared-domain", "second")
+            .unwrap();
+        second.release_domain("shared-domain", "second");
+
+        first
+            .acquire_domain("reentrant-domain", "same-owner")
+            .unwrap();
+        first
+            .acquire_domain("reentrant-domain", "same-owner")
+            .unwrap();
+        first.release_domain("reentrant-domain", "same-owner");
+        assert_eq!(
+            second.acquire_domain_exclusive("reentrant-domain", "other-owner"),
+            Err(TransactionError::Busy)
+        );
+        first.release_domain("reentrant-domain", "same-owner");
+        second
+            .acquire_domain_exclusive("reentrant-domain", "other-owner")
+            .unwrap();
+        second.release_domain("reentrant-domain", "other-owner");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn legacy_wall_only_deadline_deserializes_as_expired() {
+        let mut record = TransactionRecord {
+            plan: plan("legacy-deadline"),
+            state: TransactionState::Confirmation,
+            checkpoint: None,
+            confirmation_token_hash: Some("hashed-token".into()),
+            confirmed_deadline: None,
+            post_apply_fingerprint: Some("after".into()),
+            progress: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut value = serde_json::to_value(&record).unwrap();
+        value["confirmed_deadline"] = serde_json::json!(1234);
+        record = serde_json::from_value(value).unwrap();
+        let deadline = record.confirmed_deadline.unwrap();
+        assert_eq!(deadline.wall_clock_deadline_seconds, 1234);
+        assert!(deadline.is_expired_at(&ClockReading {
+            wall_clock_seconds: 100,
+            monotonic_seconds: 1,
+            boot_id: "new-boot".into(),
+        }));
+    }
+
+    #[test]
+    fn linux_clock_reads_boot_scoped_monotonic_time() {
+        let reading = LinuxClock.now().unwrap();
+        assert!(!reading.boot_id.is_empty());
+        assert!(reading.wall_clock_seconds > 0);
+        assert!(reading.monotonic_seconds > 0);
     }
 }
