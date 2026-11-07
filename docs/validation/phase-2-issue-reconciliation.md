@@ -141,7 +141,7 @@ state.
 | x86_64/ARM64 and GNU/musl builds | Compatibility and release matrices each define all four target triples, with musl linker setup | Compatibility run 42066292439 passed all four target builds; release run 42066292818 passed all four packaging jobs |
 | Ubuntu, Debian, Fedora, Alpine, Arch smoke without destructive host firewall tests | Compatibility distro matrix covers all five images; namespace test is read-only for ManyFW and destructive firewall/kernel cases are explicitly NotApplicable | Compatibility run 42066292439 reports each distro smoke and disposable namespace smoke successful; integration job records firewall/kernel/VM cases as NotApplicable |
 | Validate binaries, archives, checksums, release metadata before publish | Release workflow checks version/tag source, smoke-tests packaged archives, requires four checksums, verifies every checksum, extracts all archives, then publishes | Release run 42066292818 all jobs succeeded; downloaded all four published archives and verified all SHA-256 manifests locally; x86_64 GNU artifact passed `--version` and valid-policy CLI smoke |
-| Keep pull-request checks fast; reserve expensive matrix for main/manual | Compatibility build, distro, and recovery-contract matrices now skip `pull_request`; normal CI owns build/test/fixture checks, while disposable namespace smoke remains on PRs | Compatibility YAML parses and job conditions inspected; hosted workflow run for this exact gating change is not yet available |
+| Keep pull-request checks fast; reserve expensive matrix for main/manual | Compatibility build, distro, and recovery-contract matrices exclude `pull_request`; normal CI owns build/test/fixture checks, while the read-only namespace smoke remains available on PRs. A CI contract test guards these conditions. | `actionlint` and `python3 -m unittest scripts/test_workflow_contracts.py` validate the local workflow set. Historical PR run 42156392188 is not evidence for the gate: its workflow source at `2b1db9e3c43c4b37fbd679d3229eb1eda58b7a57` lacks the pull-request exclusions. A hosted PR run of the guarded workflow is still unavailable in this read-only execution. |
 | Least-privilege permissions and pinned third-party actions | Workflow permissions default to `contents: read`; publishing job alone grants `contents: write`; every `uses:` is pinned to a full commit SHA | Source audit of exactly three workflow files: `ci.yml`, `compatibility.yml`, `release.yml` |
 | Do not imply issue #24 privileged recovery evidence | Workflow labels privileged kernel/VM recovery and destructive integration as separate evidence; candidate gate requires candidate-bound evidence | Issue #24 remains OPEN; release/compatibility runs do not claim privileged recovery success |
 
@@ -150,9 +150,11 @@ annotated tag resolves to the release run's
 `07cbf3effe0ed81c079f370b8b32e9a6d62f4d5d` commit. CI run 42066292361, release
 run 42066292818, and all compatibility jobs in run 42066292439 passed on that
 release commit. The full compatibility run remains on push/manual/schedule
-triggers; on PR the updated workflow retains only the disposable host namespace
-smoke alongside the ordinary CI workflow. No GitHub release or host firewall
-state was modified during this audit.
+triggers; on PR the updated workflow retains only the read-only namespace smoke
+alongside ordinary CI. A hosted PR execution of the gating change is not
+claimed: the existing PR run above used a workflow revision without the guard.
+No GitHub release, issue, workflow dispatch, or host firewall state was modified
+during this audit.
 
 ## Final tracker reconciliation
 

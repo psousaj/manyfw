@@ -12,9 +12,7 @@ on:
       - "scripts/**"
       - "tests/**"
       - "docs/**"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/compatibility.yml"
-      - ".github/workflows/release.yml"
+      - ".github/workflows/**"
       - ".github/actionlint.yaml"
   workflow_dispatch:
 
@@ -104,6 +102,8 @@ jobs:
         run: cargo run -p manyfw -- check --file examples/warnings/broad-ports.toml
       - name: Validate recovery evidence contract
         run: python3 -m unittest scripts/test_validate_recovery_report.py
+      - name: Validate workflow policy contracts
+        run: python3 -m unittest scripts/test_workflow_contracts.py
 
   dependency-audit:
     name: dependency audit
