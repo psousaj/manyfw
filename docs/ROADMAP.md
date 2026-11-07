@@ -49,7 +49,18 @@ reachability or complete behavior for every firewall manager and packet path.
 - [ ] Independent rollback supervisor outside the applying CLI process
 - [ ] Require confirmation for real remote firewall changes
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
-- [ ] SSH, IPv6, Docker and Tailscale privileged regression matrix in disposable VMs
+- [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
+- [ ] Issue #23 real scoped experimental apply, unblocked by #22 and completion of #24 Milestone A; implementation remains subject to architecture/security review and explicit opt-in
+- [ ] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration
+- [ ] Complete the remaining #24 VM/release matrix: corrupt checkpoint, ownership divergence, Docker modes, Tailscale, UFW/firewalld, manager concurrency, and no-global-flush verification
+- [ ] Issue #8 parent enforcement acceptance, only after #23 and #24 final acceptance are implemented, VM-validated, reviewed, and committed
+
+M3 execution order is #22 → #24 Milestone A (completed) → #23 scoped apply →
+#24 Milestone B and remaining acceptance → #8 parent acceptance. The ten
+fixture scenarios are the satisfied prerequisite for beginning #23, not full
+issue #24 completion or approval to deploy on production hosts. Keep #24 open
+until production-code recovery validation passes. Keep Apply explicitly
+experimental and opt-in; no global host-firewall mutation is authorized.
 
 ## Later
 - [ ] Daemon watching Docker events; reconciliation after container changes

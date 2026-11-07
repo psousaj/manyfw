@@ -193,6 +193,20 @@ task sections above. No issue state was changed by this final audit.
 | #8, #22–#24 | OPEN | v0.4.0 enforcement/rollback and privileged VM recovery gates intentionally remain open; #24 evidence is NotApplicable in hosted CI |
 | #26 | OPEN | Release/matrix evidence is positive, but PR-matrix gating change awaits hosted workflow verification |
 
+### 2026-11-07 M3 milestone split and execution order
+
+The local execution sequence is #22 → #24 Milestone A → #23 → #24 Milestone B
+and remaining acceptance → #8. Milestone A is the completed ten-scenario,
+candidate-bound disposable QEMU/KVM experiment committed as `a62a880`; it
+satisfies the prerequisite for beginning #23 but does not complete or close
+issue #24. #23 implements the real scoped experimental CLI/supervisor path.
+Milestone B then exercises those production components under the remaining
+recovery and failure conditions. Issue #24 remains OPEN until that work and its
+remaining Docker/Tailscale/UFW/firewalld, ownership, checkpoint, concurrency,
+and no-global-flush criteria pass. Keep production Apply experimental,
+explicitly opt-in, and separate from any general production deployment claim.
+Both issues remain open; fixture evidence does not imply production approval.
+
 No planner or enforcement issue was closed based solely on fixture tests or
 artifact smoke. Repository remains on local reconciliation branch
 `chore/phase-2-issue-reconciliation`; no changes were pushed or made to GitHub.
