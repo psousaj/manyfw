@@ -37,7 +37,7 @@ critical scenario blocks release approval.
 | Reboot before apply, during apply, verify, confirmation | NotApplicable | Requires disposable VM |
 | IPv4/IPv6 backend matrix | NotApplicable | Requires disposable VM |
 | No-global-flush invariant | NotApplicable | Requires disposable VM and backend adapters |
-| QEMU guest recovery matrix | NotApplicable | QEMU kernel/initrd artifacts are not configured locally |
+| Test-only QEMU firewall recovery: SSH interruption, failed/interrupted apply, reboot, recovery-process death, and partial rollback across nftables/iptables | Passed (10 scenarios) | `scripts/integration/recovery-vm-test.sh`; run `mfw-recovery-20261107T152556Z-370956`, candidate `worktree:0d34a682ac5efaa55da2c07e22fd6a2cede0569dfae5dba5add9ed7bb5547afe`; archived reports and guest artifacts: [`docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956`](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956) |
 | Planner INPUT explicit-allow/default-deny verdict and nftables no-mutation check | Passed | `scripts/integration/planner-vm-test.sh`; evidence: `/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/test.log`; test binary SHA-256 is recorded in adjacent `metadata.txt` |
 
 The fixture tests use injected test-only backend observations and stores. They
@@ -47,6 +47,57 @@ configures nftables only inside a separate KVM guest, and checks that planning
 leaves that namespace's ruleset unchanged.
 
 ## Disposable VM execution
+
+`scripts/integration/recovery-vm-test.sh` provisions a fresh QEMU/KVM Ubuntu
+guest using the existing cloud-image harness. It installs nftables and
+iptables only inside that disposable guest. The test-only fixture creates its
+own uniquely named nftables table or iptables/ip6tables chains, then inserts
+an SSH drop rule to cause an externally observed SSH interruption. A guest
+systemd timer, independent of the fixture's apply process and any ManyFW
+process, restores only that owned test scope when its deadline expires or the
+guest boot ID changes. Scenarios include interrupted and failed apply for both
+backends, QEMU reset during an active interrupted apply, a killed recovery
+process, and a partial IPv4/IPv6 rollback followed by retry.
+
+The fixture is not a ManyFW backend, does not model production checkpoint or
+ownership logic, and does not authorize production firewall mutation. It uses
+systemd because this test guest provides it; this does not establish that a
+production supervisor can rely on systemd. It validates test-fixture behavior
+only. Docker's legacy/native modes, Tailscale, UFW/firewalld coexistence,
+concurrent external-manager changes, and real ManyFW CLI/supervisor failure
+remain unvalidated and block enforcement approval. No success claim should be
+inferred for those environments.
+
+The ten-scenario validator is deliberately a **fixture-gate validator**, not
+the full issue #24 or enforcement-release gate. It does not cover a ManyFW
+apply CLI or production supervisor, confirmation/token/checkpoint behavior,
+manager coexistence, or the listed Docker/Tailscale/UFW/firewalld cases. Those
+remain NotApplicable in the matrix above and block any production enforcement
+approval. Before #23 can implement production mutation, reviewers must approve
+the OS-supervisor deployment contract and ownership/capability boundaries;
+this VM fixture does not choose or authorize them.
+
+Run the matrix with a locally provisioned Ubuntu cloud image and KVM access:
+
+```sh
+MANYFW_VM_ROOT="$HOME/.cache/manyfw-issue24" \
+  scripts/integration/recovery-vm-test.sh
+```
+
+The harness never mutates the development host firewall. It verifies the
+loopback-only SSH endpoint and guest identity, observes SSH protocol loss and
+recovery independently, records effective firewall state before/during/after,
+checks reboot identity and durable fixture recovery records, validates the
+scenario report against the candidate/worktree digest, and refuses to claim
+teardown if it cannot verify ownership of the QEMU process. Evidence is
+retained under the VM root for review. Network access is needed in the guest to
+install its test-only firewall packages. When the pinned Ubuntu cloud image is
+not already cached, the shared harness downloads it and checks its pinned
+SHA-256; if `cloud-localds` is missing, it downloads the Ubuntu
+`cloud-image-utils` and `genisoimage` packages into the configured VM cache.
+Pre-provision those artifacts for offline runs. QEMU/KVM, image integrity, and
+package sources are explicit environmental dependencies; no unpinned image is
+used.
 
 `scripts/run-qemu-recovery.sh` is only an evidence-contract validator. It
 requires `qemu-system-x86_64`, `MANYFW_QEMU_KERNEL`, `MANYFW_QEMU_INITRD`, and

@@ -94,7 +94,8 @@ ssh_options() {
     SSH_OPTIONS=(
         -F /dev/null -p "$(cat "$CURRENT_DIR/ssh-port")"
         -i "$CURRENT_DIR/ssh/id_ed25519"
-        -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new
+        -o BatchMode=yes -o "ConnectTimeout=${MANYFW_VM_SSH_CONNECT_TIMEOUT:-5}" \
+        -o StrictHostKeyChecking=accept-new
         -o "UserKnownHostsFile=$CURRENT_DIR/ssh/known_hosts"
         -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes
         -o ForwardAgent=no -o ControlMaster=no
@@ -202,9 +203,14 @@ EOF
         -drive "file=$CURRENT_DIR/seed.iso,if=virtio,format=raw,readonly=on"
         -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$port-:22"
         -device virtio-net-pci,netdev=net0 -device virtio-rng-pci
-        -display none -serial "file:$CURRENT_DIR/serial.log" -monitor none -no-reboot
+        -display none -serial "file:$CURRENT_DIR/serial.log"
         -daemonize -pidfile "$CURRENT_DIR/qemu.pid"
     )
+    if [[ "${MANYFW_VM_QMP:-0}" == 1 ]]; then
+        qemu_args+=( -qmp "unix:$CURRENT_DIR/qmp.sock,server=on,wait=off" )
+    else
+        qemu_args+=( -monitor none -no-reboot )
+    fi
     printf '%s\n' "${qemu_args[*]}" >"$CURRENT_DIR/qemu.cmdline"
     run_with_kvm_access "${qemu_args[@]}"
     local pid
