@@ -85,6 +85,7 @@ impl TransactionPlan {
                         .clone()
                         .ok_or(TransactionError::OwnershipChanged)?,
                     description: format!("ensure planned ManyFW-owned rule {rule_id}"),
+                    planned_operation: Some(operation.clone()),
                 }),
                 PlanOperation::SetManagedDefault {
                     action,
@@ -95,6 +96,7 @@ impl TransactionPlan {
                         .clone()
                         .ok_or(TransactionError::OwnershipChanged)?,
                     description: format!("set ManyFW-managed default action to {action:?}"),
+                    planned_operation: Some(operation.clone()),
                 }),
                 PlanOperation::Diagnostic { detail, .. } => {
                     Err(TransactionError::Backend(detail.clone()))
@@ -114,12 +116,44 @@ impl TransactionPlan {
             deadline_seconds,
         })
     }
+
+    /// Validate that a new execution plan carries canonical typed planner
+    /// operations and that each operation remains bound to the same
+    /// ManyFW-owned resource. Legacy records remain readable for recovery, but
+    /// cannot be started as new mutations.
+    pub fn validate_for_execution(&self) -> Result<()> {
+        if self.operations.is_empty() {
+            return Err(TransactionError::InvalidState);
+        }
+        for operation in &self.operations {
+            let resource = match operation.planned_operation.as_ref() {
+                Some(PlanOperation::EnsureRule {
+                    managed_resource: Some(resource),
+                    ..
+                })
+                | Some(PlanOperation::SetManagedDefault {
+                    managed_resource: Some(resource),
+                    ..
+                }) => resource,
+                _ => return Err(TransactionError::OwnershipChanged),
+            };
+            if resource != &operation.resource {
+                return Err(TransactionError::OwnershipChanged);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operation {
     pub resource: String,
     pub description: String,
+    /// Exact canonical planner operation. Older durable transaction records
+    /// did not persist typed operations; they remain readable for recovery,
+    /// but a production apply backend must reject them for new mutation.
+    #[serde(default)]
+    pub planned_operation: Option<PlanOperation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,8 +253,24 @@ pub struct TransactionRecord {
     pub diagnostics: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConfirmationToken(String);
+
+impl std::fmt::Debug for ConfirmationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConfirmationToken([REDACTED])")
+    }
+}
+
+impl ConfirmationToken {
+    pub fn from_secret(token: String) -> Self {
+        Self(token)
+    }
+
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
 
 impl ConfirmationToken {
     pub fn expose(&self) -> &str {
@@ -661,6 +711,10 @@ impl TokenSource for OsTokenSource {
 pub trait TransactionBackend: Send + Sync {
     fn preflight(&self, plan: &TransactionPlan) -> Result<()>;
     fn checkpoint(&self, plan: &TransactionPlan) -> Result<Checkpoint>;
+    /// Arm independent recovery only after the durable checkpoint exists.
+    fn arm_recovery(&self, _plan: &TransactionPlan, _checkpoint: &Checkpoint) -> Result<()> {
+        Ok(())
+    }
     fn current_fingerprint(&self, domain: &str) -> Result<String>;
     fn apply(&self, plan: &TransactionPlan) -> Result<ApplyReport>;
     fn verify(&self, plan: &TransactionPlan) -> Result<()>;
@@ -791,6 +845,7 @@ where
         {
             return Err(TransactionError::InvalidState);
         }
+        plan.validate_for_execution()?;
         let domain = plan.ownership_domain.clone();
         let transaction_id = plan.transaction_id.clone();
         let newly_acquired = self.locks.acquire(&domain, &plan.transaction_id)?;
@@ -891,6 +946,18 @@ where
             return self.fail_before_mutation(record, TransactionError::OwnershipChanged);
         }
         self.store.save(&record)?;
+        if let Err(error) = self.backend.arm_recovery(
+            &record.plan,
+            record
+                .checkpoint
+                .as_ref()
+                .ok_or(TransactionError::CorruptCheckpoint)?,
+        ) {
+            record.state = TransactionState::Failure;
+            record.diagnostics.push(sanitize(&error.to_string()));
+            self.store.save(&record)?;
+            return Err(error);
+        }
         let current = match self
             .backend
             .current_fingerprint(&record.plan.ownership_domain)
@@ -1441,6 +1508,14 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[test]
+    fn confirmation_token_debug_output_is_redacted() {
+        let token = ConfirmationToken::from_secret("sensitive-test-token".into());
+        let debug = format!("{token:?}");
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("sensitive-test-token"));
+    }
+
     #[derive(Clone)]
     struct TestClock(ClockReading);
     impl TestClock {
@@ -1525,6 +1600,12 @@ mod tests {
             operations: vec![Operation {
                 resource: "owned".into(),
                 description: "change".into(),
+                planned_operation: Some(PlanOperation::SetManagedDefault {
+                    action: crate::Action::Deny,
+                    path: crate::backend::PacketPath::Input,
+                    family: crate::backend::AddressFamily::Ipv4,
+                    managed_resource: Some("owned".into()),
+                }),
             }],
             preconditions: vec!["capability".into()],
             ownership_fingerprint: "before".into(),
@@ -1610,6 +1691,19 @@ mod tests {
         .unwrap();
         assert_eq!(converted.operations[0].resource, "manyfw-input-v4");
         assert!(converted.operations[0].description.contains("allow-web"));
+        assert_eq!(
+            converted.operations[0].planned_operation.as_ref(),
+            Some(&operation)
+        );
+        let persisted = serde_json::to_vec(&converted).unwrap();
+        let restored: TransactionPlan = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(
+            restored.operations[0].planned_operation.as_ref(),
+            Some(&operation)
+        );
+        let legacy_operation: Operation =
+            serde_json::from_str(r#"{"resource":"owned","description":"legacy"}"#).unwrap();
+        assert!(legacy_operation.planned_operation.is_none());
 
         let foreign = DiagnosticPlan {
             ownership: vec![crate::backend::OwnershipBoundary {
@@ -1629,6 +1723,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn runner_rejects_legacy_or_mismatched_typed_operations_before_side_effects() {
+        let store = Arc::new(MemoryStore::default());
+        let backend = Backend::new();
+        let runner =
+            TransactionRunner::new(backend.clone(), store.clone(), TestClock::at(1), TestTokens);
+
+        let mut legacy = plan("legacy-operation");
+        legacy.operations[0].planned_operation = None;
+        assert_eq!(
+            runner.start(legacy),
+            Err(TransactionError::OwnershipChanged)
+        );
+        assert!(store.load("legacy-operation").unwrap().is_none());
+
+        let mut mismatched = plan("mismatched-operation");
+        mismatched.operations[0].resource = "foreign-resource".into();
+        assert_eq!(
+            runner.start(mismatched),
+            Err(TransactionError::OwnershipChanged)
+        );
+        assert!(store.load("mismatched-operation").unwrap().is_none());
+        assert_eq!(*backend.current.lock().unwrap(), "before");
     }
 
     #[test]

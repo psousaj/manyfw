@@ -1,6 +1,23 @@
 use std::process::Command;
 
 #[test]
+fn apply_requires_explicit_experimental_opt_in_before_reading_plan() {
+    let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
+        .args(["apply", "--file", "/not-read-before-opt-in.json"])
+        .output()
+        .expect("run manyfw apply");
+    assert!(!output.status.success());
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["status"], "error");
+    assert!(
+        diagnostic["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("--experimental")
+    );
+}
+
+#[test]
 fn check_reports_valid_policy_and_exits_zero() {
     let output = Command::new(env!("CARGO_BIN_EXE_manyfw"))
         .args(["check", "--file", "../../examples/manyfw.toml"])

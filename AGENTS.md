@@ -39,6 +39,33 @@ These are **documented release milestones**, not currently GitHub native milesto
 8. Open a PR referencing `Closes #N` with evidence, test logs, limitations, safety assessment and rollback implications.
 9. Do not merge a privileged backend PR without reviewed integration evidence.
 
+## Architecture/security approval governance
+
+The project owner is the approval authority for project architecture and
+experimental operational scope. For implementations developed and verified
+exclusively inside disposable, isolated QEMU/KVM guests, the project owner has
+authorized the Goal agent to perform the required architecture/security review
+as a dedicated phase separate from implementation. This is an explicit
+project-specific governance policy, not a claim of independent review.
+
+The Goal agent must document evidence, findings, remediation, and a clean
+post-remediation review before recording an experimental ADR as Accepted. The
+review must cover ownership/trust boundaries, privileges, failure/recovery,
+concurrency, interoperability, unsupported cases, and real isolated test
+evidence appropriate to the change. Material architecture changes require a
+new review before the changed behavior is enabled.
+
+This policy applies only to the explicitly approved experimental implementation
+and its verified disposable test environments. It does not authorize mutation
+of the development/WSL host, production deployment, unrestricted operations,
+or omission of security tests. Production deployment or privileged operation
+outside the explicitly authorized isolated scope requires separate project
+owner operational authorization and independent architecture/security
+approval. Test-only recovery does not satisfy production-code recovery gates.
+Approval is invalidated by material changes to the reviewed operation subset,
+resource ownership, privilege model, supervisor contract, or execution
+environment; reassess before use.
+
 ## Definition of done
 
 - API and CLI behavior documented and stable; version any breaking configuration changes.

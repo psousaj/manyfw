@@ -162,6 +162,12 @@ fn plan(id: &str) -> TransactionPlan {
         operations: vec![Operation {
             resource: "owned".into(),
             description: "fixture operation".into(),
+            planned_operation: Some(manyfw_core::backend::PlanOperation::SetManagedDefault {
+                action: manyfw_core::Action::Deny,
+                path: manyfw_core::backend::PacketPath::Input,
+                family: manyfw_core::backend::AddressFamily::Ipv4,
+                managed_resource: Some("owned".into()),
+            }),
         }],
         preconditions: vec!["fixture".into()],
         ownership_fingerprint: "before".into(),

@@ -3,6 +3,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 mod docker_engine;
+mod nft_apply;
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +30,9 @@ enum Command {
     Plan {
         #[arg(short, long, default_value = "examples/manyfw.toml")]
         file: PathBuf,
+        /// Emit a versioned plan bundle from a normalized PlannerInput JSON artifact.
+        #[arg(long)]
+        diagnostic_input: Option<PathBuf>,
     },
     /// Evaluate a normalized policy against a read-only observation snapshot.
     Audit {
@@ -66,6 +70,24 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
+    /// Apply a previously reviewed planner bundle. Requires explicit experimental opt-in.
+    Apply {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Explicitly opt in to the isolated experimental Apply path.
+        #[arg(long)]
+        experimental: bool,
+        /// Confirmation deadline in seconds (bounded to 300).
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+    /// Confirm a transaction using its one-time token.
+    Confirm { transaction_id: String },
+    /// Run the independent recovery worker (normally via the supplied systemd unit).
+    Recover {
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -85,17 +107,52 @@ enum ColorChoice {
 fn main() {
     let cli = Cli::parse();
     let color = color_enabled_for(cli.color, std::io::stderr().is_terminal());
+    let structured_error = matches!(
+        &cli.command,
+        Command::Apply { .. } | Command::Confirm { .. } | Command::Recover { .. }
+    );
     if let Err(e) = run(cli) {
-        eprintln!(
-            "{}",
-            paint(&escape_terminal_text(&format!("error: {e}")), "1;31", color)
-        );
+        if structured_error {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "status": "error",
+                    "stage": "apply_or_recovery",
+                    "diagnostic": escape_terminal_text(&e.to_string())
+                })
+            );
+        } else {
+            eprintln!(
+                "{}",
+                paint(&escape_terminal_text(&format!("error: {e}")), "1;31", color)
+            );
+        }
         std::process::exit(1);
     }
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let use_color = color_enabled_for(cli.color, std::io::stdout().is_terminal());
+    match &cli.command {
+        Command::Apply {
+            file,
+            experimental,
+            timeout,
+        } => {
+            return run_apply(file, *experimental, *timeout);
+        }
+        Command::Confirm { transaction_id } => {
+            return run_confirm(transaction_id);
+        }
+        Command::Recover { watch } => return run_recovery_worker(*watch),
+        Command::Plan {
+            diagnostic_input: Some(input),
+            ..
+        } => {
+            return run_diagnostic_plan(input);
+        }
+        _ => {}
+    }
     if let Command::Discover {
         output,
         format,
@@ -107,9 +164,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let file = match &cli.command {
         Command::Check { file }
-        | Command::Plan { file }
+        | Command::Plan { file, .. }
         | Command::Audit { file, .. }
-        | Command::Explain { file, .. } => file,
+        | Command::Explain { file, .. }
+        | Command::Apply { file, .. } => file,
+        Command::Confirm { .. } | Command::Recover { .. } => unreachable!(),
         Command::Discover { .. } => unreachable!("discovery is handled before policy loading"),
     };
     let input = std::fs::read_to_string(file)?;
@@ -225,6 +284,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Discover { .. } => unreachable!("discovery is handled before policy loading"),
+        Command::Apply { .. } | Command::Confirm { .. } | Command::Recover { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -261,6 +321,218 @@ fn run_discover(
         let _ = verbose;
         Err("live discovery is supported on Linux only".into())
     }
+}
+
+fn run_diagnostic_plan(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let input: manyfw_core::backend::PlannerInput = serde_json::from_slice(&std::fs::read(path)?)?;
+    let plan = manyfw_core::backend::Planner::plan(&input);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({"input":input,"plan":plan}))?
+    );
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyBundle {
+    input: manyfw_core::backend::PlannerInput,
+    plan: manyfw_core::backend::DiagnosticPlan,
+}
+
+fn run_apply(
+    path: &std::path::Path,
+    experimental: bool,
+    timeout: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use manyfw_core::transaction::{
+        FileStore, LinuxClock, OsTokenSource, TokenSource, TransactionPlan, TransactionRunner,
+    };
+    if !experimental {
+        return Err("Apply is disabled unless --experimental is explicitly supplied".into());
+    }
+    if !(1..=300).contains(&timeout) {
+        return Err("--timeout must be between 1 and 300 seconds".into());
+    }
+    nft_apply::NftBackend::require_isolated_guest()?;
+    let bundle: ApplyBundle = serde_json::from_slice(&std::fs::read(path)?)?;
+    let current_plan = manyfw_core::backend::Planner::plan(&bundle.input);
+    if current_plan != bundle.plan || !bundle.plan.matches_input(&bundle.input) {
+        return Err("planner bundle is stale or does not match its normalized input".into());
+    }
+    let backend = nft_apply::NftBackend;
+    nft_apply::NftBackend::prepare_recovery_storage()?;
+    let token_source = OsTokenSource;
+    let transaction_id = token_source.token()?;
+    let transaction_id = format!("mfw-{}", &transaction_id[..24]);
+    let fingerprint = backend.transaction_fingerprint()?;
+    let plan = TransactionPlan::from_diagnostic_plan(
+        &bundle.plan,
+        transaction_id.clone(),
+        "nft:inet:input".into(),
+        fingerprint,
+        timeout,
+    )?;
+    let store = FileStore::new("/var/lib/manyfw/transactions");
+    let runner = TransactionRunner::new(backend, store, LinuxClock, token_source);
+    let confirmation = runner.start(plan)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": "awaiting_confirmation",
+            "transaction_id": transaction_id,
+            "confirmation_token": confirmation.expose_secret(),
+            "deadline_seconds": timeout,
+            "experimental": true,
+            "environment": "disposable-kvm-guest"
+        })
+    );
+    Ok(())
+}
+
+fn run_confirm(transaction_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use manyfw_core::transaction::{
+        ConfirmationToken, FileStore, LinuxClock, OsTokenSource, TransactionRunner,
+    };
+    let mut token = String::new();
+    std::io::stdin().read_line(&mut token)?;
+    let token = token.trim_end_matches(['\r', '\n']);
+    if token.is_empty() {
+        return Err("confirmation token must be provided on stdin".into());
+    }
+    nft_apply::NftBackend::require_isolated_guest()?;
+    let store = FileStore::new("/var/lib/manyfw/transactions");
+    let runner = TransactionRunner::new(nft_apply::NftBackend, store, LinuxClock, OsTokenSource);
+    runner.confirm(
+        transaction_id,
+        &ConfirmationToken::from_secret(token.to_owned()),
+    )?;
+    println!(
+        "{}",
+        serde_json::json!({"status":"confirmed", "transaction_id":transaction_id})
+    );
+    Ok(())
+}
+
+fn run_recovery_worker(watch: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use manyfw_core::transaction::{
+        FileStore, LinuxClock, OsTokenSource, TransactionRunner, TransactionState, TransactionStore,
+    };
+    if !watch {
+        return Err("the independent recovery service must run with --watch".into());
+    }
+    nft_apply::NftBackend::require_guest()?;
+    let root = std::path::Path::new("/var/lib/manyfw");
+    nft_apply::NftBackend::prepare_recovery_storage()?;
+    let arm_dir = root.join("arm");
+    let store = FileStore::new(root.join("transactions"));
+    let runner = TransactionRunner::new(
+        nft_apply::NftBackend,
+        store.clone(),
+        LinuxClock,
+        OsTokenSource,
+    );
+    loop {
+        let records = store.list()?;
+        for entry in std::fs::read_dir(&arm_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let request: serde_json::Value = match serde_json::from_slice(&std::fs::read(&path)?) {
+                Ok(request) => request,
+                Err(_) => continue,
+            };
+            let Some(id) = request["transaction_id"].as_str() else {
+                continue;
+            };
+            let Some(record) = records
+                .iter()
+                .find(|record| record.plan.transaction_id == id)
+            else {
+                continue;
+            };
+            if request["ownership_domain"] != record.plan.ownership_domain {
+                continue;
+            }
+            let Some(checkpoint) = record.checkpoint.as_ref() else {
+                continue;
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let Some(deadline_wall) = request["deadline_wall"].as_u64() else {
+                continue;
+            };
+            let deadline_seconds = record.plan.deadline_seconds.clamp(1, 300);
+            let expected_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+            if !checkpoint.is_intact()
+                || request["checkpoint_digest"] != checkpoint.integrity
+                || request["deadline_seconds"] != deadline_seconds
+                || request["boot_id"] != expected_boot.trim()
+                || deadline_wall < now
+                || deadline_wall > now.saturating_add(deadline_seconds).saturating_add(5)
+            {
+                continue;
+            }
+            let ack_path = arm_dir.join(format!("{id}.armed"));
+            if !ack_path.exists() {
+                let ack = serde_json::json!({
+                    "transaction_id": id,
+                    "ownership_domain": record.plan.ownership_domain,
+                    "checkpoint_digest": checkpoint.integrity,
+                    "boot_id": request["boot_id"],
+                    "deadline_wall": deadline_wall,
+                    "armed": true,
+                    "worker_pid": std::process::id()
+                });
+                write_worker_file(&ack_path, serde_json::to_vec(&ack)?)?;
+            }
+            if record.state.is_terminal() {
+                if record.state != TransactionState::RollbackFailure {
+                    let _ = std::fs::remove_file(&ack_path);
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            let current_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+            let rebooted = request["boot_id"].as_str() != Some(current_boot.trim());
+            let expired = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs()
+                >= request["deadline_wall"].as_u64().unwrap_or(0);
+            if rebooted || expired {
+                let result = if record.state.may_have_mutated() {
+                    runner.rollback(id)
+                } else {
+                    runner.abort(id)
+                };
+                if result.is_ok() {
+                    let _ = std::fs::remove_file(&ack_path);
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+fn write_worker_file(path: &std::path::Path, bytes: Vec<u8>) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temp, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn write_discovery_output(

@@ -737,9 +737,13 @@ version = "0.3.0"
 dependencies = [
  "bollard",
  "clap",
+ "ipnet",
+ "libc",
  "manyfw-core",
  "manyfw-linux",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

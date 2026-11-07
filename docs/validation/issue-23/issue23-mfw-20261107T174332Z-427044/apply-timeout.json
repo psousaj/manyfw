@@ -1,0 +1,7 @@
+{
+  "deadline_seconds": 5,
+  "environment": "disposable-kvm-guest",
+  "experimental": true,
+  "status": "awaiting_confirmation",
+  "transaction_id": "mfw-4375c523d3df293ca0ce9e47"
+}

@@ -1,9 +1,11 @@
 # Security model
 
-**No privileged enforcement exists in v0.3.0.** The CLI validates local policy
-and analyzes supplied observation snapshots. `discover` performs read-only
-Docker Engine and host-network collection; firewall observation is a separate
-read-only Linux library API. Neither path modifies firewall state.
+**The released v0.3.0 has no privileged enforcement.** This checkout adds only
+the opt-in experimental adapter documented in ADR-0005, restricted to
+disposable isolated QEMU/KVM guests; production deployment remains unauthorized.
+The ordinary CLI validates local policy and analyzes supplied observation
+snapshots. `discover` performs read-only Docker Engine and host-network
+collection; it does not inspect or modify firewall state.
 
 Backend observation is separate from `discover`. Linux firewall listings use
 fixed read-only argument vectors (`nft -j list ruleset`, `iptables-save -c`,
@@ -20,6 +22,29 @@ Chain names and comments alone do not establish ownership or Docker mode.
 - An audit finding describes observable policy and potential exposure, not a guaranteed internet reachability test.
 
 ## Apply/rollback design gate
+
+Experimental architecture/security approval for implementations developed and
+verified exclusively in disposable isolated QEMU/KVM guests may be performed
+by the Goal agent through a dedicated review phase, as explicitly authorized
+by the project owner and documented in `AGENTS.md`. The phase must be separate
+from implementation, evidence-based, record findings/remediation, and repeat
+after material corrections. It is technical self-review, not independent
+review. The project owner is the project's architecture/experimental-scope
+approval authority; the owner authorization and the review evidence must both
+be recorded in the applicable ADR.
+
+This approval path does not permit mutation on the WSL/development host,
+production deployment, unrestricted operations, or bypassing mandatory
+security/integration tests. Production deployment or operation outside the
+explicitly authorized isolated scope requires separate project-owner
+operational authorization and independent architecture/security review.
+Material changes to the reviewed operation subset, resource ownership,
+privileges, recovery supervisor, or environment invalidate the experimental
+approval and require reassessment. Test-only recovery is not production-code
+recovery validation.
+
+Until ADR-0005 records a clean dedicated review and owner authorization, no
+production mutation adapter is approved or enabled.
 
 Privileged implementation must only ship after network namespace/VM integration tests demonstrate:
 

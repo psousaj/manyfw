@@ -50,7 +50,7 @@ reachability or complete behavior for every firewall manager and packet path.
 - [ ] Require confirmation for real remote firewall changes
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
 - [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
-- [ ] Issue #23 real scoped experimental apply, unblocked by #22 and completion of #24 Milestone A; implementation remains subject to architecture/security review and explicit opt-in
+- [x] Issue #23 scoped experimental nftables Apply, with dedicated architecture/security review and real disposable-KVM confirmation/timeout evidence ([validation](validation/issue-23/issue23-mfw-20261107T174332Z-427044/)); remains non-production and opt-in
 - [ ] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration
 - [ ] Complete the remaining #24 VM/release matrix: corrupt checkpoint, ownership divergence, Docker modes, Tailscale, UFW/firewalld, manager concurrency, and no-global-flush verification
 - [ ] Issue #8 parent enforcement acceptance, only after #23 and #24 final acceptance are implemented, VM-validated, reviewed, and committed

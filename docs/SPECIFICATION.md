@@ -286,6 +286,29 @@ Implemented commands:
   always JSON. Docker socket, permission, and partial-source
   failures remain represented in the report or snapshot; discovery never reads
   or writes firewall rules.
+- `manyfw plan --diagnostic-input <planner-input.json>` emits a versioned JSON
+  planner bundle for integration/diagnostic use. It does not inspect live
+  firewall state and does not apply the plan.
+- `manyfw apply --file <planner-bundle.json> --experimental [--timeout N]` is an
+  isolated experimental operation, not a supported production firewall
+  manager. It requires root in a marked KVM guest, an active explicitly
+  installed `manyfw-recovery.service`, a matching applicable planner bundle,
+  and an otherwise empty nftables input hook. Only the narrowly reviewed
+  ManyFW-owned `inet` input table is changed. Default actions are translated
+  with explicit family-scoped nftables fallback rules, never as an unscoped
+  `inet` chain policy. Unsupported or stale plans fail before mutation. Apply
+  returns a one-time confirmation token and automatically rolls back
+  unconfirmed changes at the bounded deadline.
+- `manyfw confirm <transaction-id>` confirms a verified pending apply by
+  reading the one-time token from stdin, so it is not exposed in process
+  arguments or command history.
+  `manyfw recover --watch` is reserved for the separately supervised recovery
+  service; operators must install/enable the packaged unit explicitly.
+
+Apply is not enabled by default and is not authorized on development/WSL or
+production hosts. The test harness must verify disposable VM identity from
+outside the guest and may mutate firewall state only inside that guest. A
+successful input-chain rule is not a global reachability guarantee.
 
 All human-readable CLI commands accept `--color auto|always|never`. `auto`
 colors only terminal output, respects `NO_COLOR`, and leaves JSON untouched.
@@ -301,6 +324,9 @@ manyfw discover --format json           # JSON to stdout
 manyfw discover --output snapshot.json  # JSON file
 manyfw discover --format human --color always
 ```
+
+Experimental Apply is documented separately from ordinary read-only CLI use;
+do not run its integration command against a development or production host.
 
 ## Testing contract
 
