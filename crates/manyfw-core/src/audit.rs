@@ -317,6 +317,7 @@ pub fn evaluate(
                 policy,
                 &identity,
                 endpoint.protocol,
+                endpoint.family,
                 endpoint.container_port,
             );
             let subject = resource.clone();
@@ -555,6 +556,7 @@ pub(crate) fn matching_rules(
     policy: &NormalizedPolicy,
     identity: &str,
     protocol: crate::docker::TransportProtocol,
+    family: crate::docker::IpFamily,
     port: u16,
 ) -> (Vec<String>, String) {
     let wanted = match protocol {
@@ -575,7 +577,13 @@ pub(crate) fn matching_rules(
             &rule.source,
             Selector::Host(_) | Selector::Cidr(_) | Selector::Zone(_)
         );
+        let source_family_matches = match (&rule.source, family) {
+            (Selector::Cidr(network), crate::docker::IpFamily::Ipv4) => network.addr().is_ipv4(),
+            (Selector::Cidr(network), crate::docker::IpFamily::Ipv6) => network.addr().is_ipv6(),
+            _ => true,
+        };
         if source_is_observable_for_publication
+            && source_family_matches
             && destination_matches
             && rule.protocol == wanted
             && port_matches
@@ -1028,6 +1036,207 @@ mod tests {
             default_action: Action::Deny,
             zones: Default::default(),
             rules: Vec::new(),
+        }
+    }
+
+    fn audit_golden(
+        name: &str,
+        policy: &NormalizedPolicy,
+        snapshot: &snapshot::ObservationSnapshot,
+    ) {
+        let actual = evaluate(policy, snapshot)
+            .expect("golden scenario should produce a valid report")
+            .json()
+            .unwrap();
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/audit")
+            .join(format!("{name}.json"));
+        if std::env::var_os("UPDATE_AUDIT_GOLDENS").is_some() {
+            std::fs::write(&golden_path, &actual).expect("write audit golden");
+            return;
+        }
+        let expected = match name {
+            "public-bind" => include_str!("../tests/golden/audit/public-bind.json"),
+            "loopback" => include_str!("../tests/golden/audit/loopback.json"),
+            "tailscale-only" => include_str!("../tests/golden/audit/tailscale-only.json"),
+            "dual-stack" => include_str!("../tests/golden/audit/dual-stack.json"),
+            _ => panic!("unknown audit golden scenario {name}"),
+        };
+        assert_eq!(actual, expected, "audit golden changed: {name}");
+    }
+
+    fn golden_scenario(name: &str) -> (NormalizedPolicy, snapshot::ObservationSnapshot) {
+        use crate::docker::{
+            ContainerAddress, ContainerInstance, ContainerObservation, FieldProvenance,
+            HostBinding, IdentitySource, LifecycleState, LogicalIdentity, NetworkMode,
+            ObservedPublishedEndpoint, OperationalStatus, PublicationMechanism,
+            TransportProtocol as DockerProtocol,
+        };
+        use crate::host::{
+            AddressScope, InterfaceAddress, InterfaceState, IpFamily, NetworkInterface,
+            NetworkRoute, RouteType, SocketListener, SocketOwner,
+            TransportProtocol as HostProtocol,
+        };
+
+        let bindings: Vec<(&str, IpFamily, u16, &str)> = match name {
+            "public-bind" => vec![("8.8.8.8", IpFamily::Ipv4, 8443, "eth0")],
+            "loopback" => vec![("127.0.0.1", IpFamily::Ipv4, 8080, "lo")],
+            "tailscale-only" => vec![("100.64.10.20", IpFamily::Ipv4, 8443, "tailscale0")],
+            "dual-stack" => vec![
+                ("8.8.8.8", IpFamily::Ipv4, 8443, "eth0"),
+                ("2001:db8::10", IpFamily::Ipv6, 8443, "eth0"),
+            ],
+            _ => panic!("unknown audit golden scenario {name}"),
+        };
+        let mut docker_observation = docker(docker::CollectionOutcome::Complete);
+        let endpoints = bindings
+            .iter()
+            .map(
+                |(address, family, host_port, _)| ObservedPublishedEndpoint {
+                    instance_id: "golden-container-1".into(),
+                    host: HostBinding {
+                        address: Some(address.parse().unwrap()),
+                        port: *host_port,
+                    },
+                    container_port: 8080,
+                    container_addresses: vec![ContainerAddress {
+                        network: "bridge".into(),
+                        address: "172.18.0.2".parse().unwrap(),
+                        provenance: FieldProvenance::DockerInspection,
+                    }],
+                    protocol: DockerProtocol::Tcp,
+                    family: match family {
+                        IpFamily::Ipv4 => docker::IpFamily::Ipv4,
+                        IpFamily::Ipv6 => docker::IpFamily::Ipv6,
+                    },
+                    network_mode: NetworkMode::Bridge,
+                    mechanism: PublicationMechanism::Nat,
+                    provenance: FieldProvenance::PortBinding,
+                },
+            )
+            .collect::<Vec<_>>();
+        docker_observation.containers.push(ContainerObservation {
+            logical_identity: Some(LogicalIdentity {
+                value: "docker:demo/web".into(),
+                source: IdentitySource::ComposeLabels,
+            }),
+            instance: ContainerInstance {
+                id: "golden-container-1".into(),
+                replica_key: "demo/web".into(),
+            },
+            lifecycle: LifecycleState::Running,
+            operational_status: OperationalStatus::Running,
+            network_mode: NetworkMode::Bridge,
+            configured_publications: Vec::new(),
+            observed_endpoints: endpoints,
+        });
+
+        let mut host_observation = host(Vec::new());
+        let mut interfaces = Vec::new();
+        let mut addresses = Vec::new();
+        let mut listeners = Vec::new();
+        let mut routes = Vec::new();
+        for (address, family, host_port, interface) in &bindings {
+            let index = if *interface == "lo" {
+                1
+            } else if *interface == "tailscale0" {
+                7
+            } else {
+                2
+            };
+            if !interfaces
+                .iter()
+                .any(|item: &NetworkInterface| item.name == *interface)
+            {
+                interfaces.push(NetworkInterface {
+                    index,
+                    name: (*interface).into(),
+                    administrative_state: InterfaceState::Up,
+                    operational_state: InterfaceState::Up,
+                });
+            }
+            let ip: IpAddr = address.parse().unwrap();
+            addresses.push(InterfaceAddress {
+                interface_index: Some(index),
+                interface_name: Some((*interface).into()),
+                address: ip,
+                prefix_length: Some(if *family == IpFamily::Ipv4 { 24 } else { 64 }),
+                scope: if *interface == "lo" {
+                    AddressScope::Host
+                } else {
+                    AddressScope::Global
+                },
+            });
+            listeners.push(SocketListener {
+                protocol: HostProtocol::Tcp,
+                family: *family,
+                address: ip,
+                wildcard: false,
+                port: *host_port,
+                interface_index: Some(index),
+                interface_name: Some((*interface).into()),
+                owner: SocketOwner::Unknown,
+            });
+            if *interface != "lo" {
+                routes.push(NetworkRoute {
+                    family: *family,
+                    destination: if *family == IpFamily::Ipv4 {
+                        "0.0.0.0"
+                    } else {
+                        "::"
+                    }
+                    .parse()
+                    .unwrap(),
+                    prefix_length: 0,
+                    gateway: None,
+                    interface_index: Some(index),
+                    interface_name: Some((*interface).into()),
+                    table: Some(254),
+                    metric: Some(100 + index),
+                    route_type: RouteType::Unicast,
+                });
+            }
+        }
+        host_observation.interfaces = dimension(interfaces);
+        host_observation.addresses = dimension(addresses.clone());
+        host_observation.listeners = dimension(listeners);
+        host_observation.routes = dimension(routes);
+        if name == "tailscale-only" {
+            host_observation.tailscale = dimension(vec![crate::host::TailscaleObservation {
+                state: crate::host::TailscaleState::Present,
+                interface_index: Some(7),
+                interface_name: Some("tailscale0".into()),
+                addresses,
+            }]);
+        }
+
+        let source = if name == "tailscale-only" {
+            "zone:tailscale"
+        } else if name == "loopback" {
+            "cidr:127.0.0.1/32"
+        } else {
+            "cidr:8.8.8.8/32"
+        };
+        let mut policy_text = format!(
+            "version = 1\ndefault_action = \"deny\"\n\n[[rules]]\nid = \"allow-web\"\nsource = \"{source}\"\ndestination = \"docker:demo/web\"\nports = [8080]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 100\n"
+        );
+        if name == "tailscale-only" {
+            policy_text.push_str("\n[zones.tailscale]\ninterfaces = [\"tailscale0\"]\n");
+        } else if name == "dual-stack" {
+            policy_text.push_str(
+                "\n[[rules]]\nid = \"allow-web-v6\"\nsource = \"cidr:2001:db8::/64\"\ndestination = \"docker:demo/web\"\nports = [8080]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 100\n",
+            );
+        }
+        let policy = crate::parse_and_normalize(&policy_text).unwrap().policy;
+        let snapshot = snapshot::ObservationSnapshot::compose(docker_observation, host_observation);
+        (policy, snapshot)
+    }
+
+    #[test]
+    fn public_loopback_tailscale_and_dual_stack_reports_match_goldens() {
+        for name in ["public-bind", "loopback", "tailscale-only", "dual-stack"] {
+            let (policy, snapshot) = golden_scenario(name);
+            audit_golden(name, &policy, &snapshot);
         }
     }
 

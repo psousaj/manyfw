@@ -1,0 +1,449 @@
+{
+  "version": 1,
+  "snapshot_version": 1,
+  "findings": [
+    {
+      "id": "finding-55deecdec4a747bb",
+      "subject": "identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(8.8.8.8)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "category": "PublishedPort",
+      "assessment": "potential_exposure",
+      "severity": "low",
+      "severity_factors": {
+        "exposure": "potentialexposure",
+        "coverage": "limited",
+        "policy": "matching rule present",
+        "justification": "severity is based on observed relationship and evidence coverage; port names are not used"
+      },
+      "policy": {
+        "declared": "allow",
+        "matching_rule_ids": [
+          "allow-web"
+        ],
+        "static_result": "policy_match_only",
+        "effective_verification": "unverified",
+        "unverified_capabilities": [
+          "firewall_state",
+          "internet_reachability"
+        ]
+      },
+      "evidence": [
+        "evidence-cb550c2b7db39dc7",
+        "evidence-f4180e7752a599af",
+        "evidence-5072006fe9bdb9b0",
+        "evidence-cd925ec7e86b90e3"
+      ],
+      "limitations": [
+        "Host___dimension:_Routes__limitation:_PolicyRoutingIncomplete__"
+      ],
+      "coverage": [
+        {
+          "dimension": "docker_publications",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_listeners",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_interfaces",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_addresses",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_routes",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "tailscale",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv4",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv6",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_tcp",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_udp",
+          "status": "no_observation",
+          "limitations": []
+        }
+      ]
+    },
+    {
+      "id": "finding-59adc23660d9eaa4",
+      "subject": "listener:Tcp/Ipv6/2001:db8::10/wildcard-false/port-8443/interface-name-Some(\"eth0\")",
+      "category": "HostListener",
+      "assessment": "unknown",
+      "severity": "low",
+      "severity_factors": {
+        "exposure": "unknown",
+        "coverage": "observed",
+        "policy": "not mapped to a logical destination",
+        "justification": "a listener is an observed bind, not proof of external reachability"
+      },
+      "policy": {
+        "declared": "default_deny",
+        "matching_rule_ids": [],
+        "static_result": "policy_match_only",
+        "effective_verification": "unverified",
+        "unverified_capabilities": [
+          "firewall_state",
+          "internet_reachability"
+        ]
+      },
+      "evidence": [
+        "evidence-cae7dcefe4b902af"
+      ],
+      "limitations": [],
+      "coverage": [
+        {
+          "dimension": "docker_publications",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_listeners",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_interfaces",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_addresses",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_routes",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "tailscale",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv4",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv6",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_tcp",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_udp",
+          "status": "no_observation",
+          "limitations": []
+        }
+      ]
+    },
+    {
+      "id": "finding-7cb116dbeda53d8d",
+      "subject": "identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv6/Some(2001:db8::10)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "category": "PublishedPort",
+      "assessment": "potential_exposure",
+      "severity": "low",
+      "severity_factors": {
+        "exposure": "potentialexposure",
+        "coverage": "limited",
+        "policy": "matching rule present",
+        "justification": "severity is based on observed relationship and evidence coverage; port names are not used"
+      },
+      "policy": {
+        "declared": "allow",
+        "matching_rule_ids": [
+          "allow-web-v6"
+        ],
+        "static_result": "policy_match_only",
+        "effective_verification": "unverified",
+        "unverified_capabilities": [
+          "firewall_state",
+          "internet_reachability"
+        ]
+      },
+      "evidence": [
+        "evidence-cbc3e2e8fb847fb1",
+        "evidence-7aa610deeae8dae7",
+        "evidence-9217b10dd299bb34",
+        "evidence-8044eea9c60d2ec3"
+      ],
+      "limitations": [
+        "Host___dimension:_Routes__limitation:_PolicyRoutingIncomplete__"
+      ],
+      "coverage": [
+        {
+          "dimension": "docker_publications",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_listeners",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_interfaces",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_addresses",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_routes",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "tailscale",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv4",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv6",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_tcp",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_udp",
+          "status": "no_observation",
+          "limitations": []
+        }
+      ]
+    },
+    {
+      "id": "finding-ca71bd05bf4b8950",
+      "subject": "listener:Tcp/Ipv4/8.8.8.8/wildcard-false/port-8443/interface-name-Some(\"eth0\")",
+      "category": "HostListener",
+      "assessment": "unknown",
+      "severity": "low",
+      "severity_factors": {
+        "exposure": "unknown",
+        "coverage": "observed",
+        "policy": "not mapped to a logical destination",
+        "justification": "a listener is an observed bind, not proof of external reachability"
+      },
+      "policy": {
+        "declared": "default_deny",
+        "matching_rule_ids": [],
+        "static_result": "policy_match_only",
+        "effective_verification": "unverified",
+        "unverified_capabilities": [
+          "firewall_state",
+          "internet_reachability"
+        ]
+      },
+      "evidence": [
+        "evidence-d5c7c7ac5713a04d"
+      ],
+      "limitations": [],
+      "coverage": [
+        {
+          "dimension": "docker_publications",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_listeners",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_interfaces",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_addresses",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_routes",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "tailscale",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv4",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv6",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_tcp",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_udp",
+          "status": "no_observation",
+          "limitations": []
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evidence-5072006fe9bdb9b0",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(8.8.8.8)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-7aa610deeae8dae7",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv6/Some(2001:db8::10)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-8044eea9c60d2ec3",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv6/Some(2001:db8::10)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": [
+        "Host___dimension:_Routes__limitation:_PolicyRoutingIncomplete__"
+      ]
+    },
+    {
+      "id": "evidence-9217b10dd299bb34",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv6/Some(2001:db8::10)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-cae7dcefe4b902af",
+      "source": "host_listener_observation",
+      "resource": "listener:Tcp/Ipv6/2001:db8::10/wildcard-false/port-8443/interface-name-Some(\"eth0\")",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-cb550c2b7db39dc7",
+      "source": "docker_observation",
+      "resource": "identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(8.8.8.8)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": [
+        "Host___dimension:_Routes__limitation:_PolicyRoutingIncomplete__"
+      ]
+    },
+    {
+      "id": "evidence-cbc3e2e8fb847fb1",
+      "source": "docker_observation",
+      "resource": "identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv6/Some(2001:db8::10)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": [
+        "Host___dimension:_Routes__limitation:_PolicyRoutingIncomplete__"
+      ]
+    },
+    {
+      "id": "evidence-cd925ec7e86b90e3",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(8.8.8.8)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": [
+        "Host___dimension:_Routes__limitation:_PolicyRoutingIncomplete__"
+      ]
+    },
+    {
+      "id": "evidence-d5c7c7ac5713a04d",
+      "source": "host_listener_observation",
+      "resource": "listener:Tcp/Ipv4/8.8.8.8/wildcard-false/port-8443/interface-name-Some(\"eth0\")",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-f4180e7752a599af",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(8.8.8.8)/8443->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    }
+  ],
+  "limitations": [
+    "NoReachabilityProbe"
+  ]
+}

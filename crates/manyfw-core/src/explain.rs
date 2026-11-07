@@ -861,8 +861,20 @@ fn evaluate_policy(
                     "udp" => Some(docker::TransportProtocol::Udp),
                     _ => None,
                 }?;
+                let family = match path.family.as_str() {
+                    "ipv4" => docker::IpFamily::Ipv4,
+                    "ipv6" => docker::IpFamily::Ipv6,
+                    _ => docker::IpFamily::Unspecified,
+                };
                 Some(
-                    crate::audit::matching_rules(policy, identity, protocol, path.container_port).0,
+                    crate::audit::matching_rules(
+                        policy,
+                        identity,
+                        protocol,
+                        family,
+                        path.container_port,
+                    )
+                    .0,
                 )
             })
             .flatten()
@@ -942,6 +954,7 @@ fn evaluate_policy_for_endpoint(
                 policy,
                 identity,
                 endpoint.protocol,
+                endpoint.family,
                 endpoint.container_port,
             )
         },

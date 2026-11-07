@@ -95,6 +95,17 @@ fixture-driven assertions, not checked-in golden files, and do not assert a
 complete Tailscale-only audit rendering. Those exact parent acceptance items
 are not claimed demonstrated by this ledger.
 
+Follow-up on the phase-two branch adds checked-in deterministic JSON goldens
+for public-address bind, loopback bind, Tailscale-only access, and dual-stack
+IPv4/IPv6 publications under `crates/manyfw-core/tests/golden/audit/`. The
+fixture-driven test rebuilds each normalized policy and observation snapshot,
+compares the complete versioned audit artifact, and retains explicit
+firewall/reachability unknowns. The goldens complement existing assertions for
+incomplete sources, policy mismatches, stopped containers, sanitization,
+evidence references, and deterministic ordering. This addresses the specific
+missing public-bind/Tailscale-only golden gap; the parent issue remains open on
+GitHub until its full acceptance is reviewed, and no tracker state was changed.
+
 ### #19 — Explain evidence model and renderers
 
 | Acceptance criterion | Implementation evidence | Test/evidence |
@@ -138,8 +149,8 @@ state was modified during this audit.
 
 ## Final tracker reconciliation
 
-Read-only GitHub issue audit on 2026-11-05 confirms the following current
-statuses. Closed child issues have evidence comments recorded in their relevant
+Read-only GitHub issue audit on 2026-11-05 recorded the tracker statuses at that
+time. Closed child issues have evidence comments recorded in their relevant
 task sections above. No issue state was changed by this final audit.
 
 | Issue(s) | Tracker state | Reconciliation |
@@ -147,7 +158,7 @@ task sections above. No issue state was changed by this final audit.
 | #1, #2, #10–#19 | CLOSED | Implemented/released foundation, discovery, snapshot, audit, and explain work; relevant acceptance evidence is recorded above (and #1/#14 were already closed before this reconciliation) |
 | #3 | OPEN | Parent Docker integration criterion still lacks safely isolated disposable-Docker evidence; rootful development-daemon networking is not exercised |
 | #4 | CLOSED | Parent host discovery criteria demonstrated and evidence commented; closed 2026-11-05 |
-| #5 | OPEN | Required public-bind and Tailscale-only audit golden outputs remain incomplete |
+| #5 | OPEN | Local follow-up now checks in public IPv4, loopback, Tailscale-only, and dual-stack audit JSON goldens; the tracker remains open pending full parent acceptance review |
 | #6 | OPEN | Required NAT, host-network, multiple-mapping, and conflicting-policy golden outputs remain incomplete |
 | #7, #20, #21 | OPEN | v0.3.0 planner release gates intentionally remain open |
 | #8, #22–#24 | OPEN | v0.4.0 enforcement/rollback and privileged VM recovery gates intentionally remain open; #24 evidence is NotApplicable in hosted CI |
