@@ -1,0 +1,626 @@
+{
+  ".graphify_chunk_01.json": {
+    "mtime": 1794067572.8250341,
+    "seen": 1794067833.788146,
+    "ast_hash": "3c7a86859c4dc206f6a7303903c0f04e",
+    "semantic_hash": "3c7a86859c4dc206f6a7303903c0f04e"
+  },
+  ".graphify_chunk_02.json": {
+    "mtime": 1794067726.6166713,
+    "seen": 1794067833.7881505,
+    "ast_hash": "b4615da8863d0e2e4a89bbb472f509d0",
+    "semantic_hash": "b4615da8863d0e2e4a89bbb472f509d0"
+  },
+  "Cargo.toml": {
+    "mtime": 1794012945.9662101,
+    "seen": 1794067833.788153,
+    "ast_hash": "30bbe31b759465ff951c66259162083d",
+    "semantic_hash": "30bbe31b759465ff951c66259162083d"
+  },
+  "crates/manyfw-cli/Cargo.toml": {
+    "mtime": 1793926451.1422439,
+    "seen": 1794067833.788154,
+    "ast_hash": "17991a8c85595be6d1d1380b6869c7ca",
+    "semantic_hash": "17991a8c85595be6d1d1380b6869c7ca"
+  },
+  "crates/manyfw-cli/src/docker_engine.rs": {
+    "mtime": 1794021137.572903,
+    "seen": 1794067833.7881548,
+    "ast_hash": "59b0c124227eb4b8154a7c981ff8ffb0",
+    "semantic_hash": "59b0c124227eb4b8154a7c981ff8ffb0"
+  },
+  "crates/manyfw-cli/src/main.rs": {
+    "mtime": 1794016401.9622276,
+    "seen": 1794067833.7881556,
+    "ast_hash": "9cde01f54907e5a2e077fcc49885cef0",
+    "semantic_hash": "9cde01f54907e5a2e077fcc49885cef0"
+  },
+  "crates/manyfw-cli/tests/cli.rs": {
+    "mtime": 1794016423.3662288,
+    "seen": 1794067833.7881567,
+    "ast_hash": "183f8a360ebbd99f3f228a01de6e404c",
+    "semantic_hash": "183f8a360ebbd99f3f228a01de6e404c"
+  },
+  "crates/manyfw-core/Cargo.toml": {
+    "mtime": 1794030135.7093706,
+    "seen": 1794067833.7881575,
+    "ast_hash": "aeb0ab4ecabc601e2fca32a602a7ce5c",
+    "semantic_hash": "aeb0ab4ecabc601e2fca32a602a7ce5c"
+  },
+  "crates/manyfw-core/src/audit.rs": {
+    "mtime": 1794021791.8622336,
+    "seen": 1794067833.7881584,
+    "ast_hash": "af53f0c0f252f8ce192e347e034b381f",
+    "semantic_hash": "af53f0c0f252f8ce192e347e034b381f"
+  },
+  "crates/manyfw-core/src/backend.rs": {
+    "mtime": 1794026637.5782332,
+    "seen": 1794067833.7881594,
+    "ast_hash": "c2ae900c1afe84506e066025033bb8b3",
+    "semantic_hash": "c2ae900c1afe84506e066025033bb8b3"
+  },
+  "crates/manyfw-core/src/docker.rs": {
+    "mtime": 1794021137.572903,
+    "seen": 1794067833.7881603,
+    "ast_hash": "ad054e0b0f572e8efd14ace5f9002028",
+    "semantic_hash": "ad054e0b0f572e8efd14ace5f9002028"
+  },
+  "crates/manyfw-core/src/explain.rs": {
+    "mtime": 1794022689.2782333,
+    "seen": 1794067833.788161,
+    "ast_hash": "7d894e9a67038c2e65a4a0ecf7f88314",
+    "semantic_hash": "7d894e9a67038c2e65a4a0ecf7f88314"
+  },
+  "crates/manyfw-core/src/host.rs": {
+    "mtime": 1794012945.9662101,
+    "seen": 1794067833.7881618,
+    "ast_hash": "cb24f78aa16cf4d293c6f73da0345ad2",
+    "semantic_hash": "cb24f78aa16cf4d293c6f73da0345ad2"
+  },
+  "crates/manyfw-core/src/lib.rs": {
+    "mtime": 1794012945.9662101,
+    "seen": 1794067833.7881625,
+    "ast_hash": "93d040a65fac25cef4ba24097dfb5ad8",
+    "semantic_hash": "93d040a65fac25cef4ba24097dfb5ad8"
+  },
+  "crates/manyfw-core/src/planner.rs": {
+    "mtime": 1793926451.146244,
+    "seen": 1794067833.7881637,
+    "ast_hash": "c6bf1dcf656e43aa13ec4192570e6b9a",
+    "semantic_hash": "c6bf1dcf656e43aa13ec4192570e6b9a"
+  },
+  "crates/manyfw-core/src/snapshot.rs": {
+    "mtime": 1794022665.9782333,
+    "seen": 1794067833.7881641,
+    "ast_hash": "932aacd6e7d21d306ca9972347277502",
+    "semantic_hash": "932aacd6e7d21d306ca9972347277502"
+  },
+  "crates/manyfw-core/src/transaction.rs": {
+    "mtime": 1794067800.5511956,
+    "seen": 1794067833.788165,
+    "ast_hash": "424eaae7ecda8afd77aa38d124a6c05b",
+    "semantic_hash": "424eaae7ecda8afd77aa38d124a6c05b"
+  },
+  "crates/manyfw-core/tests/golden/audit/dual-stack.json": {
+    "mtime": 1794021831.174233,
+    "seen": 1794067833.7881658,
+    "ast_hash": "4f3d0ba442489e12959185258a829df3",
+    "semantic_hash": "4f3d0ba442489e12959185258a829df3"
+  },
+  "crates/manyfw-core/tests/golden/audit/loopback.json": {
+    "mtime": 1794021831.174233,
+    "seen": 1794067833.7881668,
+    "ast_hash": "697217a082e3ab8655b5b970b4d0b1fc",
+    "semantic_hash": "697217a082e3ab8655b5b970b4d0b1fc"
+  },
+  "crates/manyfw-core/tests/golden/audit/public-bind.json": {
+    "mtime": 1794021831.174233,
+    "seen": 1794067833.7881677,
+    "ast_hash": "a1b820e24796b1a9aca041e616e3453f",
+    "semantic_hash": "a1b820e24796b1a9aca041e616e3453f"
+  },
+  "crates/manyfw-core/tests/golden/audit/tailscale-only.json": {
+    "mtime": 1794021831.174233,
+    "seen": 1794067833.7881684,
+    "ast_hash": "26e34639a6f024ed446dd954c0179448",
+    "semantic_hash": "26e34639a6f024ed446dd954c0179448"
+  },
+  "crates/manyfw-core/tests/golden/explain/conflicting-policies.json": {
+    "mtime": 1794022693.7462335,
+    "seen": 1794067833.7881691,
+    "ast_hash": "c152180846586de14ea514db87aadc72",
+    "semantic_hash": "c152180846586de14ea514db87aadc72"
+  },
+  "crates/manyfw-core/tests/golden/explain/host-network.json": {
+    "mtime": 1794022693.7462335,
+    "seen": 1794067833.7881703,
+    "ast_hash": "f23ed1735601b10c4e689891fe7d7bed",
+    "semantic_hash": "f23ed1735601b10c4e689891fe7d7bed"
+  },
+  "crates/manyfw-core/tests/golden/explain/multiple-mappings.json": {
+    "mtime": 1794022693.7462335,
+    "seen": 1794067833.788171,
+    "ast_hash": "98da03ea7bb282d8f18a8b64fc3c97b9",
+    "semantic_hash": "98da03ea7bb282d8f18a8b64fc3c97b9"
+  },
+  "crates/manyfw-core/tests/golden/explain/nat.json": {
+    "mtime": 1794022693.7462335,
+    "seen": 1794067833.7881718,
+    "ast_hash": "f0547bdca15cb336ece28f771ec2d0c0",
+    "semantic_hash": "f0547bdca15cb336ece28f771ec2d0c0"
+  },
+  "crates/manyfw-core/tests/golden/planner/conflicting-hook-priorities.json": {
+    "mtime": 1794026514.794232,
+    "seen": 1794067833.7881725,
+    "ast_hash": "2b5a30ee3b9a058076c9fc84f5f8f917",
+    "semantic_hash": "2b5a30ee3b9a058076c9fc84f5f8f917"
+  },
+  "crates/manyfw-core/tests/golden/planner/docker-iptables-without-docker-user.json": {
+    "mtime": 1794026514.7902317,
+    "seen": 1794067833.7881732,
+    "ast_hash": "ab112910875668207d3d3dcb15268110",
+    "semantic_hash": "ab112910875668207d3d3dcb15268110"
+  },
+  "crates/manyfw-core/tests/golden/planner/docker-iptables.json": {
+    "mtime": 1794026514.7902317,
+    "seen": 1794067833.7881742,
+    "ast_hash": "655625eec01cd160f464a0fab2c79084",
+    "semantic_hash": "655625eec01cd160f464a0fab2c79084"
+  },
+  "crates/manyfw-core/tests/golden/planner/docker-native-nftables.json": {
+    "mtime": 1794026514.7902317,
+    "seen": 1794067833.7881749,
+    "ast_hash": "363b19eac55ef87b6225563183ada571",
+    "semantic_hash": "363b19eac55ef87b6225563183ada571"
+  },
+  "crates/manyfw-core/tests/golden/planner/docker-userland-proxy.json": {
+    "mtime": 1794026514.7902317,
+    "seen": 1794067833.7881756,
+    "ast_hash": "fd098c3da6ac70fa8cd24ef2964ae2d1",
+    "semantic_hash": "fd098c3da6ac70fa8cd24ef2964ae2d1"
+  },
+  "crates/manyfw-core/tests/golden/planner/host-only.json": {
+    "mtime": 1794026514.7862318,
+    "seen": 1794067833.7881763,
+    "ast_hash": "e991fec95e1772504499c0a63fa394fe",
+    "semantic_hash": "e991fec95e1772504499c0a63fa394fe"
+  },
+  "crates/manyfw-core/tests/golden/planner/mixed-managers.json": {
+    "mtime": 1794026514.7902317,
+    "seen": 1794067833.7881773,
+    "ast_hash": "a6e6c6f051bb4917c9b88db4a5908caf",
+    "semantic_hash": "a6e6c6f051bb4917c9b88db4a5908caf"
+  },
+  "crates/manyfw-core/tests/golden/planner/unknown-capability.json": {
+    "mtime": 1794026514.794232,
+    "seen": 1794067833.788178,
+    "ast_hash": "a1c85701d6e5c0fdadfb3320cff9e97e",
+    "semantic_hash": "a1c85701d6e5c0fdadfb3320cff9e97e"
+  },
+  "crates/manyfw-core/tests/planner_netns.rs": {
+    "mtime": 1794025529.118234,
+    "seen": 1794067833.7881787,
+    "ast_hash": "64c62f52093b956ad9a53fd5696f8406",
+    "semantic_hash": "64c62f52093b956ad9a53fd5696f8406"
+  },
+  "crates/manyfw-core/tests/recovery_matrix.rs": {
+    "mtime": 1794067800.5511956,
+    "seen": 1794067833.7881794,
+    "ast_hash": "348a693aa2f55aa1fe85c080fbf0ccea",
+    "semantic_hash": "348a693aa2f55aa1fe85c080fbf0ccea"
+  },
+  "crates/manyfw-linux/Cargo.toml": {
+    "mtime": 1794012945.9662101,
+    "seen": 1794067833.7881806,
+    "ast_hash": "b111f44dd617b9dd7bf44a9a3571cca0",
+    "semantic_hash": "b111f44dd617b9dd7bf44a9a3571cca0"
+  },
+  "crates/manyfw-linux/src/lib.rs": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7881813,
+    "ast_hash": "8517431643f89bfbb5d470c43ccac138",
+    "semantic_hash": "8517431643f89bfbb5d470c43ccac138"
+  },
+  "crates/manyfw-linux/src/netlink.rs": {
+    "mtime": 1793926451.15143,
+    "seen": 1794067833.788182,
+    "ast_hash": "a9dc36186d7ef4b6bf29a2613fe4ba86",
+    "semantic_hash": "a9dc36186d7ef4b6bf29a2613fe4ba86"
+  },
+  "crates/manyfw-linux/src/procfs.rs": {
+    "mtime": 1793926451.15143,
+    "seen": 1794067833.7881827,
+    "ast_hash": "d0798cc1d1f18c9a0aee9add2f1d6c6a",
+    "semantic_hash": "d0798cc1d1f18c9a0aee9add2f1d6c6a"
+  },
+  "crates/manyfw-linux/tests/host_sources.rs": {
+    "mtime": 1793926451.15143,
+    "seen": 1794067833.7881835,
+    "ast_hash": "ced2111c9cce623b4797fedfd71336b0",
+    "semantic_hash": "ced2111c9cce623b4797fedfd71336b0"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/iptables_fail.json": {
+    "mtime": 1794065533.3961945,
+    "seen": 1794067833.7881846,
+    "ast_hash": "c3d5dc1a120e9cedaea5340a3a8a0ecf",
+    "semantic_hash": "c3d5dc1a120e9cedaea5340a3a8a0ecf"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/iptables_kill.json": {
+    "mtime": 1794065533.3962822,
+    "seen": 1794067833.7881854,
+    "ast_hash": "261a6e6442c08f64cafa4e1332f083e8",
+    "semantic_hash": "261a6e6442c08f64cafa4e1332f083e8"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/iptables_sleep.json": {
+    "mtime": 1794065533.3963072,
+    "seen": 1794067833.788186,
+    "ast_hash": "1b52d2e08fa034cf38c539827c1ca813",
+    "semantic_hash": "1b52d2e08fa034cf38c539827c1ca813"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/iptables_sleep_partial-rollback-once.json": {
+    "mtime": 1794065533.3963547,
+    "seen": 1794067833.788187,
+    "ast_hash": "d899dd9342a36abe16cf4673d052b12c",
+    "semantic_hash": "d899dd9342a36abe16cf4673d052b12c"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/iptables_sleep_reboot.json": {
+    "mtime": 1794065533.3963811,
+    "seen": 1794067833.7881882,
+    "ast_hash": "f75eb56a37b621f92aa75cbb978d0bb5",
+    "semantic_hash": "f75eb56a37b621f92aa75cbb978d0bb5"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/nft_fail.json": {
+    "mtime": 1794065533.3964038,
+    "seen": 1794067833.788189,
+    "ast_hash": "72960f95169fbfab10aa1d515dccf05d",
+    "semantic_hash": "72960f95169fbfab10aa1d515dccf05d"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/nft_kill.json": {
+    "mtime": 1794065533.3964293,
+    "seen": 1794067833.7881896,
+    "ast_hash": "62731f3c7203386150d8e760728c0198",
+    "semantic_hash": "62731f3c7203386150d8e760728c0198"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/nft_sleep.json": {
+    "mtime": 1794065533.396452,
+    "seen": 1794067833.7881904,
+    "ast_hash": "85437e96e4ebea2fd0a82cb182befb64",
+    "semantic_hash": "85437e96e4ebea2fd0a82cb182befb64"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/nft_sleep_kill-recovery-once.json": {
+    "mtime": 1794065533.3964741,
+    "seen": 1794067833.7881913,
+    "ast_hash": "0f0d27046ccfd30b58e9376dd26b1010",
+    "semantic_hash": "0f0d27046ccfd30b58e9376dd26b1010"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/nft_sleep_reboot.json": {
+    "mtime": 1794065533.3964975,
+    "seen": 1794067833.788192,
+    "ast_hash": "a4971afc01ac1ac4494d64185e6ee15e",
+    "semantic_hash": "a4971afc01ac1ac4494d64185e6ee15e"
+  },
+  "examples/empty-snapshot.json": {
+    "mtime": 1793926451.1566675,
+    "seen": 1794067833.7881927,
+    "ast_hash": "4051cc0e09a673d390173d89f585971d",
+    "semantic_hash": "4051cc0e09a673d390173d89f585971d"
+  },
+  "examples/partial-snapshot.json": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7881935,
+    "ast_hash": "58499d5d0e8aa4513b7eb22272f86a60",
+    "semantic_hash": "58499d5d0e8aa4513b7eb22272f86a60"
+  },
+  "scripts/install.sh": {
+    "mtime": 1793927192.1371417,
+    "seen": 1794067833.7881944,
+    "ast_hash": "c836b28ac5eef79b5593c6b2ca10fc1d",
+    "semantic_hash": "c836b28ac5eef79b5593c6b2ca10fc1d"
+  },
+  "scripts/integration/planner-vm-test.sh": {
+    "mtime": 1794024888.8142335,
+    "seen": 1794067833.7881951,
+    "ast_hash": "213bc6d9848f6003cc984a39888a023a",
+    "semantic_hash": "213bc6d9848f6003cc984a39888a023a"
+  },
+  "scripts/integration/planner-vm-up.sh": {
+    "mtime": 1794023581.786234,
+    "seen": 1794067833.7881958,
+    "ast_hash": "f01354d03eba22f6ec00b3faff534ee3",
+    "semantic_hash": "f01354d03eba22f6ec00b3faff534ee3"
+  },
+  "scripts/integration/recovery-fixture.sh": {
+    "mtime": 1794065121.8613703,
+    "seen": 1794067833.7881963,
+    "ast_hash": "2a3b5736c13fd7a2eb4e253419970d98",
+    "semantic_hash": "2a3b5736c13fd7a2eb4e253419970d98"
+  },
+  "scripts/integration/recovery-vm-test.sh": {
+    "mtime": 1794064620.8773682,
+    "seen": 1794067833.7881973,
+    "ast_hash": "e9d7732c0c38e088c1421ce75ba23d4c",
+    "semantic_hash": "e9d7732c0c38e088c1421ce75ba23d4c"
+  },
+  "scripts/integration/vm-down.sh": {
+    "mtime": 1794021137.572903,
+    "seen": 1794067833.7881982,
+    "ast_hash": "def49fd204286aa7f452f6042e599e05",
+    "semantic_hash": "def49fd204286aa7f452f6042e599e05"
+  },
+  "scripts/integration/vm-lib.sh": {
+    "mtime": 1794056464.5213695,
+    "seen": 1794067833.788199,
+    "ast_hash": "4684ec614f1b8e3dfba09a0aed229e21",
+    "semantic_hash": "4684ec614f1b8e3dfba09a0aed229e21"
+  },
+  "scripts/integration/vm-test.sh": {
+    "mtime": 1794021137.5748909,
+    "seen": 1794067833.7881997,
+    "ast_hash": "527692f4b9e7595a5e91c584401990b2",
+    "semantic_hash": "527692f4b9e7595a5e91c584401990b2"
+  },
+  "scripts/integration/vm-up.sh": {
+    "mtime": 1794021137.5748909,
+    "seen": 1794067833.7882004,
+    "ast_hash": "3a6dca046a1eb8c9d4cc7f45042cf28d",
+    "semantic_hash": "3a6dca046a1eb8c9d4cc7f45042cf28d"
+  },
+  "scripts/run-qemu-recovery.sh": {
+    "mtime": 1793926451.158244,
+    "seen": 1794067833.7882013,
+    "ast_hash": "1f8cb515f7e28998b081cdee380e3ee6",
+    "semantic_hash": "1f8cb515f7e28998b081cdee380e3ee6"
+  },
+  "scripts/test_validate_recovery_gate.py": {
+    "mtime": 1794065140.7333689,
+    "seen": 1794067833.788202,
+    "ast_hash": "ea6b57e10d1d7f0bc3a43c32d05ec071",
+    "semantic_hash": "ea6b57e10d1d7f0bc3a43c32d05ec071"
+  },
+  "scripts/test_validate_recovery_report.py": {
+    "mtime": 1793926451.158244,
+    "seen": 1794067833.7882028,
+    "ast_hash": "71405c56cd19bcb04d19b1d128069c3c",
+    "semantic_hash": "71405c56cd19bcb04d19b1d128069c3c"
+  },
+  "scripts/test_workflow_contracts.py": {
+    "mtime": 1794027886.0542336,
+    "seen": 1794067833.7882032,
+    "ast_hash": "7c21a9b212107eecc5eb1acbffe554a9",
+    "semantic_hash": "7c21a9b212107eecc5eb1acbffe554a9"
+  },
+  "scripts/validate-recovery-gate.py": {
+    "mtime": 1794065133.4053688,
+    "seen": 1794067833.7882042,
+    "ast_hash": "75a795ebe308f49a7d999b3a137be830",
+    "semantic_hash": "75a795ebe308f49a7d999b3a137be830"
+  },
+  "scripts/validate-recovery-report.py": {
+    "mtime": 1793926451.158244,
+    "seen": 1794067833.788205,
+    "ast_hash": "c5565a36dfc92bf9a1db5cf03de0b86d",
+    "semantic_hash": "c5565a36dfc92bf9a1db5cf03de0b86d"
+  },
+  "tests/host_namespace.sh": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7882056,
+    "ast_hash": "dc36a0d4d93dc2515c2fcc9f4954cf50",
+    "semantic_hash": "dc36a0d4d93dc2515c2fcc9f4954cf50"
+  },
+  "tests/integration/docker/issue-3.py": {
+    "mtime": 1794021137.5748909,
+    "seen": 1794067833.7882066,
+    "ast_hash": "c4ed22344004117e8137f033314c0b14",
+    "semantic_hash": "c4ed22344004117e8137f033314c0b14"
+  },
+  ".github/actionlint.yaml": {
+    "mtime": 1793926451.138244,
+    "seen": 1794067833.7882073,
+    "ast_hash": "f41fc4012aea280008b468a441a4c798",
+    "semantic_hash": "f41fc4012aea280008b468a441a4c798"
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1794027879.9342334,
+    "seen": 1794067833.7882078,
+    "ast_hash": "e8aa2c81f58f8d37bb0f358bbe4edfb8",
+    "semantic_hash": "e8aa2c81f58f8d37bb0f358bbe4edfb8"
+  },
+  ".github/workflows/compatibility.yml": {
+    "mtime": 1794012945.9662101,
+    "seen": 1794067833.7882087,
+    "ast_hash": "40a8309532f2b7aeb0309fd13a7ef827",
+    "semantic_hash": "40a8309532f2b7aeb0309fd13a7ef827"
+  },
+  ".github/workflows/release.yml": {
+    "mtime": 1794012945.9662101,
+    "seen": 1794067833.7882097,
+    "ast_hash": "1967c41c7c720be2ad7ca19ce24e6556",
+    "semantic_hash": "1967c41c7c720be2ad7ca19ce24e6556"
+  },
+  "AGENTS.md": {
+    "mtime": 1793926451.1422439,
+    "seen": 1794067833.7882102,
+    "ast_hash": "7efda9a0bcef36223efaa859af7f3846",
+    "semantic_hash": "7efda9a0bcef36223efaa859af7f3846"
+  },
+  "CONTEXT.md": {
+    "mtime": 1793926451.1422439,
+    "seen": 1794067833.788211,
+    "ast_hash": "c874311926607e4ad329bac880f72765",
+    "semantic_hash": "c874311926607e4ad329bac880f72765"
+  },
+  "CONTRIBUTING.md": {
+    "mtime": 1793746466.4146943,
+    "seen": 1794067833.788212,
+    "ast_hash": "053330ffda1a9adaef264a8357bd7419",
+    "semantic_hash": "053330ffda1a9adaef264a8357bd7419"
+  },
+  "README.md": {
+    "mtime": 1794014904.5702302,
+    "seen": 1794067833.7882128,
+    "ast_hash": "c1429d4d4bbf885a1532875d2be81cad",
+    "semantic_hash": "c1429d4d4bbf885a1532875d2be81cad"
+  },
+  "docs/ARCHITECTURE.md": {
+    "mtime": 1794029142.53337,
+    "seen": 1794067833.7882135,
+    "ast_hash": "5fde62b1d82ddb44abaa1378486bc02f",
+    "semantic_hash": "5fde62b1d82ddb44abaa1378486bc02f"
+  },
+  "docs/CI-CD.md": {
+    "mtime": 1793927192.1370177,
+    "seen": 1794067833.7882144,
+    "ast_hash": "a4c130af720499740ede9b65626f4005",
+    "semantic_hash": "a4c130af720499740ede9b65626f4005"
+  },
+  "docs/EXPLAIN.md": {
+    "mtime": 1794022428.1022353,
+    "seen": 1794067833.7882154,
+    "ast_hash": "ce4fc8b9f2f5c5ec2898da2113686e76",
+    "semantic_hash": "ce4fc8b9f2f5c5ec2898da2113686e76"
+  },
+  "docs/ROADMAP.md": {
+    "mtime": 1794067300.9533694,
+    "seen": 1794067833.788216,
+    "ast_hash": "e84045f69582c95c6855b162314ecc92",
+    "semantic_hash": "e84045f69582c95c6855b162314ecc92"
+  },
+  "docs/SECURITY.md": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7882168,
+    "ast_hash": "3015b0ff3640645581b82e9f0e93cccc",
+    "semantic_hash": "3015b0ff3640645581b82e9f0e93cccc"
+  },
+  "docs/SPECIFICATION.md": {
+    "mtime": 1794014896.8462322,
+    "seen": 1794067833.7882175,
+    "ast_hash": "9efcaa20ad3153f7034334e8d396b81c",
+    "semantic_hash": "9efcaa20ad3153f7034334e8d396b81c"
+  },
+  "docs/TEST-MATRIX.md": {
+    "mtime": 1794065822.0733588,
+    "seen": 1794067833.7882183,
+    "ast_hash": "a42a3403ae0943b0d1c39a62f9a20c12",
+    "semantic_hash": "a42a3403ae0943b0d1c39a62f9a20c12"
+  },
+  "docs/adr/0001-versioned-policy-schema.md": {
+    "mtime": 1793926451.15143,
+    "seen": 1794067833.7882195,
+    "ast_hash": "6c5fbb5621a80f937087be35ce2fb5f1",
+    "semantic_hash": "6c5fbb5621a80f937087be35ce2fb5f1"
+  },
+  "docs/adr/0002-observation-snapshot-contract.md": {
+    "mtime": 1793926451.1533926,
+    "seen": 1794067833.7882202,
+    "ast_hash": "151c5b650c183a8ada9155c76e985440",
+    "semantic_hash": "151c5b650c183a8ada9155c76e985440"
+  },
+  "docs/adr/0003-observation-artifact-and-test-contracts.md": {
+    "mtime": 1793926451.1533926,
+    "seen": 1794067833.7882214,
+    "ast_hash": "ca7d39ffcf0f84aa043563e1d60d92d2",
+    "semantic_hash": "ca7d39ffcf0f84aa043563e1d60d92d2"
+  },
+  "docs/adr/0004-guarded-enforcement-boundary.md": {
+    "mtime": 1793926451.1533926,
+    "seen": 1794067833.7882226,
+    "ast_hash": "4a7dbb09cdc64db83006680fbcfb5088",
+    "semantic_hash": "4a7dbb09cdc64db83006680fbcfb5088"
+  },
+  "docs/agents/domain.md": {
+    "mtime": 1793926451.1533926,
+    "seen": 1794067833.7882233,
+    "ast_hash": "2fee846726e1e3083d2b6a19b7aa63de",
+    "semantic_hash": "2fee846726e1e3083d2b6a19b7aa63de"
+  },
+  "docs/agents/issue-tracker.md": {
+    "mtime": 1793926451.1554127,
+    "seen": 1794067833.788224,
+    "ast_hash": "b8fe55a79a518206d8e647effa6078f7",
+    "semantic_hash": "b8fe55a79a518206d8e647effa6078f7"
+  },
+  "docs/agents/triage-labels.md": {
+    "mtime": 1793926451.1554127,
+    "seen": 1794067833.7882247,
+    "ast_hash": "7cc90fc4b4c28387ebd5d15bc45cb985",
+    "semantic_hash": "7cc90fc4b4c28387ebd5d15bc45cb985"
+  },
+  "docs/specs/issue-3-docker-discovery.md": {
+    "mtime": 1793926451.1554127,
+    "seen": 1794067833.7882257,
+    "ast_hash": "9ce5513f8d8437da9de5b9c7e06b827b",
+    "semantic_hash": "9ce5513f8d8437da9de5b9c7e06b827b"
+  },
+  "docs/specs/issue-4-host-discovery.md": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7882264,
+    "ast_hash": "9584079f983a50255e1086f4de1c9c63",
+    "semantic_hash": "9584079f983a50255e1086f4de1c9c63"
+  },
+  "docs/specs/issue-5-audit-report.md": {
+    "mtime": 1793926451.1566675,
+    "seen": 1794067833.788227,
+    "ast_hash": "ed71fb9a25b3a90ec00c8fa0af6d83a9",
+    "semantic_hash": "ed71fb9a25b3a90ec00c8fa0af6d83a9"
+  },
+  "docs/specs/issue-6-explain.md": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7882278,
+    "ast_hash": "e49878c72386a29d9dabc5c99921efbe",
+    "semantic_hash": "e49878c72386a29d9dabc5c99921efbe"
+  },
+  "docs/specs/issue-7-planner.md": {
+    "mtime": 1794026500.146232,
+    "seen": 1794067833.7882285,
+    "ast_hash": "d7394d2a9329bfb14b44368d704bf44b",
+    "semantic_hash": "d7394d2a9329bfb14b44368d704bf44b"
+  },
+  "docs/specs/issue-8-guarded-apply.md": {
+    "mtime": 1793926451.1566675,
+    "seen": 1794067833.7882295,
+    "ast_hash": "9b33b2f83d6381c7b6746ec7fb3d3840",
+    "semantic_hash": "9b33b2f83d6381c7b6746ec7fb3d3840"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/iptables_sleep_partial-rollback-once.partial-rollback.txt": {
+    "mtime": 1794065533.396581,
+    "seen": 1794067833.7882302,
+    "ast_hash": "273e5d9a41bf780054aad65d2b54cf9e",
+    "semantic_hash": "273e5d9a41bf780054aad65d2b54cf9e"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/metadata.txt": {
+    "mtime": 1794065533.3966148,
+    "seen": 1794067833.7882311,
+    "ast_hash": "210532153264a5b614332eb01470c6af",
+    "semantic_hash": "210532153264a5b614332eb01470c6af"
+  },
+  "docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956/recovery-matrix.txt": {
+    "mtime": 1794065533.3966389,
+    "seen": 1794067833.788232,
+    "ast_hash": "bc2494c26f885dfc05ef02937a42d334",
+    "semantic_hash": "bc2494c26f885dfc05ef02937a42d334"
+  },
+  "docs/validation/issue-3-docker-kvm.md": {
+    "mtime": 1794021137.572903,
+    "seen": 1794067833.788233,
+    "ast_hash": "a12d2cff7d13c8b7ab216ea70da943ee",
+    "semantic_hash": "a12d2cff7d13c8b7ab216ea70da943ee"
+  },
+  "docs/validation/phase-2-issue-reconciliation.md": {
+    "mtime": 1794067254.2773693,
+    "seen": 1794067833.7882338,
+    "ast_hash": "bf7cb8cd374c58ab16d36ebf25bcc85d",
+    "semantic_hash": "bf7cb8cd374c58ab16d36ebf25bcc85d"
+  },
+  "docs/validation/v0.2.0-discovery.md": {
+    "mtime": 1794012945.97192,
+    "seen": 1794067833.7882345,
+    "ast_hash": "11172076a872c2b9b46e403a6b531898",
+    "semantic_hash": "11172076a872c2b9b46e403a6b531898"
+  },
+  "tests/integration/README.md": {
+    "mtime": 1794025228.8942335,
+    "seen": 1794067833.7882352,
+    "ast_hash": "5fe258076ee7fbc611508a4f16ea6809",
+    "semantic_hash": "5fe258076ee7fbc611508a4f16ea6809"
+  }
+}

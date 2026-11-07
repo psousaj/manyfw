@@ -1,0 +1,13 @@
+/cache/
+/.graphify_python
+/.graphify_detect.json
+/.graphify_extract.json
+/.graphify_ast.json
+/.graphify_semantic*.json
+/.graphify_analysis.json
+/.graphify_cached.json
+/.graphify_uncached.txt
+/.graphify_chunk_*.json
+/.graphify_incremental.json
+/.graphify_old.json
+/.needs_update
