@@ -38,13 +38,53 @@ critical scenario blocks release approval.
 | IPv4/IPv6 backend matrix | NotApplicable | Requires disposable VM |
 | No-global-flush invariant | NotApplicable | Requires disposable VM and backend adapters |
 | Test-only QEMU firewall recovery: SSH interruption, failed/interrupted apply, reboot, recovery-process death, and partial rollback across nftables/iptables | Passed (10 scenarios) | `scripts/integration/recovery-vm-test.sh`; run `mfw-recovery-20261107T152556Z-370956`, candidate `worktree:0d34a682ac5efaa55da2c07e22fd6a2cede0569dfae5dba5add9ed7bb5547afe`; archived reports and guest artifacts: [`docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956`](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956) |
-| Planner INPUT explicit-allow/default-deny verdict and nftables no-mutation check | Passed | `scripts/integration/planner-vm-test.sh`; evidence: `/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/test.log`; test binary SHA-256 is recorded in adjacent `metadata.txt` |
+| Historical planner INPUT explicit-allow/default-deny verdict and nftables no-mutation check | Passed (one IPv4 host case only; superseded by expanded #7 evidence below) | `/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/test.log` |
 
 The fixture tests use injected test-only backend observations and stores. They
 do not modify the development host or simulate a production backend. The
 planner packet test translates typed plan operations in a test fixture,
 configures nftables only inside a separate KVM guest, and checks that planning
 leaves that namespace's ruleset unchanged.
+
+## Issue #7 isolated planner acceptance
+
+The final #7 KVM run executes two ignored privileged tests only inside the
+verified disposable Ubuntu guest. The host INPUT matrix checks real IPv4 and
+IPv6 TCP packets for matching allow, default deny, explicit higher-priority
+deny over a lower-priority allow, lower-priority deny losing to an earlier
+allow, and out-of-zone source denial. It also checks exact source-interface and
+family-specific source-subnet operations, reverse declaration order producing
+the identical deterministic plan, explicit blocking on conflicting observed
+hook priorities, and no change to the target namespace nftables ruleset from
+either applicable or blocked plan generation.
+
+The Docker-native fixture exercises the planner's actual typed native-nftables
+Docker publication operation through a real three-namespace IPv4 path: client
+to published host address/port, DNAT to the observed container target/port,
+conntrack original-destination matching, FORWARD acceptance, established
+return traffic, and a separately published but unallowed port denied by the
+managed default. Planning leaves the router namespace ruleset byte-for-byte
+equivalent as parsed nftables JSON. The test-only adapter installs test rules
+inside the disposable guest; it is not a production backend or a Docker-daemon
+integration claim. Docker-iptables/foreign-manager plans remain blocked in the
+versioned goldens and are never executed as firewall changes by this test.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| Host INPUT packet outcomes | Passed: 8 direct probes across IPv4/IPv6, source match/mismatch, default verdict and explicit priority ordering | `/home/jose/.cache/manyfw-planner-issue7/evidence/mfw-planner-20261108T205258Z-893457/planner/test.log` |
+| Native Docker DNAT/FORWARD packet outcomes | Passed: published TCP/18080 accepted to observed TCP/8080 target; TCP/18081 mapping denied | Same `test.log` |
+| Conflict/block and read-only planning | Passed: conflicting hook priorities block; applicable and blocked plans preserve namespace rulesets | Same `test.log` |
+| Source and binary binding | Base `5c041a2c29437da96028cd56c09e36b3f84f68e9`, source diff digest and test binary digest in adjacent `metadata.txt` | Adjacent `metadata.txt` |
+| Guest teardown | Passed; harness reports stopped/removed and no current guest state remains | `/home/jose/.cache/manyfw-planner-issue7/evidence/mfw-planner-20261108T205258Z-893457/vm-down.log` |
+
+Eight checked-in planner golden plans continue to cover host-only, Docker
+iptables with/without observed `DOCKER-USER`, native nftables DNAT/FORWARD,
+userland-proxy INPUT, mixed managers, unknown capability, and conflicting hook
+priorities. Unit tests assert deterministic canonical operations and structured
+diagnostics, while policy tests cover conflicts, overlap, redundancy and
+unsupported/unknown semantics. The isolated suite complements rather than
+replaces those goldens; it does not claim live Docker-daemon integration or
+general enforcement authorization.
 
 ## Issue #24 final generic Linux evidence
 

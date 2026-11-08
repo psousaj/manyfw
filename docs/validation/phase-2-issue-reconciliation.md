@@ -188,7 +188,7 @@ task sections above. No issue state was changed by this final audit.
 | #4 | CLOSED | Parent host discovery criteria demonstrated and evidence commented; closed 2026-11-05 |
 | #5 | OPEN | Local follow-up now checks in public IPv4, loopback, Tailscale-only, and dual-stack audit JSON goldens; the tracker remains open pending full parent acceptance review |
 | #6 | OPEN | Local NAT, host-network, multiple-mapping, and conflicting-policy JSON goldens are committed; tracker remains open pending full parent acceptance review |
-| #7 | OPEN | #20 and #21 are CLOSED; parent golden plans and disposable packet-verdict/no-mutation evidence are recorded below; full parent acceptance remains under review |
+| #7 | OPEN as audited 2026-11-05; subsequently CLOSED 2026-11-08 | At the audit date, #20/#21 and goldens were complete but parent isolated packet acceptance remained incomplete; final evidence and closure are recorded below |
 | #20, #21 | CLOSED | Child implementation contracts completed; #7's parent-level isolated acceptance remains separate |
 | #8, #22–#24 | OPEN | v0.4.0 enforcement/rollback and privileged VM recovery gates intentionally remain open; #24 evidence is NotApplicable in hosted CI |
 | #26 | OPEN | Release/matrix evidence is positive, but PR-matrix gating change awaits hosted workflow verification |
@@ -211,7 +211,7 @@ No planner or enforcement issue was closed based solely on fixture tests or
 artifact smoke. Repository remains on local reconciliation branch
 `chore/phase-2-issue-reconciliation`; no changes were pushed or made to GitHub.
 
-### #7 — Planner parent acceptance work in progress
+### #7 — Planner implementation and original packet evidence
 
 Checked-in versioned plan JSON fixtures under
 `crates/manyfw-core/tests/golden/planner/` cover host-only, Docker iptables
@@ -238,8 +238,29 @@ host INPUT allow and scoped default-deny operations, compared accepted TCP/8080
 and denied TCP/8081 packet probes, and asserted the target namespace's
 nftables JSON ruleset was unchanged across plan generation. Current evidence is at
 `/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/`.
-This demonstrates one read-only host INPUT scenario only; it does not claim
-Docker packet-path or privileged enforcement coverage and does not close #7.
+This original evidence demonstrates one read-only host INPUT scenario only; it
+did not claim Docker packet-path coverage and did not close #7 at that time.
+
+### #7 — Final parent acceptance (2026-11-08)
+
+The remaining parent acceptance has now been completed and #7 closed. Eight
+versioned planner goldens and the pure planning/diagnostic contracts described
+above were retained. Fresh disposable-KVM evidence at
+`/home/jose/.cache/manyfw-planner-issue7/evidence/mfw-planner-20261108T205258Z-893457/planner/`
+contains two passing real packet tests: dual-stack host INPUT (8 allow/deny
+probes, including explicit precedence and source mismatch) and native Docker
+NAT/FORWARD (published 18080 allowed to the observed container destination,
+unallowed 18081 denied). It also verifies priority-order stability, declaration
+order invariance, explicit blocked diagnostics for conflicting priorities, and
+unchanged kernel rulesets across applicable and blocked plan generation. The
+router case uses a test-only rules adapter inside three disposable network
+namespaces; packets are real kernel traffic, not simulated verdicts, and this is
+not a live Docker-daemon integration claim. Source-diff and test-binary digests
+are recorded in `metadata.txt`; guest teardown evidence is `vm-down.log`.
+
+Current tracker state is #7 CLOSED, #8 OPEN, and #24 CLOSED. This closes only
+the planner dependency. The broader #8 threat-model, enforcement, operational
+and production-release criteria remain independent and unfinished.
 
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 

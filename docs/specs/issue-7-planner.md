@@ -84,6 +84,17 @@ the kernel.
 - Verify no plan operation mutates fixtures or executes a command.
 - T2/T3 isolated integration tests compare expected packet verdict semantics in
   disposable namespaces/VMs; they never use the development host firewall.
+- For the current versioned planner goldens, isolated packet evidence exercises
+  each executable operation class: host INPUT selectors/verdicts in both
+  families, explicit rule-priority ordering, and native Docker NAT/FORWARD
+  original-destination/conntrack semantics. Plans blocked by foreign ownership,
+  unknown capability, or conflicting priorities are checked as diagnostics and
+  are never translated into firewall changes. The test-only packet adapter is
+  confined to the disposable guest; it is not production backend code.
+- Re-run plan generation before and after applicable/blocked cases and compare
+  the observed namespace rulesets; reverse normalized rule declaration order
+  and require an identical plan artifact. Retain candidate/source and binary
+  digests plus verified disposable-guest teardown.
 
 ## Out of Scope
 

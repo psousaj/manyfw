@@ -27,13 +27,13 @@ mkdir -p -m 0700 -- "$evidence"
 {
     printf 'base_commit=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD)"
     printf 'worktree_status=%s\n' "$(git -C "$REPO_ROOT" status --porcelain | tr '\n' ';')"
+    printf 'source_diff_sha256=%s\n' "$(git -C "$REPO_ROOT" diff HEAD | sha256sum | awk '{print $1}')"
     printf 'test_binary_sha256=%s\n' "$(sha256sum "$binary" | awk '{print $1}')"
 } >"$evidence/metadata.txt"
 set +e
 vm_ssh sudo env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     MANYFW_EXPECTED_GUEST_MARKER="$run_id" \
-    "$guest_binary" --ignored --exact \
-    typed_plan_matches_isolated_packet_verdicts_and_does_not_mutate_rules --nocapture \
+    "$guest_binary" --ignored --nocapture \
     2>&1 | tee "$evidence/test.log"
 status=${PIPESTATUS[0]}
 set -e

@@ -35,8 +35,8 @@ completed successfully.
 - [x] Isolated planner check exercises Applicable and Blocked plans and packet verdicts ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](validation/v0.3.0-planner.md))
 - [x] Prove planning does not mutate nftables rules in a disposable namespace; compatibility and release workflows enforce it; no development-host firewall mutation
 - [x] Publish and verify `v0.3.0` ([release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0); [workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087))
-- [ ] Complete isolated integration evidence for the planner beyond the published v0.3.0 fixture ([#7](https://github.com/psousaj/manyfw/issues/7))
-- [ ] Prove planning does not mutate observed kernel rules across remaining disposable namespaces and VMs
+- [x] Complete isolated planner integration evidence for host INPUT and native Docker DNAT/FORWARD semantics ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](TEST-MATRIX.md#issue-7-isolated-planner-acceptance))
+- [x] Prove applicable, blocked, and conflicting-priority planning does not mutate observed kernel rules in disposable namespaces/VMs ([#7 evidence](TEST-MATRIX.md#issue-7-isolated-planner-acceptance))
 
 Release publication passed artifact build, checksum, and packaged smoke-test
 gates. v0.3.0 remains read-only and does not include or authorize
@@ -73,19 +73,19 @@ generic Linux contract is recorded as accepted in ADR-0005. Tailscale remains
 separately pending and is not claimed supported; production remains
 unauthorized. Evidence paths and scope limits are in the [test matrix](TEST-MATRIX.md#issue-24-final-generic-linux-evidence).
 
-Do not advance #8 until its own documented M2 planning/threat-model dependency
-is verified complete. Issue #7 is still open and its isolated packet-verdict
-acceptance gate remains unchecked; resolve that prerequisite before beginning
-#8. The #24 generic acceptance does not authorize production or development-host
-firewall mutation.
+Issue #7's M2 planner acceptance is complete and closed after actual disposable
+KVM packet-verdict evidence and clean review. #8 may now resume its independent
+planning/threat-model and guarded-enforcement gates; the bounded #24 generic
+acceptance does not satisfy broader #8 criteria or authorize production or
+development-host firewall mutation.
 
 The generic #24 acceptance and its required review are complete for the bounded
 experimental scope; the specialized Tailscale contract remains pending and no
-production authorization is granted. Issue #24 remains open in GitHub. Issue #8
-must not start until its documented #7 M2 planning/threat-model dependency and
-required isolated planner acceptance are verified complete. Keep Apply
-explicitly experimental and opt-in; no global host-firewall mutation is
-authorized.
+production authorization is granted. Issue #24 is closed in GitHub. Issue #7 is
+closed with the isolated planner acceptance recorded in the test matrix. Issue
+#8 is active only after its #7 dependency; its remaining threat-model and
+guarded-enforcement criteria are not implied complete. Keep Apply explicitly
+experimental and opt-in; no global host-firewall mutation is authorized.
 
 ## Later
 - [ ] Daemon watching Docker events; reconciliation after container changes
