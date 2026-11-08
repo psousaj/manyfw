@@ -40,7 +40,12 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
 - Failure during Applying, Verifying, or AwaitingConfirmation enters
   `RollingBack → RolledBack | RollbackFailed`.
 - `Aborted` is terminal before mutation; `Failed` is terminal when no change was
-  applied; `RollbackFailed` requires administrative recovery.
+  applied. `RollbackFailed` is a durable critical terminal status for a failed
+  rollback attempt. The independent supervisor may retry only while the
+  transaction-bound recovery arm and ownership/checkpoint guards remain valid;
+  an unresolved failure remains visible, retains recovery evidence, and
+  requires administrative recovery. A retry is never reported as success until
+  the exact scoped checkpoint is verified restored.
 - Persist plan, preconditions, ownership, affected resources, checkpoint,
   confirmation deadline, progress, and recovery evidence durably before
   mutation.

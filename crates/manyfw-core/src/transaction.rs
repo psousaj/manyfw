@@ -1127,7 +1127,7 @@ where
             }
             Err(rollback) => {
                 record.state = TransactionState::RollbackFailure;
-                record.diagnostics.push(sanitize(&rollback.to_string()));
+                push_rollback_diagnostic(&mut record, &rollback);
                 let _ = self.store.save(&record);
                 self.store
                     .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
@@ -1355,9 +1355,9 @@ where
         let result = rollback_record(&self.backend, &self.store, &mut record);
         if result.is_err() {
             record.state = TransactionState::RollbackFailure;
-            record
-                .diagnostics
-                .push(sanitize(&result.as_ref().err().unwrap().to_string()));
+            if let Err(rollback_error) = &result {
+                push_rollback_diagnostic(&mut record, rollback_error);
+            }
             if let Err(error) = self.store.save(&record) {
                 self.store
                     .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
@@ -1477,9 +1477,7 @@ where
         }
         if let Err(rollback_error) = rollback_record(backend, store, &mut record) {
             record.state = TransactionState::RollbackFailure;
-            record
-                .diagnostics
-                .push(sanitize(&rollback_error.to_string()));
+            push_rollback_diagnostic(&mut record, &rollback_error);
             let _ = store.save(&record);
             locks.release(&record.plan.ownership_domain, &record.plan.transaction_id);
             store.release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
@@ -1549,6 +1547,19 @@ fn token_hash(id: &str, token: &str) -> String {
 }
 fn sanitize(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).collect()
+}
+
+const MAX_ROLLBACK_DIAGNOSTICS: usize = 16;
+
+fn push_rollback_diagnostic(record: &mut TransactionRecord, error: &TransactionError) {
+    let diagnostic = sanitize(&error.to_string());
+    if record.diagnostics.last() == Some(&diagnostic) {
+        return;
+    }
+    while record.diagnostics.len() >= MAX_ROLLBACK_DIAGNOSTICS {
+        record.diagnostics.remove(0);
+    }
+    record.diagnostics.push(diagnostic);
 }
 
 fn safe_file_component(value: &str) -> String {
@@ -1869,6 +1880,44 @@ mod tests {
             ownership_fingerprint: "before".into(),
             deadline_seconds: 100,
         }
+    }
+
+    #[test]
+    fn repeated_rollback_diagnostics_are_deduplicated_and_bounded() {
+        let mut record = TransactionRecord {
+            plan: plan("bounded-diagnostics"),
+            state: TransactionState::RollbackFailure,
+            checkpoint: None,
+            confirmation_token_hash: None,
+            confirmed_deadline: None,
+            post_apply_fingerprint: None,
+            progress: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let repeated = TransactionError::Backend("backend unavailable".into());
+        for _ in 0..100 {
+            push_rollback_diagnostic(&mut record, &repeated);
+        }
+        assert_eq!(record.diagnostics.len(), 1);
+        for index in 0..(MAX_ROLLBACK_DIAGNOSTICS + 4) {
+            push_rollback_diagnostic(
+                &mut record,
+                &TransactionError::Backend(format!("failure {index}")),
+            );
+        }
+        assert_eq!(record.diagnostics.len(), MAX_ROLLBACK_DIAGNOSTICS);
+        assert_eq!(record.diagnostics.first().unwrap(), "backend: failure 4");
+        assert_eq!(record.diagnostics.last().unwrap(), "backend: failure 19");
+        record.diagnostics = (0..(MAX_ROLLBACK_DIAGNOSTICS + 5))
+            .map(|index| format!("legacy diagnostic {index}"))
+            .collect();
+        push_rollback_diagnostic(&mut record, &repeated);
+        assert_eq!(record.diagnostics.len(), MAX_ROLLBACK_DIAGNOSTICS);
+        assert_eq!(record.diagnostics.first().unwrap(), "legacy diagnostic 6");
+        assert_eq!(
+            record.diagnostics.last().unwrap(),
+            "backend: backend unavailable"
+        );
     }
 
     #[test]

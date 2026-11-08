@@ -457,6 +457,7 @@ fn run_recovery_worker(
         OsTokenSource,
     );
     let mut reported_orphans = std::collections::BTreeSet::new();
+    let mut rollback_retry_after = std::collections::BTreeMap::new();
     loop {
         let records = match store.list() {
             Ok(records) => records,
@@ -533,6 +534,31 @@ fn run_recovery_worker(
                         eprintln!(
                             "CRITICAL: rollback-failure transaction {id} has a mismatched recovery arm; operator remediation is required"
                         );
+                    } else {
+                        let retry_due =
+                            rollback_retry_after
+                                .get(id)
+                                .is_none_or(|last: &std::time::Instant| {
+                                    last.elapsed() >= std::time::Duration::from_secs(5)
+                                });
+                        if retry_due {
+                            rollback_retry_after.insert(id.to_owned(), std::time::Instant::now());
+                            match runner.rollback(id) {
+                                Ok(()) => {
+                                    let _ = std::fs::remove_file(path.with_extension("armed"));
+                                    let _ = std::fs::remove_file(&path);
+                                    rollback_retry_after.remove(id);
+                                    eprintln!(
+                                        "INFO: independent recovery supervisor completed rollback retry for transaction {id}"
+                                    );
+                                }
+                                Err(_) => {
+                                    eprintln!(
+                                        "CRITICAL: automatic rollback retry failed for transaction {id}; durable recovery record retained"
+                                    );
+                                }
+                            }
+                        }
                     }
                 } else {
                     let _ = std::fs::remove_file(path.with_extension("armed"));

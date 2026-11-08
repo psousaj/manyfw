@@ -371,9 +371,14 @@ Implemented commands:
   reading the one-time token from stdin, so it is not exposed in process
   arguments or command history.
   `manyfw recover --watch` runs the separately supervised worker; operators
-  must install/enable the packaged unit explicitly. After an unresolved,
-  visibly recorded rollback failure is investigated and its cause remediated,
-  an operator may retry that transaction with
+  must install/enable the packaged unit explicitly. If an automatic rollback
+  attempt fails, the worker retains the durable critical record and matching
+  recovery arm, then retries at a throttled interval only while the arm and
+  transaction identity still match. Each retry uses the same checkpoint and
+  ownership guards; repeated identical diagnostics are deduplicated and the
+  retained rollback diagnostic history is capped at 16 entries. A failure
+  remains visible and is never reported as recovered. If automatic recovery cannot resolve it, an operator must
+  investigate/remediate and may retry the transaction with
   `manyfw recover --rollback <transaction-id>`.
 
 Apply is not enabled by default and is not authorized on development/WSL or

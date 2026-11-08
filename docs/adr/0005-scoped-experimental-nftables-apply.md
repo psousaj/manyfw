@@ -420,3 +420,26 @@ controlled. OUTPUT, FORWARD, arbitrary destination CIDRs, Docker publication,
 and Tailscale interoperability are not supported by this acceptance. The
 Tailscale contract remains separate and pending. This decision is not a
 production release gate, deployment authorization, or claim of host protection.
+
+## Durable rollback retry reassessment (2026-11-08)
+
+After the #22 review found that a durable `RollbackFailure` was not retried by
+the independent recovery path, the core supervisor and actual systemd worker
+were updated to retry only when the persisted transaction-bound recovery arm
+matches. Retries are throttled; every retry still passes through the existing
+checkpoint, ownership, and expected-state guards. A failed retry leaves the
+critical record and arm in place and emits a critical diagnostic. The worker
+never reports recovery until scoped restoration is verified.
+
+The fresh KVM run
+`mfw-20261108T213653Z-912010` passed all 32 critical recovery scenarios and
+harness completion with the current release CLI (SHA-256
+`a9713fe876f796f18b7301c1277185a6bd95f1eab21f957ffb9af5bd0c46fc90`), exact
+151-file source-manifest binding, and verified guest destruction. In the
+rollback-retry scenario, the guest's real nftables command shim injected one
+rollback failure, then the independent systemd worker restored the scoped
+ManyFW table after the test trigger was removed; no CLI retry was issued. Its
+journal records both the failed attempt and successful retry. Standards, Spec,
+and dedicated Goal Architecture/Security reassessments are clean for this
+reviewed subset. This updates no production authorization and does not expand
+Docker, UFW, firewalld, Tailscale, non-systemd, OUTPUT, or FORWARD support.

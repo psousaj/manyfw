@@ -463,8 +463,8 @@ wait_table_absent "$ssh_id" 5 || die 'independent recovery failed during observe
 vm_ssh sudo rm -f /tmp/issue24-ssh-apply-result.json /tmp/issue24-ssh-apply-run.log
 mark ssh_loss_and_recovery Passed
 
-# Inject rollback failure before the real delete batch, confirm the durable
-# RollbackFailure record, then exercise the operator's exact-ID recovery retry.
+# Inject one real rollback failure, confirm the durable RollbackFailure record,
+# then let the independent systemd recovery supervisor retry it without CLI aid.
 partial_rollback_output=$(apply_plan /tmp/issue24-plan-v4.json 8)
 save_apply partial-rollback-apply "$partial_rollback_output"
 partial_rollback_id=$(APPLY_OUTPUT="$partial_rollback_output" python3 -c 'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
@@ -477,10 +477,15 @@ done
 [[ "$state" == rollback_failure ]] || die "rollback failure was not persisted: $state"
 vm_ssh sudo nft list table inet manyfw >"$evidence/rollback-failure-state.txt"
 vm_ssh sudo rm -f /run/manyfw-issue24/fail-rollback
-vm_ssh sudo manyfw recover --rollback "$partial_rollback_id" \
-    >"$evidence/rollback-retry.json"
-wait_table_absent "$partial_rollback_id" 5 || die 'operator rollback retry did not restore the checkpoint'
+wait_table_absent "$partial_rollback_id" 15 || die 'independent supervisor retry did not restore the checkpoint'
 wait_state rolled_back 10 "$partial_rollback_id" >/dev/null
+vm_ssh sudo journalctl -u manyfw-recovery.service --no-pager \
+    >"$evidence/rollback-retry-worker.log"
+grep -F "independent recovery supervisor completed rollback retry for transaction $partial_rollback_id" \
+    "$evidence/rollback-retry-worker.log" \
+    || die 'independent supervisor retry was not recorded in service evidence'
+vm_ssh sudo test ! -e "/var/lib/manyfw/arm/$partial_rollback_id.json" \
+    || die 'successful supervisor rollback retry left a recovery arm behind'
 mark rollback_failure_and_retry Passed
 
 # nft applies rollback atomically, so a partial in-kernel table restore is not

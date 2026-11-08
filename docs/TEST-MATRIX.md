@@ -106,6 +106,30 @@ critical scenarios and `harness_completion`. Both guests were destroyed.
 | Standards / Spec / Architecture-Security review | Clean for the bounded experimental subset | Disposition recorded in ADR-0005 |
 | Separate Tailscale compatibility | Pending; not claimed Passed or covered by generic acceptance | [`issue-24-linux-enforcement.md`](specs/issue-24-linux-enforcement.md) |
 
+### Current-source supervisor-retry runtime follow-up (2026-11-08)
+
+A fresh disposable Ubuntu 24.04.5 KVM recovery run exercised the current
+production CLI and independent systemd worker after the durable rollback retry
+change. All 32 critical scenarios plus harness completion passed; teardown was
+verified. The `rollback_failure_and_retry` case injected one real nftables
+rollback command failure, observed durable `RollbackFailure`, removed the
+test-only failure trigger, and verified that the independent worker—not a
+manual CLI command—restored the scoped ManyFW table and removed the recovery
+arm. The journal records both the critical failed attempt and the successful
+worker retry. The source manifest bound 151 files to the run, and the binary
+SHA-256 was `a9713fe876f796f18b7301c1277185a6bd95f1eab21f957ffb9af5bd0c46fc90`.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| Production supervisor rollback retry | Passed: 32/32 critical scenarios and harness completion; retry happens automatically after a transient real nftables failure | `/home/jose/.cache/manyfw-generic/evidence/issue24-production-mfw-20261108T213653Z-912010` |
+| Source and binary binding | Candidate base `57eb17b0bad317a2ae7e21d84aae7b8cd7b3fa23`; candidate worktree digest and 151-source manifest in metadata; binary SHA-256 recorded above | Same evidence directory |
+| Actual worker evidence | Failure and later independent retry success are both in `rollback-retry-worker.log`; terminal state, table removal and arm cleanup are asserted by the harness | Same evidence directory |
+| Guest teardown | Passed; disposable QEMU guest destroyed | `vm-down.log` in the evidence directory |
+
+This follow-up does not rewrite the earlier #24 run or its separate
+`tailscale_interoperability: NotApplicable` result, does not claim Tailscale
+compatibility, and leaves production authorization false.
+
 The candidate was HEAD `a002a08fa512fe7248c6913e123d97b478974c07`, with CLI
 SHA-256 `3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`.
 Acceptance is limited to the tested experimental INPUT operation/composition
