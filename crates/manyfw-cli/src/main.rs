@@ -87,6 +87,9 @@ enum Command {
     Recover {
         #[arg(long)]
         watch: bool,
+        /// Retry a recorded ownership-scoped rollback after operator remediation.
+        #[arg(long, value_name = "TRANSACTION_ID", conflicts_with = "watch")]
+        rollback: Option<String>,
     },
 }
 
@@ -144,7 +147,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Confirm { transaction_id } => {
             return run_confirm(transaction_id);
         }
-        Command::Recover { watch } => return run_recovery_worker(*watch),
+        Command::Recover { watch, rollback } => {
+            return run_recovery_worker(*watch, rollback.as_deref());
+        }
         Command::Plan {
             diagnostic_input: Some(input),
             ..
@@ -383,7 +388,8 @@ fn run_apply(
             "confirmation_token": confirmation.expose_secret(),
             "deadline_seconds": timeout,
             "experimental": true,
-            "environment": "disposable-kvm-guest"
+            "environment": "disposable-kvm-guest",
+            "composition": "INPUT only: drop is terminal for packets reaching this hook; accept does not override foreign drops or guarantee reachability"
         })
     );
     Ok(())
@@ -413,10 +419,29 @@ fn run_confirm(transaction_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_recovery_worker(watch: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_recovery_worker(
+    watch: bool,
+    rollback: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use manyfw_core::transaction::{
-        FileStore, LinuxClock, OsTokenSource, TransactionRunner, TransactionState, TransactionStore,
+        Clock, FileStore, LinuxClock, OsTokenSource, TransactionRunner, TransactionState,
+        TransactionStore,
     };
+    if let Some(transaction_id) = rollback {
+        nft_apply::NftBackend::require_guest()?;
+        let runner = TransactionRunner::new(
+            nft_apply::NftBackend,
+            FileStore::new("/var/lib/manyfw/transactions"),
+            LinuxClock,
+            OsTokenSource,
+        );
+        runner.rollback(transaction_id)?;
+        println!(
+            "{}",
+            serde_json::json!({"status":"rollback_retried", "transaction_id":transaction_id})
+        );
+        return Ok(());
+    }
     if !watch {
         return Err("the independent recovery service must run with --watch".into());
     }
@@ -431,50 +456,114 @@ fn run_recovery_worker(watch: bool) -> Result<(), Box<dyn std::error::Error>> {
         LinuxClock,
         OsTokenSource,
     );
+    let mut reported_orphans = std::collections::BTreeSet::new();
     loop {
-        let records = store.list()?;
+        let records = match store.list() {
+            Ok(records) => records,
+            Err(error) => {
+                eprintln!(
+                    "CRITICAL: recovery transaction store is unreadable; no firewall changes will be attempted: {error}"
+                );
+                return Err(error.into());
+            }
+        };
+        for record in &records {
+            // `Checkpoint` is persisted before the recovery request is written.
+            // Treating a missing arm at that point as corruption races a normal
+            // apply startup. Every state from Applying onward is reached only
+            // after arm_recovery acknowledged the durable request.
+            if !matches!(
+                record.state,
+                TransactionState::Applying
+                    | TransactionState::Verifying
+                    | TransactionState::Confirmation
+                    | TransactionState::Rollback
+                    | TransactionState::RollbackFailure
+            ) {
+                continue;
+            }
+            let transaction_id = record.plan.transaction_id.as_str();
+            let request_path = nft_apply::recovery_arm_path(&arm_dir, transaction_id);
+            if request_path.as_ref().is_none_or(|path| !path.exists())
+                && fail_closed_recovery_arm(&runner, transaction_id, record)
+            {
+                if let Some(path) = request_path {
+                    let _ = std::fs::remove_file(path.with_extension("armed"));
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
         for entry in std::fs::read_dir(&arm_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let request: serde_json::Value = match serde_json::from_slice(&std::fs::read(&path)?) {
-                Ok(request) => request,
-                Err(_) => continue,
-            };
-            let Some(id) = request["transaction_id"].as_str() else {
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
             let Some(record) = records
                 .iter()
                 .find(|record| record.plan.transaction_id == id)
             else {
+                if reported_orphans.insert(path.clone()) {
+                    eprintln!(
+                        "CRITICAL: orphaned recovery arm {id}; transaction state is missing and new firewall transactions are blocked"
+                    );
+                }
                 continue;
             };
-            if request["ownership_domain"] != record.plan.ownership_domain {
+            let request: serde_json::Value = match serde_json::from_slice(&std::fs::read(&path)?) {
+                Ok(request) => request,
+                Err(error) => {
+                    eprintln!("recovery arm for {id} is malformed: {error}");
+                    let resolved = (record.state.is_terminal()
+                        && record.state != TransactionState::RollbackFailure)
+                        || fail_closed_recovery_arm(&runner, id, record);
+                    if resolved {
+                        let _ = std::fs::remove_file(path.with_extension("armed"));
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    continue;
+                }
+            };
+            if record.state.is_terminal() {
+                if record.state == TransactionState::RollbackFailure {
+                    if !nft_apply::recovery_arm_matches_record(&request, record) {
+                        eprintln!(
+                            "CRITICAL: rollback-failure transaction {id} has a mismatched recovery arm; operator remediation is required"
+                        );
+                    }
+                } else {
+                    let _ = std::fs::remove_file(path.with_extension("armed"));
+                    let _ = std::fs::remove_file(&path);
+                }
                 continue;
             }
-            let Some(checkpoint) = record.checkpoint.as_ref() else {
-                continue;
-            };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            let Some(deadline_wall) = request["deadline_wall"].as_u64() else {
-                continue;
-            };
-            let deadline_seconds = record.plan.deadline_seconds.clamp(1, 300);
-            let expected_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-            if !checkpoint.is_intact()
-                || request["checkpoint_digest"] != checkpoint.integrity
-                || request["deadline_seconds"] != deadline_seconds
-                || request["boot_id"] != expected_boot.trim()
-                || deadline_wall < now
-                || deadline_wall > now.saturating_add(deadline_seconds).saturating_add(5)
+            let checkpoint = record.checkpoint.as_ref();
+            let clock_reading = LinuxClock.now();
+            let request_expired = match (record.confirmed_deadline.as_ref(), clock_reading.as_ref())
             {
+                (Some(deadline), Ok(reading)) => deadline.is_expired_at(reading),
+                _ => {
+                    eprintln!("recovery clock/deadline unavailable; expiring conservatively");
+                    true
+                }
+            };
+            let arm_matches_record = nft_apply::recovery_arm_matches_record(&request, record);
+            if checkpoint.is_none_or(|checkpoint| !checkpoint.is_intact()) || !arm_matches_record {
+                // A mismatched or corrupt arm is not permission to continue
+                // mutation. Route the persisted transaction through its normal
+                // guarded recovery path so it either restores safely or remains
+                // a durable critical failure; never silently strand it.
+                if fail_closed_recovery_arm(&runner, id, record) {
+                    let _ = std::fs::remove_file(path.with_extension("armed"));
+                    let _ = std::fs::remove_file(&path);
+                }
                 continue;
             }
+            let checkpoint = checkpoint.expect("validated checkpoint exists");
+            let deadline_wall = request["deadline_wall"].as_u64().unwrap_or_default();
             let ack_path = arm_dir.join(format!("{id}.armed"));
             if !ack_path.exists() {
                 let ack = serde_json::json!({
@@ -488,20 +577,7 @@ fn run_recovery_worker(watch: bool) -> Result<(), Box<dyn std::error::Error>> {
                 });
                 write_worker_file(&ack_path, serde_json::to_vec(&ack)?)?;
             }
-            if record.state.is_terminal() {
-                if record.state != TransactionState::RollbackFailure {
-                    let _ = std::fs::remove_file(&ack_path);
-                    let _ = std::fs::remove_file(&path);
-                }
-                continue;
-            }
-            let current_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-            let rebooted = request["boot_id"].as_str() != Some(current_boot.trim());
-            let expired = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs()
-                >= request["deadline_wall"].as_u64().unwrap_or(0);
-            if rebooted || expired {
+            if request_expired {
                 let result = if record.state.may_have_mutated() {
                     runner.rollback(id)
                 } else {
@@ -514,6 +590,36 @@ fn run_recovery_worker(watch: bool) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+fn fail_closed_recovery_arm<B, S, C, T>(
+    runner: &manyfw_core::transaction::TransactionRunner<B, S, C, T>,
+    id: &str,
+    record: &manyfw_core::transaction::TransactionRecord,
+) -> bool
+where
+    B: manyfw_core::transaction::TransactionBackend,
+    S: manyfw_core::transaction::TransactionStore,
+    C: manyfw_core::transaction::Clock,
+    T: manyfw_core::transaction::TokenSource,
+{
+    if record.state.is_terminal() {
+        return false;
+    }
+    let result = if record.state.may_have_mutated() {
+        runner.rollback(id)
+    } else {
+        runner.abort(id)
+    };
+    match result {
+        Ok(()) => true,
+        Err(manyfw_core::transaction::TransactionError::Busy)
+        | Err(manyfw_core::transaction::TransactionError::InvalidState) => false,
+        Err(error) => {
+            eprintln!("invalid recovery arm; guarded recovery remains unresolved: {error}");
+            false
+        }
     }
 }
 
@@ -1337,7 +1443,71 @@ mod tests {
     use super::{
         DiscoveryFormat, escape_terminal_text, render_discovery_human, resolve_discovery_format,
     };
+    use crate::nft_apply::recovery_arm_matches_record;
     use manyfw_core::snapshot::ObservationSnapshot;
+    use manyfw_core::transaction::{
+        Checkpoint, ConfirmationDeadline, TransactionPlan, TransactionRecord, TransactionState,
+    };
+
+    #[test]
+    fn recovery_arm_is_bound_to_persisted_deadline_not_current_wall_clock() {
+        let deadline = ConfirmationDeadline {
+            wall_clock_deadline_seconds: 1_060,
+            monotonic_deadline_seconds: 460,
+            boot_id: "boot".into(),
+        };
+        let checkpoint = Checkpoint::new(
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeSet::new(),
+            "owner-fingerprint".into(),
+        );
+        let record = TransactionRecord {
+            plan: TransactionPlan {
+                transaction_id: "transaction-1".into(),
+                ownership_domain: "nft:inet:input".into(),
+                operations: Vec::new(),
+                preconditions: Vec::new(),
+                ownership_fingerprint: "owner-fingerprint".into(),
+                deadline_seconds: 60,
+            },
+            state: TransactionState::Confirmation,
+            checkpoint: Some(checkpoint.clone()),
+            confirmation_token_hash: None,
+            confirmed_deadline: Some(deadline),
+            post_apply_fingerprint: None,
+            progress: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let request = serde_json::json!({
+            "transaction_id": "transaction-1",
+            "ownership_domain": "nft:inet:input",
+            "deadline_seconds": 60,
+            "deadline_wall": 1_060,
+            "checkpoint_digest": checkpoint.integrity,
+            "boot_id": "boot",
+        });
+        assert!(recovery_arm_matches_record(&request, &record));
+
+        for (field, bad_value) in [
+            ("transaction_id", serde_json::json!("other")),
+            ("ownership_domain", serde_json::json!("nft:other:input")),
+            ("deadline_seconds", serde_json::json!(61)),
+            ("deadline_wall", serde_json::json!(1_061)),
+            ("checkpoint_digest", serde_json::json!("tampered")),
+            ("boot_id", serde_json::json!("different-boot")),
+        ] {
+            let mut tampered = request.clone();
+            tampered[field] = bad_value;
+            assert!(!recovery_arm_matches_record(&tampered, &record), "{field}");
+        }
+
+        let mut missing_deadline = request;
+        missing_deadline
+            .as_object_mut()
+            .unwrap()
+            .remove("deadline_wall");
+        assert!(!recovery_arm_matches_record(&missing_deadline, &record));
+    }
 
     #[test]
     fn automatic_discovery_format_follows_stdout_destination() {

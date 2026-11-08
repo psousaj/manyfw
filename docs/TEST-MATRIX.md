@@ -11,7 +11,7 @@ Statuses are intentionally explicit:
 all critical VM scenarios to be **Passed**; any `NotApplicable` or `Skipped`
 critical scenario blocks release approval.
 
-## Current checkout evidence
+## Local fixture evidence (not the latest production-code VM gate)
 
 | Scenario | Status | Evidence |
 | --- | --- | --- |
@@ -46,7 +46,101 @@ planner packet test translates typed plan operations in a test fixture,
 configures nftables only inside a separate KVM guest, and checks that planning
 leaves that namespace's ruleset unchanged.
 
-## Disposable VM execution
+## Issue #24 final generic Linux evidence
+
+The final candidate for the owner-reconciled generic Linux contract used two
+disposable Ubuntu 24.04.5 KVM guests and the same release CLI. Packet run
+`issue24-linux-packet-1794162697-855068` passed 104/104 required cases, including
+real packet outcomes, IPv6/TCP and IPv4/UDP external accept/drop composition at
+both relative priorities, and flowtable refusal
+before mutation. Recovery run `mfw-20261108T153526Z-812910` passed all 32 named
+critical scenarios and `harness_completion`. Both guests were destroyed.
+
+| Gate | Status | Evidence |
+| --- | --- | --- |
+| Generic Linux INPUT packet contract | Passed (104/104); packet gate eligible, not release eligible | `/home/jose/.cache/manyfw-packets/evidence/issue24-linux-packet-1794162697-855068` |
+| Production-code recovery | Passed (32 critical + harness completion); recovery eligible, not release eligible | `/home/jose/.cache/manyfw-generic/evidence/issue24-production-mfw-20261108T153526Z-812910` |
+| Combined evidence aggregate | `evidence_gates_passed: true`; acceptance and production authorization remain false in this evidence-only receipt | `/home/jose/.cache/manyfw-issue24/acceptance-20261108-final-104.json` |
+| Standards / Spec / Architecture-Security review | Clean for the bounded experimental subset | Disposition recorded in ADR-0005 |
+| Separate Tailscale compatibility | Pending; not claimed Passed or covered by generic acceptance | [`issue-24-linux-enforcement.md`](specs/issue-24-linux-enforcement.md) |
+
+The candidate was HEAD `a002a08fa512fe7248c6913e123d97b478974c07`, with CLI
+SHA-256 `3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`.
+Acceptance is limited to the tested experimental INPUT operation/composition
+subset. Other offload, unobservable and bypass paths remain unsupported/unknown;
+OUTPUT, FORWARD, arbitrary destination CIDRs, Docker publication, and Tailscale
+interoperability are not covered. No production or development-host operation
+is authorized. The evidence aggregate validates producer data only and cannot
+self-assert review or approval.
+
+## Historical #24 production-code KVM candidate evidence
+
+### Historical contract reconciliation (superseded by final evidence above)
+
+At the time of the immutable candidate below, the [issue #24 Linux enforcement
+contract](specs/issue-24-linux-enforcement.md) defined a generic packet/recovery
+acceptance and separate local Tailscale compatibility contract. The packet and
+review gates were then pending; the run below retains its original statuses
+and false release gate. The final evidence and review are recorded above. No
+Tailscale scenario has been relabeled or specialized coverage discarded.
+
+| New contract (status at historical candidate) | Status then | Evidence then required |
+| --- | --- | --- |
+| Generic Linux INPUT packet semantics and external accept/drop composition | Pending | Fresh candidate-bound real CLI/worker packet suite covering the linked contract |
+| Expanded operation/composition architecture/security review | Pending | Dedicated source-and-runtime review after remediation |
+| Local Tailscale compatibility, including disconnect/change recovery | NotApplicable (historical); new validation pending | Authorized disposable tailnet and real external peer; see separate linked contract |
+
+### Immutable historical candidate
+
+Final retention run `mfw-20261107T234657Z-576778` used a disposable Ubuntu 24.04.5 LTS
+KVM guest. Evidence directory:
+`/home/jose/.cache/manyfw-issue24/evidence/issue24-production-mfw-20261107T234657Z-576778`
+(`metadata.txt`, `README.md`, `status.tsv`, and `issue24-release-gate.json`).
+
+- Candidate HEAD: `a002a08fa512fe7248c6913e123d97b478974c07`.
+- Tested worktree SHA-256: `20631b7b68bdec08aee94d2e192b67760c7d4654756e255ca606823ec436b505`.
+- Tested CLI SHA-256: `ba6a585bb00b1e665a2d58e8d690bcf30ecd6c865bad88a427e0e422df2a3de9`.
+
+This is **worktree-bound evidence captured before this documentation update**,
+not evidence that the tested changes were committed at the candidate HEAD.
+It supersedes earlier failed candidates for this candidate assessment; it does
+not erase their failures or turn fixture evidence into production-code evidence.
+
+Counting `critical_scenarios` in the machine gate, excluding the separate
+`harness_completion` entry, gives **32 Passed**, **1 NotApplicable**, and no
+Failed or Skipped named scenarios. `harness_completion` is separately **Passed**.
+Both Docker iptables and native nftables passed, along with UFW/firewalld
+refusal, IPv4/IPv6, recovery/reboot/checkpoint/token cases, manager concurrency
+and divergence, SSH loss, and the no-global-or-table-flush invariant.
+These results are limited to the recorded guest environment and package versions.
+
+This supersedes the pending final retention validation: persistent
+`/var/log/manyfw-issue24/production-batches.log`, archived as
+`production-nft-batches.txt`, retains pre-reboot batches and the exclusive
+checkpoint restoration at lines 115–117 (`create table`, then explicit chain
+and checkpoint rule). Guest destruction was verified. The CLI digest is
+unchanged from the preceding historical run. At that time, final
+source-and-runtime review and new packet evidence remained pending; the final
+review and evidence are recorded in the current section above.
+
+The sole historical gate blocker is `tailscale_interoperability: NotApplicable`: no
+authorized disposable tailnet credentials or external peer were available.
+`release_eligible` is **false**. The preceding source-only remediation review was clean,
+but that historical gate was **not clean** while its required environment and
+evidence were missing. At that time, generic acceptance awaited the new packet
+suite and review; those gates are now complete for the bounded experimental
+INPUT contract as documented above. The historical failure and false release
+gate are unchanged. Issue #24 remains OPEN, and #8 must not start before its #7
+prerequisites are verified. No production approval, production deployment, or
+development-host firewall mutation is implied.
+
+The production nftables batch is atomic. Its partial-apply scenario tests
+truncated-input refusal without partial kernel state; ambiguous post-commit
+apply/rollback errors and retry are separate scenarios. It does not establish
+production partial in-kernel execution or inherit the fixture's partial rollback
+claim.
+
+## Disposable VM fixture execution (historical scope)
 
 `scripts/integration/recovery-vm-test.sh` provisions a fresh QEMU/KVM Ubuntu
 guest using the existing cloud-image harness. It installs nftables and
@@ -65,15 +159,16 @@ systemd because this test guest provides it; this does not establish that a
 production supervisor can rely on systemd. It validates test-fixture behavior
 only. Docker's legacy/native modes, Tailscale, UFW/firewalld coexistence,
 concurrent external-manager changes, and real ManyFW CLI/supervisor failure
-remain unvalidated and block enforcement approval. No success claim should be
-inferred for those environments.
+were unvalidated by this fixture. See the latest production-code candidate
+section above for subsequent evidence, the historical Tailscale blocker and
+the current generic/specialized contract separation.
 
 The ten-scenario validator is deliberately a **fixture-gate validator**, not
 the full issue #24 or enforcement-release gate. It does not cover a ManyFW
 apply CLI or production supervisor, confirmation/token/checkpoint behavior,
 manager coexistence, or the listed Docker/Tailscale/UFW/firewalld cases. Those
-remain NotApplicable in the matrix above and block any production enforcement
-approval. Before #23 can implement production mutation, reviewers must approve
+remain outside this fixture's coverage; the latest production-code candidate
+gate above records their subsequent status. Before #23 can implement production mutation, reviewers must approve
 the OS-supervisor deployment contract and ownership/capability boundaries;
 this VM fixture does not choose or authorize them.
 

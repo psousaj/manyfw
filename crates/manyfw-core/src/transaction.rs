@@ -612,7 +612,7 @@ impl ConfirmationDeadline {
         }
     }
 
-    fn is_expired_at(&self, reading: &ClockReading) -> bool {
+    pub fn is_expired_at(&self, reading: &ClockReading) -> bool {
         self.boot_id.is_empty()
             || self.boot_id != reading.boot_id
             || reading.monotonic_seconds >= self.monotonic_deadline_seconds
@@ -709,16 +709,50 @@ impl TokenSource for OsTokenSource {
 }
 
 pub trait TransactionBackend: Send + Sync {
+    /// Exceptional reboot recovery. Return true only after validating the full
+    /// record, persisted deadline/arm and a real boot change, restoring only
+    /// absent owned resources, and verifying the scoped restored state. Foreign
+    /// whole-ruleset equality is deliberately not required on this path.
+    /// Unsupported backends must refuse authorization without mutation.
+    fn restore_checkpoint_after_reboot(&self, _record: &TransactionRecord) -> Result<bool> {
+        Ok(false)
+    }
     fn preflight(&self, plan: &TransactionPlan) -> Result<()>;
     fn checkpoint(&self, plan: &TransactionPlan) -> Result<Checkpoint>;
     /// Arm independent recovery only after the durable checkpoint exists.
-    fn arm_recovery(&self, _plan: &TransactionPlan, _checkpoint: &Checkpoint) -> Result<()> {
+    fn arm_recovery(
+        &self,
+        _plan: &TransactionPlan,
+        _checkpoint: &Checkpoint,
+        _deadline: &ConfirmationDeadline,
+    ) -> Result<()> {
         Ok(())
     }
     fn current_fingerprint(&self, domain: &str) -> Result<String>;
+    /// Whether the backend's owned state is already exactly at the checkpoint.
+    /// Backends may recognize a safe no-op restoration even when unrelated
+    /// foreign state changed, but must never mutate that foreign state.
+    fn is_checkpoint_restored(
+        &self,
+        plan: &TransactionPlan,
+        _checkpoint: &Checkpoint,
+    ) -> Result<bool> {
+        Ok(self.current_fingerprint(&plan.ownership_domain)? == plan.ownership_fingerprint)
+    }
     fn apply(&self, plan: &TransactionPlan) -> Result<ApplyReport>;
     fn verify(&self, plan: &TransactionPlan) -> Result<()>;
     fn rollback(&self, checkpoint: &Checkpoint) -> Result<()>;
+    /// Recover an interrupted apply only when the backend can prove that the
+    /// current owned state is the complete state described by `plan`.
+    /// Before any mutation, also validate checkpoint-bound foreign state;
+    /// missing post-apply metadata does not waive concurrency preconditions.
+    fn rollback_interrupted(
+        &self,
+        _plan: &TransactionPlan,
+        _checkpoint: &Checkpoint,
+    ) -> Result<()> {
+        Err(TransactionError::PostApplyFingerprintUnavailable)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -896,7 +930,8 @@ where
         result
     }
 
-    fn start_locked(&self, plan: TransactionPlan) -> Result<ConfirmationToken> {
+    fn start_locked(&self, mut plan: TransactionPlan) -> Result<ConfirmationToken> {
+        plan.deadline_seconds = plan.deadline_seconds.min(300);
         let mut record = TransactionRecord {
             plan,
             state: TransactionState::Preflight,
@@ -945,6 +980,12 @@ where
         }) {
             return self.fail_before_mutation(record, TransactionError::OwnershipChanged);
         }
+        let reading = match self.clock.now() {
+            Ok(reading) => reading,
+            Err(error) => return self.fail_before_mutation(record, error),
+        };
+        let deadline = ConfirmationDeadline::after(&reading, record.plan.deadline_seconds);
+        record.confirmed_deadline = Some(deadline.clone());
         self.store.save(&record)?;
         if let Err(error) = self.backend.arm_recovery(
             &record.plan,
@@ -952,6 +993,7 @@ where
                 .checkpoint
                 .as_ref()
                 .ok_or(TransactionError::CorruptCheckpoint)?,
+            &deadline,
         ) {
             record.state = TransactionState::Failure;
             record.diagnostics.push(sanitize(&error.to_string()));
@@ -968,9 +1010,19 @@ where
         if current != record.plan.ownership_fingerprint {
             return self.fail_before_mutation(record, TransactionError::OwnershipChanged);
         }
+        // Arming and live inspection consume the already persisted deadline.
+        // Never extend that deadline or enter Applying with an expired arm.
+        if let Err(error) = self.require_unexpired_deadline(&record) {
+            return self.fail_before_mutation(record, error);
+        }
         record.state = TransactionState::Applying;
         record.progress.push("apply_started".into());
         self.store.save(&record)?;
+        // Durable persistence can itself stall. Recheck immediately before
+        // the first backend mutation, including boot/clock uncertainty.
+        if let Err(error) = self.require_unexpired_deadline(&record) {
+            return self.fail_before_mutation(record, error);
+        }
         let report = match self.backend.apply(&record.plan) {
             Ok(report) => report,
             Err(error) => {
@@ -1026,19 +1078,23 @@ where
             Err(error) => return self.recover_record(record, error),
         };
         record.confirmation_token_hash = Some(token_hash(&record.plan.transaction_id, &token));
-        let reading = match self.clock.now() {
-            Ok(reading) => reading,
-            Err(error) => return self.recover_record(record, error),
-        };
-        record.confirmed_deadline = Some(ConfirmationDeadline::after(
-            &reading,
-            record.plan.deadline_seconds,
-        ));
         record.state = TransactionState::Confirmation;
         if let Err(error) = self.store.save(&record) {
             return self.recover_record(record, error);
         }
         Ok(ConfirmationToken(token))
+    }
+
+    fn require_unexpired_deadline(&self, record: &TransactionRecord) -> Result<()> {
+        let deadline = record
+            .confirmed_deadline
+            .as_ref()
+            .ok_or(TransactionError::Expired)?;
+        let reading = self.clock.now()?;
+        if deadline.is_expired_at(&reading) {
+            return Err(TransactionError::Expired);
+        }
+        Ok(())
     }
 
     fn fail_before_mutation(
@@ -1449,26 +1505,28 @@ where
     if checkpoint.owner_fingerprint != record.plan.ownership_fingerprint {
         return Err(TransactionError::OwnershipChanged);
     }
-    if record.post_apply_fingerprint.is_none() {
-        return Err(TransactionError::PostApplyFingerprintUnavailable);
-    }
     if !checkpoint.is_intact() {
         return Err(TransactionError::CorruptCheckpoint);
     }
-    let expected = record
-        .post_apply_fingerprint
-        .as_ref()
-        .ok_or(TransactionError::PostApplyFingerprintUnavailable)?;
-    let current = backend.current_fingerprint(&record.plan.ownership_domain)?;
-    if current == record.plan.ownership_fingerprint {
+    if backend.restore_checkpoint_after_reboot(record)? {
         record.state = TransactionState::RolledBack;
         store.save(record)?;
         return Ok(());
     }
-    if current != *expected {
-        return Err(TransactionError::OwnershipChanged);
+    if backend.is_checkpoint_restored(&record.plan, checkpoint)? {
+        record.state = TransactionState::RolledBack;
+        store.save(record)?;
+        return Ok(());
     }
-    backend.rollback(checkpoint)?;
+    let current = backend.current_fingerprint(&record.plan.ownership_domain)?;
+    if let Some(expected) = record.post_apply_fingerprint.as_ref() {
+        if current != *expected {
+            return Err(TransactionError::OwnershipChanged);
+        }
+        backend.rollback(checkpoint)?;
+    } else {
+        backend.rollback_interrupted(&record.plan, checkpoint)?;
+    }
     if backend.current_fingerprint(&record.plan.ownership_domain)?
         != record.plan.ownership_fingerprint
     {
@@ -1516,6 +1574,79 @@ mod tests {
         assert!(!debug.contains("sensitive-test-token"));
     }
 
+    #[test]
+    fn authorized_reboot_restoration_does_not_require_old_foreign_ruleset() {
+        let backend = Backend::new();
+        let store = Arc::new(MemoryStore::default());
+        let runner = TransactionRunner::new(
+            backend.clone(),
+            store.clone(),
+            TestClock::at(100),
+            TestTokens,
+        );
+        runner.start(plan("reboot-scoped")).unwrap();
+        *backend.current.lock().unwrap() = "new-boot-foreign-state".into();
+        backend.reboot_recovery.store(true, Ordering::Relaxed);
+        runner.rollback("reboot-scoped").unwrap();
+        assert_eq!(
+            store.load("reboot-scoped").unwrap().unwrap().state,
+            TransactionState::RolledBack
+        );
+        assert_eq!(
+            *backend.current.lock().unwrap(),
+            "restored-owned-with-new-foreign-state"
+        );
+    }
+
+    #[test]
+    fn default_reboot_refusal_retains_whole_ruleset_divergence_guard() {
+        let backend = Backend::new();
+        let store = Arc::new(MemoryStore::default());
+        let runner = TransactionRunner::new(
+            backend.clone(),
+            store.clone(),
+            TestClock::at(100),
+            TestTokens,
+        );
+        runner.start(plan("divergent")).unwrap();
+        *backend.current.lock().unwrap() = "missing-owned-or-divergent-foreign".into();
+        assert!(matches!(
+            runner.rollback("divergent"),
+            Err(TransactionError::OwnershipChanged)
+        ));
+        assert_eq!(
+            store.load("divergent").unwrap().unwrap().state,
+            TransactionState::RollbackFailure
+        );
+        assert_eq!(
+            *backend.current.lock().unwrap(),
+            "missing-owned-or-divergent-foreign"
+        );
+    }
+
+    #[test]
+    fn corrupt_checkpoint_cannot_reach_authorized_reboot_hook() {
+        let backend = Backend::new();
+        let store = Arc::new(MemoryStore::default());
+        let runner = TransactionRunner::new(
+            backend.clone(),
+            store.clone(),
+            TestClock::at(100),
+            TestTokens,
+        );
+        runner.start(plan("corrupt-reboot")).unwrap();
+        let mut record = store.load("corrupt-reboot").unwrap().unwrap();
+        record.checkpoint.as_mut().unwrap().integrity = "corrupt".into();
+        store.save(&record).unwrap();
+        backend.reboot_recovery.store(true, Ordering::Relaxed);
+        *backend.current.lock().unwrap() = "new-boot".into();
+        assert!(matches!(
+            runner.rollback("corrupt-reboot"),
+            Err(TransactionError::CorruptCheckpoint)
+        ));
+        assert_eq!(*backend.current.lock().unwrap(), "new-boot");
+    }
+
     #[derive(Clone)]
     struct TestClock(ClockReading);
     impl TestClock {
@@ -1536,6 +1667,116 @@ mod tests {
             Ok(self.0.clone())
         }
     }
+
+    struct AdvancingClock(Mutex<std::collections::VecDeque<Result<ClockReading>>>);
+    impl Clock for AdvancingClock {
+        fn now(&self) -> Result<ClockReading> {
+            let mut readings = self.0.lock().unwrap();
+            if readings.len() > 1 {
+                readings.pop_front().unwrap()
+            } else {
+                readings.front().unwrap().clone()
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_expiring_after_arm_or_applying_persistence_never_mutates() {
+        for readings in [vec![100, 101], vec![100, 100, 101]] {
+            let backend = Backend::new();
+            let store = Arc::new(MemoryStore::default());
+            let clock = AdvancingClock(Mutex::new(
+                readings
+                    .into_iter()
+                    .map(|seconds| Ok(TestClock::at(seconds).0))
+                    .collect(),
+            ));
+            let runner = TransactionRunner::new(backend.clone(), store.clone(), clock, TestTokens);
+            let mut short = plan("expired-before-mutation");
+            short.deadline_seconds = 1;
+            assert!(matches!(
+                runner.start(short),
+                Err(TransactionError::Expired)
+            ));
+            assert_eq!(backend.apply_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(*backend.current.lock().unwrap(), "before");
+            let failed = store.load("expired-before-mutation").unwrap().unwrap();
+            assert_eq!(failed.state, TransactionState::Failure);
+            assert!(failed.confirmation_token_hash.is_none());
+            assert!(failed.post_apply_fingerprint.is_none());
+            assert_eq!(
+                failed
+                    .confirmed_deadline
+                    .unwrap()
+                    .wall_clock_deadline_seconds,
+                101
+            );
+            // Failure is terminal: the worker can discard its arm without
+            // rollback, and another transaction can acquire the same domain.
+            runner.start(plan("next-after-expired-arm")).unwrap();
+            assert_eq!(backend.apply_calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn uncertain_clock_after_arming_never_mutates() {
+        for final_reading in [
+            Err(TransactionError::Backend("clock unavailable".into())),
+            Ok(TestClock::with_boot(100, 100, "new-boot").0),
+        ] {
+            for after_persistence in [false, true] {
+                let backend = Backend::new();
+                let store = Arc::new(MemoryStore::default());
+                let mut readings = std::collections::VecDeque::from([Ok(TestClock::at(100).0)]);
+                if after_persistence {
+                    readings.push_back(Ok(TestClock::at(100).0));
+                }
+                readings.push_back(final_reading.clone());
+                let runner = TransactionRunner::new(
+                    backend.clone(),
+                    store.clone(),
+                    AdvancingClock(Mutex::new(readings)),
+                    TestTokens,
+                );
+                assert!(
+                    runner
+                        .start(plan("clock-uncertain-before-mutation"))
+                        .is_err()
+                );
+                assert_eq!(backend.apply_calls.load(Ordering::Relaxed), 0);
+                assert_eq!(*backend.current.lock().unwrap(), "before");
+                assert_eq!(
+                    store
+                        .load("clock-uncertain-before-mutation")
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    TransactionState::Failure
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_duration_deadline_refuses_before_mutation() {
+        let backend = Backend::new();
+        let store = Arc::new(MemoryStore::default());
+        let runner = TransactionRunner::new(
+            backend.clone(),
+            store.clone(),
+            TestClock::at(100),
+            TestTokens,
+        );
+        let mut immediate = plan("zero-duration");
+        immediate.deadline_seconds = 0;
+        assert_eq!(runner.start(immediate), Err(TransactionError::Expired));
+        assert_eq!(backend.apply_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            store.load("zero-duration").unwrap().unwrap().state,
+            TransactionState::Failure
+        );
+        runner.start(plan("after-zero-duration")).unwrap();
+    }
     struct TestTokens;
     impl TokenSource for TestTokens {
         fn token(&self) -> Result<String> {
@@ -1545,20 +1786,33 @@ mod tests {
 
     #[derive(Clone)]
     struct Backend {
+        apply_calls: Arc<std::sync::atomic::AtomicUsize>,
         current: Arc<Mutex<String>>,
         partial: Arc<AtomicBool>,
         fail_rollback: Arc<AtomicBool>,
+        reboot_recovery: Arc<AtomicBool>,
     }
     impl Backend {
         fn new() -> Self {
             Self {
+                apply_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 current: Arc::new(Mutex::new("before".into())),
                 partial: Arc::new(AtomicBool::new(false)),
                 fail_rollback: Arc::new(AtomicBool::new(false)),
+                reboot_recovery: Arc::new(AtomicBool::new(false)),
             }
         }
     }
     impl TransactionBackend for Backend {
+        fn restore_checkpoint_after_reboot(&self, record: &TransactionRecord) -> Result<bool> {
+            if !self.reboot_recovery.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            assert!(record.checkpoint.as_ref().unwrap().is_intact());
+            assert!(record.confirmed_deadline.is_some());
+            *self.current.lock().unwrap() = "restored-owned-with-new-foreign-state".into();
+            Ok(true)
+        }
         fn preflight(&self, _: &TransactionPlan) -> Result<()> {
             Ok(())
         }
@@ -1573,6 +1827,7 @@ mod tests {
             Ok(self.current.lock().unwrap().clone())
         }
         fn apply(&self, _: &TransactionPlan) -> Result<ApplyReport> {
+            self.apply_calls.fetch_add(1, Ordering::Relaxed);
             *self.current.lock().unwrap() = "after".into();
             Ok(ApplyReport {
                 complete: !self.partial.load(Ordering::Relaxed),

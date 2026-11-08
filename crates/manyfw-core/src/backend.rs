@@ -569,6 +569,50 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     for rule in &input.policy.rules {
         policy_priorities.insert(rule.priority);
         let paths = match &rule.destination {
+            Selector::Host(selector) if selector.starts_with("local-address:") => {
+                let address = selector
+                    .strip_prefix("local-address:")
+                    .and_then(|value| value.parse::<IpAddr>().ok());
+                match address.filter(|address| {
+                    !address.is_unspecified()
+                        && !address.is_multicast()
+                        && host_snapshot
+                            .addresses
+                            .records
+                            .iter()
+                            .any(|record| record.address == *address)
+                        && rule_families(&input.policy, rule).contains(&if address.is_ipv4() {
+                            AddressFamily::Ipv4
+                        } else {
+                            AddressFamily::Ipv6
+                        })
+                }) {
+                    Some(address) => vec![(
+                        if address.is_ipv4() {
+                            AddressFamily::Ipv4
+                        } else {
+                            AddressFamily::Ipv6
+                        },
+                        PacketPath::Input,
+                        None,
+                        None,
+                        None,
+                        Some(address),
+                        Vec::new(),
+                    )],
+                    None => {
+                        let detail = format!(
+                            "local Host address binding for rule {} is missing, invalid, or family-incompatible",
+                            rule.id
+                        );
+                        reasons.push(BlockReason::Unknown {
+                            detail: detail.clone(),
+                        });
+                        unknowns.push(detail);
+                        Vec::new()
+                    }
+                }
+            }
             Selector::Docker(selector) => docker_rule_paths(
                 rule,
                 selector,
@@ -1528,6 +1572,62 @@ mod tests {
                 capabilities,
                 family_limitations: BTreeMap::new(),
             },
+        }
+    }
+
+    #[test]
+    fn observed_local_host_binding_is_exact_and_missing_binding_blocks() {
+        for address in ["192.0.2.1", "fd24:0::1"] {
+            let address: IpAddr = address.parse().unwrap();
+            let mut fixture = input(CapabilityState::Supported);
+            fixture.policy.rules[0].destination =
+                Selector::Host(format!("local-address:{address}"));
+            let unresolved = Planner::plan(&fixture);
+            assert!(matches!(
+                unresolved.applicability,
+                PlanApplicability::Blocked { .. }
+            ));
+            let mut host = fixture.observation.host();
+            host.addresses.records.push(host::InterfaceAddress {
+                interface_index: None,
+                interface_name: None,
+                address,
+                prefix_length: Some(if address.is_ipv4() { 24 } else { 64 }),
+                scope: host::AddressScope::Global,
+            });
+            fixture.observation =
+                snapshot::ObservationSnapshot::compose(fixture.observation.docker(), host);
+            let resolved = Planner::plan(&fixture);
+            assert_eq!(resolved.applicability, PlanApplicability::Applicable);
+            let bindings = resolved
+                .operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    PlanOperation::EnsureRule {
+                        host_address,
+                        family,
+                        ..
+                    } => Some((**host_address, *family)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                bindings,
+                vec![(
+                    Some(address),
+                    if address.is_ipv4() {
+                        AddressFamily::Ipv4
+                    } else {
+                        AddressFamily::Ipv6
+                    }
+                )]
+            );
+            fixture.policy.rules[0].destination =
+                Selector::Host("local-address:not-an-address".into());
+            assert!(matches!(
+                Planner::plan(&fixture).applicability,
+                PlanApplicability::Blocked { .. }
+            ));
         }
     }
 

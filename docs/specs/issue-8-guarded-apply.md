@@ -48,7 +48,10 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
   that must not be overwritten. Never restore a global snapshot blindly.
 - Use a supervisor independent of the CLI and business/discovery process. It
   must recover pending state after terminal loss and reboot, without assuming
-  systemd is present.
+  systemd is present in the general architecture. The current ADR-0005
+  experimental subset deliberately requires verified systemd and refuses
+  non-systemd Apply. This bounded exception is not completion of the parent's
+  portable supervisor requirement or a Linux portability claim.
 - Use cryptographically unpredictable transaction-bound confirmation tokens;
   persist deadlines, reject expired/wrong tokens, make confirmation idempotent,
   and never log tokens.
@@ -72,7 +75,10 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
   supervisor failure, SSH loss, reboot during applying/verifying/confirmation,
   partial apply, partial rollback, corrupt checkpoint, wrong/expired token,
   ownership divergence, concurrent manager changes, IPv4/IPv6, Docker modes,
-  Tailscale disconnect, UFW/firewalld, and no-global-flush invariants.
+  UFW/firewalld, and no-global-flush invariants. The authoritative generic
+  packet contract and separately retained local Tailscale disconnect/compatibility
+  contract are in [issue #24](issue-24-linux-enforcement.md). External tailnet
+  access is not a prerequisite for generic Linux acceptance.
 - Tests assert durable artifacts, recovery status, evidence, sanitized logs,
   and exact terminal state; skips require justification and block critical
   enforcement releases.
@@ -88,6 +94,15 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
 - Applying blocked plans or resolving unknown ownership by force.
 
 ## Further Notes
+
+The owner requires deny authority against external accept on supported Linux
+paths, while allow cannot override external drop. The exact INPUT expansion,
+OUTPUT/FORWARD refusals, reject limitations and acceptance tests belong to the
+linked #24 contract, not a duplicate implementation spec here. New packet tests
+and dedicated runtime review now pass for the bounded generic Linux contract;
+the detailed evidence and residual unsupported paths are recorded in the #24
+contract and ADR-0005. Historical evidence and false gates remain unchanged;
+#8 acceptance is not advanced by #24.
 
 This issue cannot start until #7 is complete, the threat model is documented,
 and the required isolated test environments are available. A normal successful

@@ -10,12 +10,40 @@ use manyfw_core::{
 use std::collections::BTreeMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mode = std::env::args().nth(1).unwrap_or_default();
+    let mut arguments = std::env::args().skip(1);
+    let mode = arguments.next().unwrap_or_default();
+    let ssh_source = arguments.next().unwrap_or_else(|| "10.0.2.2".into());
     let unsupported = mode == "unsupported";
-    let port = if mode == "timeout" { 65433 } else { 65434 };
-    let (docker, host) = complete_empty_sources();
+    let ipv6 = mode == "ipv6";
+    let ssh_drop = mode == "ssh";
+    let port = if ssh_drop {
+        22
+    } else if mode == "timeout" {
+        65433
+    } else if ipv6 {
+        65435
+    } else {
+        65434
+    };
+    let (docker, mut host) = complete_empty_sources();
+    let host_binding: Option<std::net::IpAddr> = match mode.as_str() {
+        "host-binding-v4" => Some("192.0.2.1".parse()?),
+        "host-binding-v6" => Some("fd24:0::1".parse()?),
+        _ => None,
+    };
+    if let Some(address) = host_binding {
+        host.addresses
+            .records
+            .push(manyfw_core::host::InterfaceAddress {
+                interface_index: None,
+                interface_name: None,
+                address,
+                prefix_length: Some(if address.is_ipv4() { 24 } else { 64 }),
+                scope: manyfw_core::host::AddressScope::Global,
+            });
+    }
     let snapshot = manyfw_core::snapshot::ObservationSnapshot::compose(docker, host);
-    let input = PlannerInput {
+    let mut input = PlannerInput {
         policy: NormalizedPolicy {
             version: 1,
             default_action: Action::Allow,
@@ -23,11 +51,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "loopback".into(),
                 Zone {
                     interfaces: if unsupported {
-                        vec![InterfaceSelector::Exact("lo".into())]
+                        vec![InterfaceSelector::Glob("lo*".into())]
                     } else {
                         Vec::new()
                     },
-                    subnets: vec!["127.0.0.1/32".parse()?],
+                    subnets: vec![if ssh_drop {
+                        format!("{ssh_source}/32").parse()?
+                    } else if ipv6 {
+                        "::1/128".parse()?
+                    } else {
+                        "127.0.0.1/32".parse()?
+                    }],
                 },
             )]),
             rules: vec![Rule {
@@ -91,6 +125,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         },
     };
+    if mode == "generic" {
+        // Generic diagnostic fixture; Apply independently validates the bundle.
+        let interface = arguments.next().ok_or("missing interface (or -)")?;
+        let protocol = arguments.next().ok_or("missing protocol")?;
+        let action = arguments.next().ok_or("missing action")?;
+        let port = arguments.next().ok_or("missing port (or -)")?;
+        let default = arguments.next().ok_or("missing default action")?;
+        fn action_value(value: &str) -> Result<Action, &'static str> {
+            match value {
+                "allow" => Ok(Action::Allow),
+                "deny" => Ok(Action::Deny),
+                "reject" => Ok(Action::Reject),
+                _ => Err("invalid action"),
+            }
+        }
+        let zone = input.policy.zones.get_mut("loopback").unwrap();
+        zone.subnets = if ssh_source == "-" {
+            Vec::new()
+        } else {
+            vec![ssh_source.parse()?]
+        };
+        zone.interfaces = if interface == "-" {
+            Vec::new()
+        } else {
+            vec![InterfaceSelector::Exact(interface)]
+        };
+        let rule = &mut input.policy.rules[0];
+        rule.protocol = match protocol.as_str() {
+            "tcp" => Protocol::Tcp,
+            "udp" => Protocol::Udp,
+            "icmp" => Protocol::Icmp,
+            "icmpv6" => Protocol::Icmpv6,
+            _ => return Err("invalid protocol".into()),
+        };
+        rule.ports = if port == "any" {
+            PortScope::Any
+        } else if port == "-" {
+            PortScope::NotApplicable
+        } else {
+            let port = port.parse()?;
+            PortScope::Specific(vec![PortRange {
+                start: port,
+                end: port,
+            }])
+        };
+        rule.action = action_value(&action)?;
+        input.policy.default_action = action_value(&default)?;
+    }
+    if let Some(address) = host_binding {
+        input.policy.rules[0].destination = Selector::Host(format!("local-address:{address}"));
+        input.policy.rules[0].source = Selector::Cidr(
+            if address.is_ipv4() {
+                "192.0.2.2/32"
+            } else {
+                "fd24:0::2/128"
+            }
+            .parse()?,
+        );
+    }
     let plan = Planner::plan(&input);
     let value = serde_json::json!({"input": input, "plan": plan});
     println!("{}", serde_json::to_string_pretty(&value)?);

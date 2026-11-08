@@ -387,10 +387,19 @@ fn runner_recovery_releases_original_and_recovery_domain_locks() {
     let backend = FixtureBackend::new();
     let runner = file_runner(backend.clone(), store.clone(), 0);
     let mut expiring_plan = plan("expiring-first");
-    expiring_plan.deadline_seconds = 0;
+    expiring_plan.deadline_seconds = 1;
     runner
         .start(expiring_plan)
         .expect("first transaction starts");
+    // Expire only after apply: a zero-duration plan now correctly refuses
+    // before mutation rather than creating a pending confirmation.
+    let mut pending = store.load("expiring-first").unwrap().unwrap();
+    pending
+        .confirmed_deadline
+        .as_mut()
+        .unwrap()
+        .monotonic_deadline_seconds = 0;
+    store.save(&pending).unwrap();
     assert_eq!(runner.recover().unwrap(), vec!["expiring-first"]);
 
     runner

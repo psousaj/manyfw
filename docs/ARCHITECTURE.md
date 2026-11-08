@@ -1,6 +1,12 @@
 # Architecture
 
-ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel firewall.
+ManyFW's architectural target is a **Linux firewall policy enforcement system**
+using Linux kernel firewall mechanisms while preserving resources owned by
+other components, not a framework requiring an integration with each product.
+The current released CLI is read-only; this checkout's opt-in experimental
+adapter is restricted to verified disposable KVM guests. Expanded enforcement
+is reviewed only for the exact INPUT subset recorded in ADR-0005. This does not
+authorize production or claim protection for a host or unsupported packet path.
 
 ## Initial components
 
@@ -12,6 +18,16 @@ ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel
 - **Transaction runner**: durable state-machine primitives and an independently supervised recovery worker retain wall-clock metadata and use boot-scoped monotonic deadlines; a boot change expires pending confirmation conservatively. ADR-0005 supplies a narrowly scoped experimental apply command and systemd unit for disposable isolated QEMU/KVM guests only; neither is approved for production deployment.
 
 ## Integration constraints
+
+The owner-approved technology-agnostic Linux target and exact supported-path
+acceptance live in [issue #24's contract](specs/issue-24-linux-enforcement.md).
+Within supported INPUT composition, deny must prevail over external accepts;
+allow cannot override external drops. The expanded packet suite and dedicated
+runtime review are recorded in ADR-0005 for the bounded experimental subset;
+the historical clean-input-hook approval alone did not cover this change.
+OUTPUT/FORWARD remain unsupported. Systemd is a verified
+experimental dependency, not an assumption of universal Linux availability;
+non-systemd Apply refuses.
 
 Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic.
 

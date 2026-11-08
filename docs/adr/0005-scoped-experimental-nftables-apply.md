@@ -1,14 +1,36 @@
 # Scoped experimental nftables Apply
 
-**Status: Accepted for the explicitly isolated experimental implementation
-only.** Project-owner governance authorization: current owner instruction
-establishing the Goal-based architecture/security review and approving this
-isolated experimental scope. Dedicated Goal Architecture/Security Review
-completed separately from implementation on 2026-11-07; findings and evidence
-are recorded below. This is not independent review, production authorization,
-or authorization to mutate the development/WSL host. ADR-0004 remains in force.
+**Status: Accepted for the reviewed, explicitly isolated experimental
+implementation only.** Project-owner governance authorization is defined in
+`AGENTS.md`; the required Goal Architecture/Security Review was completed as a
+separate phase after implementation and remediation on 2026-11-08. Evidence and
+disposition are recorded below. This is not independent review, production
+authorization, or authorization to mutate the development/WSL host. ADR-0004
+remains in force.
 
 ## Context and constraints
+
+### Owner reconciliation — expanded target, reviewed
+
+The owner now requires technology-agnostic Linux deny authority against
+external accept, while allow cannot override external drop. The exact expanded
+INPUT operation/composition target, unsupported OUTPUT/FORWARD and reject
+caveats, generic packet acceptance, and separately retained local Tailscale
+compatibility contract are specified in
+[issue #24](../specs/issue-24-linux-enforcement.md).
+This is a material change from the clean-input-hook-only implementation
+reviewed below. The expanded subset now has fresh candidate-bound packet and
+recovery evidence plus a dedicated post-remediation source/runtime review, all
+recorded below. Acceptance is limited to the exact tested scope and does not
+authorize production or development-host operation. Verified systemd remains
+an explicit experimental dependency; non-systemd Apply refuses, rather than
+claiming portable supervision.
+
+External Tailscale access is removed from generic acceptance, not from local
+compatibility tracking. All historical review findings and evidence remain
+unchanged; the historical Tailscale NotApplicable result is not Passed. The
+new generic contract is accepted only for its tested INPUT subset. Tailscale
+remains pending separately, and #8's own dependency gates remain applicable.
 
 Issue #23 calls for experimental Apply with an applicable plan, successful
 pre-mutation revalidation, ManyFW-only ownership, end-to-end checkpoint/apply/
@@ -23,7 +45,7 @@ managers' chains; the planner is diagnostic and planning remains read-only.
 Issue #24 Milestone A is fixture evidence only. It neither validates ManyFW's
 production code nor approves an adapter.
 
-## Decision proposed for review
+## Reviewed experimental decision
 
 ### Backend and supported operations
 
@@ -193,7 +215,147 @@ At the time of this architecture decision, implementation still required a
 post-implementation security review and real guest tests. Those gates are
 recorded in the Post-implementation Architecture/Security Review below.
 
-## Consequences if approved
+## Consequences
+
+### Issue #24 nonempty reboot recovery remediation (reviewed candidate)
+
+The real disposable-KVM failure reported during #24 found an absent
+`inet manyfw` table after reboot with a nonempty checkpoint. Ordinary rollback
+refused because the whole-ruleset fingerprint included foreign state rebuilt
+independently by other managers. Replaying that foreign state is not permitted.
+
+The remediation adds a default-refusing transaction-backend hook receiving the
+full persisted record, including its boot-scoped deadline. Only the nftables
+backend authorizes the exception, after checking an actual nonempty boot-ID
+change, checkpoint integrity and pre-state binding, matching durable arm fields,
+and a currently supported plan/clean input hook. It accepts only a bounded
+single-owned-table listing grammar, with no includes, foreign references,
+extra objects, command escape, or unreviewed verdicts. Unsupported checkpoint
+formats refuse rather than fall back to arbitrary script execution.
+
+An absent table is recreated using a create-only atomic owned-table batch;
+current whole-ruleset/absence checks precede submission. A racing table creator
+causes refusal. Exact owned-state verification follows before durable success.
+An already exact checkpoint is a no-op for interrupted-success retry; any other
+present table is refused. No foreign object is restored, deleted, or rewritten.
+The core accepts the hook's scoped verified success without comparing foreign
+whole-ruleset state to the previous boot. Other rollback paths keep their
+existing whole-ruleset guards; a same-boot disappearance cannot authorize this
+exception. External managers may still race after the last observation; there
+is no cross-manager atomicity or global reachability claim.
+
+Tests cover scoped core completion, default refusal/divergence, corruption,
+boot/deadline/arm binding, foreign input hooks, and restricted checkpoint text.
+These were initially unprivileged tests, not new VM evidence. This material
+recovery change required a dedicated architecture/security reassessment and
+fresh real disposable-KVM validation, recorded below; the earlier #23 review
+does not approve it by inheritance. No production or development-host
+operational scope is expanded.
+
+The subsequent review was **not clean**: interrupted rollback accepted a changed
+base-chain policy/type, and foreign forwarding/NAT divergence could be detected
+only after an owned-table rollback write when no post-apply fingerprint existed.
+Remediation now validates the full supported table/chain structure (filter type,
+accept policy, exact hook/priority/identity, and no unknown object fields) and
+persists a versioned owned-state-excluded foreign fingerprint inside checkpoint
+integrity metadata. Ordinary interrupted recovery compares that fingerprint
+against the current ruleset before invoking any rollback write, together with
+exact owned rule expressions. Missing legacy metadata and mismatches refuse;
+the final whole-ruleset restoration check remains in place. Regression tests
+assert zero mutation on changed chain policy and foreign forwarding/NAT changes,
+even with an otherwise exact interrupted owned state. This does not broaden or
+change the separately authorized reboot exception. At that stage, fresh
+dedicated review and disposable-KVM validation were still pending; the
+subsequent candidate assessment is recorded below.
+
+Read-only diagnosis of retained KVM run `mfw-20261107T231740Z-563179`
+identified another nonempty-reboot failure in transaction
+`mfw-6d2b7bb7a90a01b36358e4ce`. The host verified the QEMU PID/overlay/KVM
+isolation, run marker, and SSH port before guest reads. The guest executable
+matched the tested local release (SHA-256
+`a8b41afad2483aefe5ac008f6636e2bceea7c7cb3736b2b1c06164e69a1683c3`).
+The persisted arm matched the checkpoint/deadline and the current boot ID
+differed. On nftables 1.0.9, the live owned chain and IPv4 checkpoint rule had
+been recreated, but both textual and JSON listings lacked the table ownership
+comment. The failing batch first exclusively created an **empty unmarked
+table**, then replayed a table declaration containing the marker; replay did
+not update the existing table's comment. Post-write ownership verification
+therefore correctly refused the resulting unmarked table.
+
+The correction exclusively creates the complete validated checkpoint table in
+one declaration (`create table inet manyfw { ... }`), so the marker is supplied
+at creation rather than assumed to update an existing table. A regression
+using the exact retained checkpoint listing failed against the former
+two-declaration batch and passes with the corrected batch. No guest recovery,
+firewall mutation, service changes, or deployment was performed during this
+diagnosis. The retained unmarked table remains a refusal, not an object to
+adopt automatically. At that stage, fresh isolated mutation/reboot validation
+and dedicated review remained required; a passing batch-construction test is
+not kernel recovery evidence.
+
+The next real KVM run, `mfw-20261107T232732Z-568005`, falsified the nested
+`create table { chain ... }` correction: retained transaction
+`mfw-c0fe8c72d8685896d650ac90` failed with a marked but otherwise empty
+`inet manyfw` table. Text and JSON confirmed no chain or rules. The bundled
+nftables 1.0.9 primary man page documents separate table, chain, and rule
+commands; a nested configuration listing is not a reliable command body for
+exclusive creation in that version.
+
+The current correction validates the bounded checkpoint listing first, then
+emits `create table inet manyfw { comment "manyfw-owner-v1"; }`, followed by
+explicit `add chain` and ordered `add rule` commands in the same nftables
+batch. The exact retained IPv4 checkpoint (port 65434) is preserved, not
+replaced with the interrupted IPv6 plan (port 65435). Exclusivity and all
+existing reboot/arm/integrity/input-hook/concurrency gates remain unchanged.
+
+Real kernel syntax/semantics were tested in that retained, externally verified
+KVM guest (PID 568059, SSH 43862), using the actual Rust-generated batch with
+only the distinct test-owned table name and table marker substituted:
+`manyfw_issue24_syntax_568005` / `manyfw-issue24-syntax-568005`. nftables
+`--check` passed, applying the batch created the marker, exact
+filter/input/-300/accept chain, and exact checkpoint rule expressions/comment.
+A second exclusive create was refused and left the test table unchanged.
+After deleting only that verified marked test table, the normalized complete
+ruleset equaled its pre-test value; the original failed transaction table and
+foreign objects were unchanged. The temporary batch-output instrumentation
+was removed from the unit test after collecting the generated batch.
+
+This is real kernel validation of the explicit batch, not a full production
+supervisor reboot/recovery rerun. The failed transaction and its marked empty
+table were not recovered or adopted. End-to-end disposable-KVM reboot evidence
+and dedicated review were still pending at that stage.
+
+The subsequent inspected run `mfw-20261107T233747Z-573265` supports the
+nonempty-checkpoint reboot remediation using the production CLI and recovery
+worker. Its worktree-bound candidate evidence is recorded in
+[`docs/TEST-MATRIX.md`](../TEST-MATRIX.md). Dedicated source and runtime
+architecture/security review found no code findings for this remediation.
+This assessment does not erase the failed candidates above or establish a new
+Accepted scope.
+
+At that historical candidate, full #24 acceptance was considered blocked by
+missing Tailscale interoperability evidence: its gate records that scenario as
+`NotApplicable` and `release_eligible` as false. The owner-reconciled generic
+contract and final disposition are recorded in the new review section below.
+Final evidence-retention review additionally found that `/run` batch logs were lost
+across boots. The harness now retains them in persistent
+`/var/log/manyfw-issue24/production-batches.log`. Final retention run
+`mfw-20261107T234657Z-576778` supersedes the pending retention validation.
+Its archived `production-nft-batches.txt` retains pre-reboot batches and the
+exclusive checkpoint restoration at lines 115–117: marked `create table`,
+explicit `add chain`, then the original IPv4 checkpoint rule. Guest destruction
+was verified. Metadata binds this run to worktree SHA-256
+`20631b7b68bdec08aee94d2e192b67760c7d4654756e255ca606823ec436b505`
+and unchanged CLI SHA-256
+`ba6a585bb00b1e665a2d58e8d690bcf30ecd6c865bad88a427e0e422df2a3de9`,
+not a committed implementation at candidate HEAD. The gate records 32 named
+Passed scenarios plus Passed harness completion; Tailscale remains the sole
+NotApplicable blocker and `release_eligible` remains false. Evidence location
+is recorded in the [test matrix](../TEST-MATRIX.md#latest-24-production-code-kvm-candidate-evidence).
+At that historical point, source-and-runtime review remained pending; the
+evidence update alone recorded no new review approval or accepted operational
+scope. This candidate assessment is superseded by the final generic review
+record below.
 
 This approves at most the experimental subset explicitly accepted above. It
 does not complete #24 Milestone B or parent issue #8, establish production
@@ -232,3 +394,29 @@ where separately required and does not approve production or non-disposable
 operation. CLI/supervisor interruption, reboot, partial-mutation recovery,
 manager matrix, and related scenarios remain #24 Milestone B/#8 acceptance
 items; no release claim is made for them.
+
+## Expanded #24 generic Linux review and evidence (2026-11-08)
+
+The owner-reconciled generic Linux contract in
+[`docs/specs/issue-24-linux-enforcement.md`](../specs/issue-24-linux-enforcement.md)
+was reviewed separately against final source and real disposable-KVM runtime
+evidence. Standards review and Spec review were clean. The dedicated Goal
+Architecture/Security review was clean for the exact operation and composition
+subset below. This is technical self-review under owner-authorized governance,
+not independent review.
+
+| Evidence | Result |
+| --- | --- |
+| Packet run `issue24-linux-packet-1794162697-855068` | 104/104 required cases passed; includes eight real IPv6/TCP and IPv4/UDP composition scenarios across both verdict orders and priorities, plus flowtable pre-mutation refusal; `packet_eligible: true`; guest destroyed. |
+| Recovery run `mfw-20261108T153526Z-812910` | 32 critical scenarios and `harness_completion` passed; `recovery_eligible: true`; guest destroyed. |
+| Candidate | HEAD `a002a08fa512fe7248c6913e123d97b478974c07`; binary SHA-256 `3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`; both suites used that binary. |
+| Aggregate evidence receipt | `/home/jose/.cache/manyfw-issue24/acceptance-20261108-final-104.json`: `evidence_gates_passed: true`; `generic_linux_accepted: false` and `production_authorized: false` by design. It verifies evidence only and cannot self-assert review or approval. |
+
+The accepted scope is limited to the tested native-nftables INPUT operations,
+selectors, families, verdict composition, and recovery behavior. Observed
+nftables flowtables refuse before mutation. Other device/kernel offload,
+unobservable, or bypass paths remain unsupported/unknown and are not claimed
+controlled. OUTPUT, FORWARD, arbitrary destination CIDRs, Docker publication,
+and Tailscale interoperability are not supported by this acceptance. The
+Tailscale contract remains separate and pending. This decision is not a
+production release gate, deployment authorization, or claim of host protection.

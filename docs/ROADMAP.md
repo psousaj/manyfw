@@ -44,6 +44,11 @@ gates. v0.3.0 remains read-only and does not include or authorize
 reachability or complete behavior for every firewall manager and packet path.
 
 ## v0.4.0 — Guarded enforcement, experimental (not release-ready)
+
+The unchecked release/parent-enforcement items below remain open beyond the
+bounded #24 generic acceptance; that acceptance validates the named
+experimental INPUT subset only and does not complete the broader v0.4/#8 gates.
+
 - [ ] Owned-chain isolation and reconciliation with Docker
 - [x] Durable transaction state machine, checkpoint model, and confirmation-token primitives (fixture-tested)
 - [ ] Independent rollback supervisor outside the applying CLI process
@@ -51,16 +56,36 @@ reachability or complete behavior for every firewall manager and packet path.
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
 - [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
 - [x] Issue #23 scoped experimental nftables Apply, with dedicated architecture/security review and real disposable-KVM confirmation/timeout evidence ([validation](validation/issue-23/issue23-mfw-20261107T174332Z-427044/)); remains non-production and opt-in
-- [ ] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration
-- [ ] Complete the remaining #24 VM/release matrix: corrupt checkpoint, ownership divergence, Docker modes, Tailscale, UFW/firewalld, manager concurrency, and no-global-flush verification
+- [x] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration ([final evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
+- [x] Complete and review the bounded generic #24 Linux packet/recovery contract: exact INPUT selectors and verdict composition, corrupt checkpoint, ownership divergence, Docker modes, UFW/firewalld, manager concurrency, no-global-flush verification, and flowtable refusal ([contract](specs/issue-24-linux-enforcement.md), [evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
+- [ ] Separately complete the local Tailscale compatibility contract before claiming Tailscale support; external tailnet access is not a generic acceptance prerequisite
 - [ ] Issue #8 parent enforcement acceptance, only after #23 and #24 final acceptance are implemented, VM-validated, reviewed, and committed
 
-M3 execution order is #22 → #24 Milestone A (completed) → #23 scoped apply →
-#24 Milestone B and remaining acceptance → #8 parent acceptance. The ten
-fixture scenarios are the satisfied prerequisite for beginning #23, not full
-issue #24 completion or approval to deploy on production hosts. Keep #24 open
-until production-code recovery validation passes. Keep Apply explicitly
-experimental and opt-in; no global host-firewall mutation is authorized.
+Final generic #24 evidence (2026-11-08) uses candidate HEAD
+`a002a08fa512fe7248c6913e123d97b478974c07` and CLI SHA-256
+`3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`.
+The packet suite passed **104/104** cases, including observed flowtable
+pre-mutation refusal; the production-code recovery suite passed **32 critical
+scenarios plus harness completion**. Both disposable guests were destroyed.
+The evidence aggregate reports `evidence_gates_passed: true`; dedicated
+Standards, Spec, and Architecture/Security reviews are clean. The bounded #24
+generic Linux contract is recorded as accepted in ADR-0005. Tailscale remains
+separately pending and is not claimed supported; production remains
+unauthorized. Evidence paths and scope limits are in the [test matrix](TEST-MATRIX.md#issue-24-final-generic-linux-evidence).
+
+Do not advance #8 until its own documented M2 planning/threat-model dependency
+is verified complete. Issue #7 is still open and its isolated packet-verdict
+acceptance gate remains unchecked; resolve that prerequisite before beginning
+#8. The #24 generic acceptance does not authorize production or development-host
+firewall mutation.
+
+The generic #24 acceptance and its required review are complete for the bounded
+experimental scope; the specialized Tailscale contract remains pending and no
+production authorization is granted. Issue #24 remains open in GitHub. Issue #8
+must not start until its documented #7 M2 planning/threat-model dependency and
+required isolated planner acceptance are verified complete. Keep Apply
+explicitly experimental and opt-in; no global host-firewall mutation is
+authorized.
 
 ## Later
 - [ ] Daemon watching Docker events; reconciliation after container changes

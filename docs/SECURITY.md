@@ -53,7 +53,21 @@ Privileged implementation must only ship after network namespace/VM integration 
 3. Automatic rollback on expired confirmation deadline, process crash or lost SSH without relying on a foreground shell.
 4. Atomic updates within backend guarantees; no promise of global atomicity across managers.
 5. No unapproved opening of new ingress; reject partial backend support.
-6. Tests for remote SSH, Docker legacy and native nftables, Tailscale changes, IPv6 and concurrent rule modifications.
+6. Tests for remote SSH, Docker legacy and native nftables, IPv6 and concurrent rule modifications, plus the generic packet-verdict contract in [issue #24](specs/issue-24-linux-enforcement.md).
+
+The same contract separately retains real Tailscale change/interoperability
+coverage. External tailnet access is not mandatory for generic Linux acceptance;
+missing specialized evidence blocks Tailscale claims, not the generic contract.
+Historical reports keep their original false gate. The expanded deny-authority
+and exact INPUT selector scope passed fresh packet/recovery evidence and a
+dedicated review, as recorded in ADR-0005. This approval is limited to the
+bounded experimental scope; allow never overrides foreign drop, and
+unsupported/bypassed paths cannot be claimed protected. Verified systemd is
+mandatory only within the current bounded experimental scope; other supervisors
+refuse Apply. Production remains unauthorized.
+Observed nftables flowtables are rejected before mutation because they may
+bypass INPUT; other kernel/device offload or unobservable paths remain unknown
+unless independently excluded or measured.
 
 The recovery matrix is tracked in [`TEST-MATRIX.md`](TEST-MATRIX.md). Local
 fixture coverage may proceed without privileges, but missing VM or privileged
