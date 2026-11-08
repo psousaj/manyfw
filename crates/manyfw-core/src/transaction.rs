@@ -1361,6 +1361,8 @@ where
             if let Err(error) = self.store.save(&record) {
                 self.store
                     .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
+                self.store
+                    .release_domain(&record.plan.ownership_domain, &record.plan.transaction_id);
                 self.locks
                     .release(&record.plan.ownership_domain, &record.plan.transaction_id);
                 return Err(error);
@@ -1402,6 +1404,7 @@ where
                 | TransactionState::Verifying
                 | TransactionState::Confirmation
                 | TransactionState::Rollback
+                | TransactionState::RollbackFailure
         ) {
             continue;
         }

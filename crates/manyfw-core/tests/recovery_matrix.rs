@@ -4,7 +4,7 @@
 use manyfw_core::transaction::{
     ApplyReport, Checkpoint, Clock, ClockReading, FileStore, MemoryStore, Operation,
     RecoverySupervisor, Result, TokenSource, TransactionBackend, TransactionError, TransactionPlan,
-    TransactionRunner, TransactionState, TransactionStore,
+    TransactionRecord, TransactionRunner, TransactionState, TransactionStore,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,7 +51,7 @@ impl TokenSource for TestTokens {
 struct FixtureBackend {
     state: Arc<Mutex<String>>,
     partial: bool,
-    fail_rollback: bool,
+    fail_rollback: Arc<AtomicBool>,
 }
 
 impl FixtureBackend {
@@ -98,7 +98,7 @@ impl TransactionBackend for FixtureBackend {
     }
 
     fn rollback(&self, _checkpoint: &Checkpoint) -> Result<()> {
-        if self.fail_rollback {
+        if self.fail_rollback.load(Ordering::SeqCst) {
             return Err(TransactionError::Backend("fixture rollback failed".into()));
         }
         *self.state.lock().expect("fixture state") = "before".into();
@@ -183,12 +183,51 @@ fn runner(
     TransactionRunner::new(backend, store, TestClock::at(now), TestTokens)
 }
 
-fn file_runner(
+fn file_runner<S: TransactionStore>(
     backend: FixtureBackend,
-    store: Arc<FileStore>,
+    store: S,
     now: u64,
-) -> TransactionRunner<FixtureBackend, Arc<FileStore>, TestClock, TestTokens> {
+) -> TransactionRunner<FixtureBackend, S, TestClock, TestTokens> {
     TransactionRunner::new(backend, store, TestClock::at(now), TestTokens)
+}
+
+#[derive(Clone)]
+struct FailRollbackFailureSave {
+    inner: Arc<FileStore>,
+    fail_once: Arc<AtomicBool>,
+}
+
+impl TransactionStore for FailRollbackFailureSave {
+    fn save(&self, record: &TransactionRecord) -> Result<()> {
+        if record.state == TransactionState::RollbackFailure
+            && self.fail_once.swap(false, Ordering::SeqCst)
+        {
+            return Err(TransactionError::Store(
+                "injected rollback-failure persistence error".into(),
+            ));
+        }
+        self.inner.save(record)
+    }
+
+    fn load(&self, id: &str) -> Result<Option<TransactionRecord>> {
+        self.inner.load(id)
+    }
+
+    fn list(&self) -> Result<Vec<TransactionRecord>> {
+        self.inner.list()
+    }
+
+    fn acquire_domain(&self, domain: &str, owner: &str) -> Result<()> {
+        self.inner.acquire_domain(domain, owner)
+    }
+
+    fn acquire_domain_exclusive(&self, domain: &str, owner: &str) -> Result<()> {
+        self.inner.acquire_domain_exclusive(domain, owner)
+    }
+
+    fn release_domain(&self, domain: &str, owner: &str) {
+        self.inner.release_domain(domain, owner)
+    }
 }
 
 fn simulate_dead_process_lock(store: &FileStore, owner: &str) {
@@ -249,7 +288,7 @@ fn recovery_matrix_reports_supported_scenarios() {
     println!("Passed: rollback failure is terminal and visible");
     let backend = FixtureBackend {
         partial: true,
-        fail_rollback: true,
+        fail_rollback: Arc::new(AtomicBool::new(true)),
         ..FixtureBackend::new()
     };
     let store = Arc::new(MemoryStore::default());
@@ -330,6 +369,95 @@ fn independent_supervisor_recovers_durable_transaction_without_runner() {
             .recover()
             .expect("recovery can be retried")
             .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn independent_supervisor_retries_transient_rollback_failure() {
+    let backend = FixtureBackend::new();
+    backend.fail_rollback.store(true, Ordering::SeqCst);
+    let directory = std::env::temp_dir().join(format!(
+        "manyfw-supervisor-retry-rollback-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let inner = Arc::new(FileStore::new(&directory));
+    let store = Arc::new(FailRollbackFailureSave {
+        inner: inner.clone(),
+        fail_once: Arc::new(AtomicBool::new(false)),
+    });
+
+    assert!(
+        file_runner(backend.clone(), store.clone(), 0)
+            .start(plan("supervisor-retry"))
+            .is_ok()
+    );
+    simulate_dead_process_lock(&inner, "supervisor-retry");
+    // Let the confirmation deadline expire, then have the independent worker
+    // encounter one transient rollback failure and persist its terminal state.
+    let expired = RecoverySupervisor::new(backend.clone(), store.clone(), TestClock::at(20));
+    assert!(expired.recover().is_err());
+    assert_eq!(
+        store.load("supervisor-retry").unwrap().unwrap().state,
+        TransactionState::RollbackFailure
+    );
+
+    // Recovery is independent of the original runner and can retry the durable
+    // failure after the backend becomes available again.
+    backend.fail_rollback.store(false, Ordering::SeqCst);
+    let recovered = RecoverySupervisor::new(backend.clone(), store.clone(), TestClock::at(21));
+    assert_eq!(recovered.recover().unwrap(), vec!["supervisor-retry"]);
+    assert_eq!(backend.fingerprint(), "before");
+    assert_eq!(
+        store.load("supervisor-retry").unwrap().unwrap().state,
+        TransactionState::RolledBack
+    );
+    assert!(recovered.recover().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn rollback_failure_persistence_error_keeps_record_recoverable_without_lock_leak() {
+    let backend = FixtureBackend::new();
+    let directory = std::env::temp_dir().join(format!(
+        "manyfw-rollback-store-failure-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let inner = Arc::new(FileStore::new(&directory));
+    let store = Arc::new(FailRollbackFailureSave {
+        inner: inner.clone(),
+        fail_once: Arc::new(AtomicBool::new(true)),
+    });
+    let transaction = file_runner(backend.clone(), store.clone(), 0);
+    transaction
+        .start(plan("rollback-store-failure"))
+        .expect("start transaction");
+    backend.fail_rollback.store(true, Ordering::SeqCst);
+    assert!(transaction.rollback("rollback-store-failure").is_err());
+    assert_eq!(
+        store.load("rollback-store-failure").unwrap().unwrap().state,
+        TransactionState::Rollback
+    );
+
+    // The durable unresolved record still prevents a new transaction even
+    // though the lock is released for the independent supervisor to recover.
+    assert!(
+        file_runner(backend.clone(), store.clone(), 0)
+            .start(plan("blocked-by-unresolved-rollback"))
+            .is_err()
+    );
+    backend.fail_rollback.store(false, Ordering::SeqCst);
+    let supervisor = RecoverySupervisor::new(backend.clone(), store.clone(), TestClock::at(20));
+    assert_eq!(
+        supervisor.recover().unwrap(),
+        vec!["rollback-store-failure"]
+    );
+    assert_eq!(backend.fingerprint(), "before");
+    assert_eq!(
+        store.load("rollback-store-failure").unwrap().unwrap().state,
+        TransactionState::RolledBack
     );
     let _ = std::fs::remove_dir_all(directory);
 }
@@ -440,7 +568,7 @@ fn rollback_failure_keeps_domain_reserved_for_administrative_recovery() {
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend {
         partial: true,
-        fail_rollback: true,
+        fail_rollback: Arc::new(AtomicBool::new(true)),
         ..FixtureBackend::new()
     };
     let runner = file_runner(backend, store.clone(), 0);
