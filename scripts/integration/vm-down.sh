@@ -5,7 +5,19 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/vm-lib.sh"
 [[ -f "$CURRENT_DIR/.manyfw-owned" ]] \
     || die "refusing to remove state not marked as harness-owned: $CURRENT_DIR"
-[[ -f "$CURRENT_DIR/qemu.pid" ]] || die 'owned VM state has no QEMU PID file'
+if [[ ! -f "$CURRENT_DIR/qemu.pid" ]]; then
+    disk_path="$CURRENT_DIR/${MANYFW_VM_DISK_NAME:-ubuntu-overlay.qcow2}"
+    for process in /proc/[0-9]*/cmdline; do
+        [[ -r "$process" ]] || continue
+        command_line=$(tr '\0' ' ' <"$process" 2>/dev/null || true)
+        if [[ "$command_line" == *qemu-system-x86_64* && "$command_line" == *"$disk_path"* ]]; then
+            die "owned VM state has no QEMU PID file but a matching QEMU process is running: $process"
+        fi
+    done
+    rm -rf -- "$CURRENT_DIR"
+    printf 'Removed marked VM state after verifying no matching QEMU process remains under %s.\n' "$VM_ROOT"
+    exit 0
+fi
 pid=$(cat "$CURRENT_DIR/qemu.pid")
 if kill -0 "$pid" 2>/dev/null; then
     vm_pid_matches "$pid" || die 'refusing to stop a process that does not match this isolated QEMU guest'

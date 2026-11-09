@@ -104,16 +104,17 @@ The v0.4.0 candidate is not published by this PR or by merging it. The release
 workflow has `contents: write` only on its publish job. It does
 not publish an artifact if a build, checksum, or final smoke test fails.
 
-Issue #24 remains independent. Its SSH-loss, reboot, rollback, and privileged
-kernel scenarios are not implemented or approved by these conventional CI
-pipelines. The recovery runner requires a dedicated self-hosted label,
-pre-provisioned guest artifacts, an external controller, and disposable VM
-teardown; it is not a claim that the current GitHub runner is isolated. An
-enforcement release would require a candidate-SHA-bound report with every
-critical scenario `Passed`; `Skipped` and `NotApplicable` are blockers. The
- optional candidate-gate job verifies that binding from the
-candidate SHA and recovery run artifact. It is deliberately not called by the
-read-only `release.yml`; that release cannot enable enforcement.
+Conventional CI and compatibility jobs do not execute privileged firewall
+recovery. The bounded #8/#24 generic packet and recovery suites have separate
+disposable-QEMU/KVM evidence recorded in `docs/TEST-MATRIX.md`; Tailscale remains
+pending in #42. The optional candidate-gate job verifies a candidate-SHA-bound
+recovery report and requires every critical scenario to be `Passed`; `Skipped`
+and `NotApplicable` block that gate. `release.yml` does not itself run the
+privileged packet/recovery suites or infer release eligibility from ordinary
+build/smoke success. Before manually dispatching a v0.4.0 publication, the
+operator must review the candidate-bound packet and recovery evidence and
+complete the separate gates. A published experimental binary still does not
+authorize production or development-host operation.
 
 ## Current local evidence
 

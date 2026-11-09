@@ -40,7 +40,7 @@ critical scenario blocks release approval.
 | IPv4/IPv6 backend matrix | NotApplicable | Requires disposable VM |
 | No-global-flush invariant | NotApplicable | Requires disposable VM and backend adapters |
 | Test-only QEMU firewall recovery: SSH interruption, failed/interrupted apply, reboot, recovery-process death, and partial rollback across nftables/iptables | Passed (10 scenarios) | `scripts/integration/recovery-vm-test.sh`; run `mfw-recovery-20261107T152556Z-370956`, candidate `worktree:0d34a682ac5efaa55da2c07e22fd6a2cede0569dfae5dba5add9ed7bb5547afe`; archived reports and guest artifacts: [`docs/validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956`](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956) |
-| Historical planner INPUT explicit-allow/default-deny verdict and nftables no-mutation check | Passed (one IPv4 host case only; superseded by expanded #7 evidence below) | `/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/test.log` |
+| Historical planner INPUT explicit-allow/default-deny verdict and nftables no-mutation check | Passed (one IPv4 host case only; superseded by expanded #7 evidence below) | `mfw-planner-20261107T044427Z-154011/planner/test.log` in operator-local evidence archive |
 
 The fixture tests use injected test-only backend observations and stores. They
 do not modify the development host or simulate a production backend. The
@@ -73,11 +73,11 @@ versioned goldens and are never executed as firewall changes by this test.
 
 | Evidence | Result | Artifact |
 | --- | --- | --- |
-| Host INPUT packet outcomes | Passed: 8 direct probes across IPv4/IPv6, source match/mismatch, default verdict and explicit priority ordering | `/home/jose/.cache/manyfw-planner-issue7/evidence/mfw-planner-20261108T205258Z-893457/planner/test.log` |
+| Host INPUT packet outcomes | Passed: 8 direct probes across IPv4/IPv6, source match/mismatch, default verdict and explicit priority ordering | `mfw-planner-20261108T205258Z-893457/planner/test.log` in operator-local evidence archive |
 | Native Docker DNAT/FORWARD packet outcomes | Passed: published TCP/18080 accepted to observed TCP/8080 target; TCP/18081 mapping denied | Same `test.log` |
 | Conflict/block and read-only planning | Passed: conflicting hook priorities block; applicable and blocked plans preserve namespace rulesets | Same `test.log` |
 | Source and binary binding | Base `5c041a2c29437da96028cd56c09e36b3f84f68e9`, source diff digest and test binary digest in adjacent `metadata.txt` | Adjacent `metadata.txt` |
-| Guest teardown | Passed; harness reports stopped/removed and no current guest state remains | `/home/jose/.cache/manyfw-planner-issue7/evidence/mfw-planner-20261108T205258Z-893457/vm-down.log` |
+| Guest teardown | Passed; harness reports stopped/removed and no current guest state remains | `mfw-planner-20261108T205258Z-893457/vm-down.log` in operator-local evidence archive |
 
 Eight checked-in planner golden plans continue to cover host-only, Docker
 iptables with/without observed `DOCKER-USER`, native nftables DNAT/FORWARD,
@@ -100,9 +100,9 @@ critical scenarios and `harness_completion`. Both guests were destroyed.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| Generic Linux INPUT packet contract | Passed (104/104); packet gate eligible, not release eligible | `/home/jose/.cache/manyfw-packets/evidence/issue24-linux-packet-1794162697-855068` |
-| Production-code recovery | Passed (32 critical + harness completion); recovery eligible, not release eligible | `/home/jose/.cache/manyfw-generic/evidence/issue24-production-mfw-20261108T153526Z-812910` |
-| Combined evidence aggregate | `evidence_gates_passed: true`; acceptance and production authorization remain false in this evidence-only receipt | `/home/jose/.cache/manyfw-issue24/acceptance-20261108-final-104.json` |
+| Generic Linux INPUT packet contract | Passed (104/104); packet gate eligible, not release eligible | Run `issue24-linux-packet-1794162697-855068`, operator-local evidence archive |
+| Production-code recovery | Passed (32 critical + harness completion); recovery eligible, not release eligible | Run `issue24-production-mfw-20261108T153526Z-812910`, operator-local evidence archive |
+| Combined evidence aggregate | `evidence_gates_passed: true`; acceptance and production authorization remain false in this evidence-only receipt | `acceptance-20261108-final-104.json`, operator-local evidence archive |
 | Standards / Spec / Architecture-Security review | Clean for the bounded experimental subset | Disposition recorded in ADR-0005 |
 | Separate Tailscale compatibility | Pending; not claimed Passed or covered by generic acceptance | [`issue-24-linux-enforcement.md`](specs/issue-24-linux-enforcement.md) |
 
@@ -121,7 +121,7 @@ SHA-256 was `a9713fe876f796f18b7301c1277185a6bd95f1eab21f957ffb9af5bd0c46fc90`.
 
 | Evidence | Result | Artifact |
 | --- | --- | --- |
-| Production supervisor rollback retry | Passed: 32/32 critical scenarios and harness completion; retry happens automatically after a transient real nftables failure | `/home/jose/.cache/manyfw-generic/evidence/issue24-production-mfw-20261108T213653Z-912010` |
+| Production supervisor rollback retry | Passed: 32/32 critical scenarios and harness completion; retry happens automatically after a transient real nftables failure | Run `issue24-production-mfw-20261108T213653Z-912010`, operator-local evidence archive |
 | Source and binary binding | Candidate base `57eb17b0bad317a2ae7e21d84aae7b8cd7b3fa23`; candidate worktree digest and 151-source manifest in metadata; binary SHA-256 recorded above | Same evidence directory |
 | Actual worker evidence | Failure and later independent retry success are both in `rollback-retry-worker.log`; terminal state, table removal and arm cleanup are asserted by the harness | Same evidence directory |
 | Guest teardown | Passed; disposable QEMU guest destroyed | `vm-down.log` in the evidence directory |
@@ -145,8 +145,8 @@ ManyFW coexistence. Both KVM guests were destroyed.
 
 | Evidence | Result | Artifact |
 | --- | --- | --- |
-| Generic INPUT packet suite | Passed 104/104; `packet_eligible: true`; complete evidence; no missing coverage or cleanup failures | `/home/jose/.cache/manyfw-packets/evidence/issue24-linux-packet-1794176951-939864` |
-| Production CLI/recovery/Docker lifecycle suite | Passed 33/33 critical scenarios plus harness completion; `recovery_eligible: true`; Docker IP changed and foreign firewall objects preserved | `/home/jose/.cache/manyfw-generic/evidence/issue24-production-mfw-20261108T222218Z-936929` |
+| Generic INPUT packet suite | Passed 104/104; `packet_eligible: true`; complete evidence; no missing coverage or cleanup failures | Run `issue24-linux-packet-1794176951-939864`, operator-local evidence archive |
+| Production CLI/recovery/Docker lifecycle suite | Passed 33/33 critical scenarios plus harness completion; `recovery_eligible: true`; Docker IP changed and foreign firewall objects preserved | Run `issue24-production-mfw-20261108T222218Z-936929`, operator-local evidence archive |
 | Candidate and release binary | Base commit `0f5a4221bd607ebfdc6f523c52f4b83007065ace`; worktree SHA-256 `32d3f4b94a49629a167da3148f9a6c1b9d74edb6c01d287b75713dbacb0da174`; CLI SHA-256 `7a58dbf51ecc0d5759e19be11cd887d5d4f18651816501f6e607b52ea42b8968` | Recovery `metadata.txt`; packet `commit.txt`, `worktree.patch`, `artifacts.sha256` |
 | Source manifest | 151 source files matched exactly for both runs | Each evidence directory's `source-manifest.json` |
 | Tailscale / production gate | Tailscale remains separately pending and not claimed; release eligibility and production authorization remain false | Both machine gate receipts and `docs/specs/issue-24-linux-enforcement.md` |
@@ -176,14 +176,31 @@ supervisor scenarios. Tailscale remains separately pending by explicit scope.
 
 | Evidence | Result | Artifact |
 | --- | --- | --- |
-| OpenRC production recovery | Passed; `RUN_OK`; real marked ManyFW nftables mutation recovered after CLI SIGKILL, actual SSH interruption recovered, pending confirmation rolled back after reboot, foreign table preserved in same-boot recovery | `/home/jose/.cache/manyfw-openrc-vm/evidence/issue8-openrc-mfw-openrc-20261109T044055Z-23612` |
+| OpenRC production recovery | Passed; `RUN_OK`; real marked ManyFW nftables mutation recovered after CLI SIGKILL, actual SSH interruption recovered, pending confirmation rolled back after reboot, foreign table preserved in same-boot recovery | Run `issue8-openrc-mfw-openrc-20261109T044055Z-23612`, operator-local evidence archive |
 | Candidate binding | Base `0f5a4221bd607ebfdc6f523c52f4b83007065ace`; code/worktree SHA-256 `24b28b6daa92ada7311da207fe43453d882332ddf6358482eb51ff9a958ffe54`; static CLI SHA-256 `bdb1050c48c03930adfaa34432707808bcd7ae1f31ee574305ac2ac3c3b48986` | `candidate-binding.txt`, `source-manifest.json`, `manyfw-binary.sha256` in evidence directory; manifest covers implementation/repository sources and excludes documentation |
-| Current systemd production recovery matrix | Passed all 33 critical scenarios plus harness completion, including IPv4/IPv6, Docker IP change and native/iptables modes, UFW/firewalld, manager divergence, SSH loss, reboot, and no-global-flush; Tailscale remains separately NotApplicable | `/home/jose/.cache/manyfw-openrc-vm/evidence/issue24-production-mfw-20261109T044758Z-26881`; base `0f5a4221bd607ebfdc6f523c52f4b83007065ace`, worktree SHA-256 `f9e1df29d80724c27aea1e10447bb0eb4d54146cb62815f9664afdd12a08cc08`, CLI SHA-256 `bdb1050c48c03930adfaa34432707808bcd7ae1f31ee574305ac2ac3c3b48986` |
+| Current systemd production recovery matrix | Passed all 33 critical scenarios plus harness completion, including IPv4/IPv6, Docker IP change and native/iptables modes, UFW/firewalld, manager divergence, SSH loss, reboot, and no-global-flush; Tailscale remains separately NotApplicable | Run `issue24-production-mfw-20261109T044758Z-26881`, operator-local evidence archive; base `0f5a4221bd607ebfdc6f523c52f4b83007065ace`, worktree SHA-256 `f9e1df29d80724c27aea1e10447bb0eb4d54146cb62815f9664afdd12a08cc08`, CLI SHA-256 `bdb1050c48c03930adfaa34432707808bcd7ae1f31ee574305ac2ac3c3b48986` |
 | Scope | OpenRC and systemd are bounded experimental integrations; unknown service managers refuse. The VM's reboot resets kernel nftables state, so foreign table preservation is asserted during same-boot rollback, not across reboot. No universal Linux, Tailscale, or production support claim. | OpenRC guest logs and `docs/specs/issue-8-guarded-apply.md` |
 
 This supplies the missing non-systemd supervisor acceptance for the named
 OpenRC integration. It does not satisfy unrelated release gates or authorize
 production/development-host mutation.
+
+### v0.4.0 candidate OpenRC revalidation (2026-11-09)
+
+The updated candidate was rebuilt as a static x86_64 musl binary with Rust
+1.85.0 and rerun through the production OpenRC/QEMU integration harness. This
+focused run revalidated KVM guest detection, explicit Apply, recovery after CLI
+termination, SSH-loss recovery, pending-transaction reboot handling, foreign
+table preservation, and guest teardown against the v0.4.0 binary. It passed
+(`RUN_OK`); no guest remains active. This is focused OpenRC regression evidence,
+not a rerun of the full generic 104-case packet suite or 33-scenario systemd
+recovery matrix, which remain the separately recorded prior candidate evidence.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| Candidate source and static binary | Base `eb17c6d660b13392c6ee1010208b47b894bdde33`; worktree digest `76f87720847d9adb6f55d239e868438be82b975a97f2c84123b57b289de0c754`; CLI SHA-256 `0b7e027ee14f9cfbd5a3b9e59f5e4b81b9ddacbd4a374f4dd82cf94db681e767` | Run `issue8-openrc-mfw-openrc-20261109T143258Z-269861`, operator-local evidence archive (`candidate-binding.txt`, `source-manifest.json`, `manyfw-binary.sha256`) |
+| OpenRC Apply/recovery | `RUN_OK`; real KVM guest, OpenRC init, nftables mutation/recovery and foreign-table preservation | Same run's guest evidence and `result.txt` |
+| Teardown | Passed; disposable guest stopped and marked state removed | Same run's `vm-down.log`; no active VM remains |
 
 ### Earlier immutable #24 generic candidate (not the current #8 candidate)
 
@@ -220,8 +237,9 @@ Tailscale scenario has been relabeled or specialized coverage discarded.
 
 Final retention run `mfw-20261107T234657Z-576778` used a disposable Ubuntu 24.04.5 LTS
 KVM guest. Evidence directory:
-`/home/jose/.cache/manyfw-issue24/evidence/issue24-production-mfw-20261107T234657Z-576778`
-(`metadata.txt`, `README.md`, `status.tsv`, and `issue24-release-gate.json`).
+run `issue24-production-mfw-20261107T234657Z-576778` in the operator-local
+evidence archive (`metadata.txt`, `README.md`, `status.tsv`, and
+`issue24-release-gate.json`).
 
 - Candidate HEAD: `a002a08fa512fe7248c6913e123d97b478974c07`.
 - Tested worktree SHA-256: `20631b7b68bdec08aee94d2e192b67760c7d4654756e255ca606823ec436b505`.

@@ -313,7 +313,9 @@ Implemented commands:
 - `manyfw apply --file <planner-bundle.json> --experimental [--timeout N]` is an
   isolated experimental operation, not a supported production firewall
   manager. It requires root in a marked KVM guest, an active explicitly
-  installed `manyfw-recovery.service`, a matching applicable planner bundle,
+  installed recovery supervisor (verified `manyfw-recovery.service` under
+  systemd or the installed `manyfw-recovery` OpenRC service), a matching
+  applicable planner bundle,
   and an otherwise empty nftables input hook. Only the narrowly reviewed
   ManyFW-owned `inet` input table is changed. Default actions are translated
   with explicit family-scoped nftables fallback rules, never as an unscoped

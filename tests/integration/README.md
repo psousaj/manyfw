@@ -61,11 +61,11 @@ parsed state. It never touches the development host firewall or the pre-existing
 Docker test guest.
 
 ```sh
-MANYFW_VM_ROOT=/tmp/opencode/manyfw-planner-issue7 \
+MANYFW_VM_ROOT=/tmp/manyfw-planner-issue7 \
   scripts/integration/planner-vm-up.sh
-MANYFW_VM_ROOT=/tmp/opencode/manyfw-planner-issue7 \
+MANYFW_VM_ROOT=/tmp/manyfw-planner-issue7 \
   scripts/integration/planner-vm-test.sh
-MANYFW_VM_ROOT=/tmp/opencode/manyfw-planner-issue7 \
+MANYFW_VM_ROOT=/tmp/manyfw-planner-issue7 \
   scripts/integration/vm-down.sh
 ```
 

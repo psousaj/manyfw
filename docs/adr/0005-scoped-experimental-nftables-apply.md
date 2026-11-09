@@ -410,7 +410,7 @@ not independent review.
 | Packet run `issue24-linux-packet-1794162697-855068` | 104/104 required cases passed; includes eight real IPv6/TCP and IPv4/UDP composition scenarios across both verdict orders and priorities, plus flowtable pre-mutation refusal; `packet_eligible: true`; guest destroyed. |
 | Recovery run `mfw-20261108T153526Z-812910` | 32 critical scenarios and `harness_completion` passed; `recovery_eligible: true`; guest destroyed. |
 | Candidate | HEAD `a002a08fa512fe7248c6913e123d97b478974c07`; binary SHA-256 `3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`; both suites used that binary. |
-| Aggregate evidence receipt | `/home/jose/.cache/manyfw-issue24/acceptance-20261108-final-104.json`: `evidence_gates_passed: true`; `generic_linux_accepted: false` and `production_authorized: false` by design. It verifies evidence only and cannot self-assert review or approval. |
+| Aggregate evidence receipt | `acceptance-20261108-final-104.json` in the operator-local evidence archive: `evidence_gates_passed: true`; `generic_linux_accepted: false` and `production_authorized: false` by design. It verifies evidence only and cannot self-assert review or approval. |
 
 The accepted scope is limited to the tested native-nftables INPUT operations,
 selectors, families, verdict composition, and recovery behavior. Observed

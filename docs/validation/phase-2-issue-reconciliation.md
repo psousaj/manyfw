@@ -103,8 +103,9 @@ compares the complete versioned audit artifact, and retains explicit
 firewall/reachability unknowns. The goldens complement existing assertions for
 incomplete sources, policy mismatches, stopped containers, sanitization,
 evidence references, and deterministic ordering. This addresses the specific
-missing public-bind/Tailscale-only golden gap; the parent issue remains open on
-GitHub until its full acceptance is reviewed, and no tracker state was changed.
+public-bind/Tailscale-only golden gap. The issue was still open when this note
+was written; the completed acceptance review and closure on 2026-11-09 are
+recorded in the tracker reconciliation table above.
 
 ### #19 — Explain evidence model and renderers
 
@@ -131,8 +132,9 @@ shows both matching rules and their distinct priorities while keeping effective
 runtime enforcement unverified. Existing tests continue to cover identity
 resolution, replicas, evidence references, stopped lifecycle, IPv6 formatting,
 and renderer semantics. These local artifacts address the identified golden
-gap; the GitHub parent remains open because this run does not mutate tracker
-state.
+gap. This note records the state before the parent issue's acceptance review;
+#6 was subsequently closed on 2026-11-09 after confirming all criteria, as
+shown in the tracker reconciliation table.
 
 ### #26 — Linux CI/CD and v0.2.0 release
 
@@ -184,14 +186,14 @@ task sections above. No issue state was changed by this final audit.
 | Issue(s) | Tracker state | Reconciliation |
 |---|---|---|
 | #1, #2, #10–#19 | CLOSED | Implemented/released foundation, discovery, snapshot, audit, and explain work; relevant acceptance evidence is recorded above (and #1/#14 were already closed before this reconciliation) |
-| #3 | OPEN | Parent Docker integration criterion still lacks safely isolated disposable-Docker evidence; rootful development-daemon networking is not exercised |
+| #3 | OPEN as audited 2026-11-05; subsequently CLOSED 2026-11-09 | Later disposable Docker/KVM real-binary integration passed; see [issue-3-docker-kvm.md](issue-3-docker-kvm.md). No development daemon was used. |
 | #4 | CLOSED | Parent host discovery criteria demonstrated and evidence commented; closed 2026-11-05 |
-| #5 | OPEN | Local follow-up now checks in public IPv4, loopback, Tailscale-only, and dual-stack audit JSON goldens; the tracker remains open pending full parent acceptance review |
-| #6 | OPEN | Local NAT, host-network, multiple-mapping, and conflicting-policy JSON goldens are committed; tracker remains open pending full parent acceptance review |
+| #5 | OPEN as audited 2026-11-05; subsequently CLOSED 2026-11-09 | Required public IPv4, loopback, Tailscale-only, and dual-stack audit JSON goldens and report/exit behavior are implemented; tracker acceptance review completed. |
+| #6 | OPEN as audited 2026-11-05; subsequently CLOSED 2026-11-09 | Required NAT, host-network, multiple-mapping, and conflicting-policy Explain goldens and ambiguity/error behavior are implemented; tracker acceptance review completed. |
 | #7 | OPEN as audited 2026-11-05; subsequently CLOSED 2026-11-08 | At the audit date, #20/#21 and goldens were complete but parent isolated packet acceptance remained incomplete; final evidence and closure are recorded below |
 | #20, #21 | CLOSED | Child implementation contracts completed; #7's parent-level isolated acceptance remains separate |
-| #8, #22–#24 | OPEN | v0.4.0 enforcement/rollback and privileged VM recovery gates intentionally remain open; #24 evidence is NotApplicable in hosted CI |
-| #26 | OPEN | Release/matrix evidence is positive, but PR-matrix gating change awaits hosted workflow verification |
+| #8, #22–#24 | OPEN as audited 2026-11-05; #22, #8, and #24 subsequently CLOSED; #23 CLOSED 2026-11-09 | Bounded experimental Apply/recovery acceptance is evidenced in the linked issue sections and TEST-MATRIX. Hosted CI does not run privileged VM recovery; Tailscale remains separate in #42. |
+| #26 | OPEN as audited 2026-11-05; still OPEN as of 2026-11-09 | Historical release/matrix evidence is positive. The updated v0.4.0 PR's hosted checks have not yet completed; this document does not claim #26 closure. |
 
 ### 2026-11-07 M3 milestone split and execution order
 
@@ -239,7 +241,7 @@ network namespaces, derived test-only nftables verdict rules from the typed
 host INPUT allow and scoped default-deny operations, compared accepted TCP/8080
 and denied TCP/8081 packet probes, and asserted the target namespace's
 nftables JSON ruleset was unchanged across plan generation. Current evidence is at
-`/tmp/opencode/manyfw-planner-issue7/evidence/mfw-planner-20261107T044427Z-154011/planner/`.
+`mfw-planner-20261107T044427Z-154011/planner/` in the operator-local evidence archive.
 This original evidence demonstrates one read-only host INPUT scenario only; it
 did not claim Docker packet-path coverage and did not close #7 at that time.
 
@@ -248,7 +250,7 @@ did not claim Docker packet-path coverage and did not close #7 at that time.
 The remaining parent acceptance has now been completed and #7 closed. Eight
 versioned planner goldens and the pure planning/diagnostic contracts described
 above were retained. Fresh disposable-KVM evidence at
-`/home/jose/.cache/manyfw-planner-issue7/evidence/mfw-planner-20261108T205258Z-893457/planner/`
+`mfw-planner-20261108T205258Z-893457/planner/` in the operator-local evidence archive
 contains two passing real packet tests: dual-stack host INPUT (8 allow/deny
 probes, including explicit precedence and source mismatch) and native Docker
 NAT/FORWARD (published 18080 allowed to the observed container destination,
@@ -262,26 +264,24 @@ are recorded in `metadata.txt`; guest teardown evidence is `vm-down.log`.
 
 At this 2026-11-08 acceptance record, tracker state was #7 CLOSED, #8 OPEN, and
 #24 CLOSED. GitHub #8 was subsequently closed on 2026-11-09 for its bounded
-generic acceptance; #23 remains OPEN while #24, #7, and #8 are CLOSED. This
-closes only the planner dependency. Broader #8 production-release criteria
-remain independent and unfinished.
+generic acceptance; #23 was also closed on 2026-11-09 after its implementation
+acceptance review. These closures apply only to the documented bounded
+experimental scope; they do not authorize production enforcement.
 
-### #3 — Read-only Docker discovery (parent issue; remains open)
+### #3 — Read-only Docker discovery (status as audited 2026-11-05)
 
 | Acceptance criterion | Implementation evidence | Test/evidence | Status |
 |---|---|---|---|
 | Fixtures cover Compose labels, multiple published mappings, dual-stack ports, and restarts | Core Docker projection and CLI Bollard adapter in `crates/manyfw-core/src/docker.rs` and `crates/manyfw-cli/src/docker_engine.rs` | `identity_precedence_and_replicas_are_preserved`; `endpoint_normalization_keeps_family_and_protocol_distinct`; adapter fixture tests listed in PR #28 CI | Demonstrated by deterministic fixtures |
-| Read-only integration tests with disposable Docker containers when daemon available | No disposable Docker integration test or harness is present in the repository/workflow | Existing v0.2.0 evidence (`docs/validation/v0.2.0-discovery.md`) used a disposable `--network none` container without a Docker socket and separately observed six pre-existing containers; it explicitly made no Docker resource changes | **Not demonstrated** |
+| Read-only integration tests with disposable Docker containers when daemon available | Not present at the time of the 2026-11-05 audit | Later real Docker/KVM run is recorded in [`issue-3-docker-kvm.md`](issue-3-docker-kvm.md): disposable guest Docker Engine, real-binary lifecycle/publication/permission cases, and before/after firewall-state comparison | **Passed 2026-11-07** |
 | Permission/unavailable-daemon diagnostics | Docker Engine error classification and core `CollectionOutcome`/diagnostic mapping | `docker_engine::tests::unavailable_socket_and_malformed_api_response_have_distinct_statuses`; core `failures_are_distinguished_from_zero_candidates`; #13 permission tests | Demonstrated |
 | No Docker API mutations | Adapter uses list/inspect only; no mutation method is in its injected API boundary | Source inspection of `DockerEngineApi` and `LocalDockerEngine`; no create/start/stop/remove API calls | Demonstrated by source inspection |
 
-Parent #3 remains OPEN. The local daemon is available and has existing running
-containers, but is rootful; creating a disposable bridge-published container
-would invoke Docker networking that can modify the development host firewall.
-Repository safety guidance forbids firewall mutation testing on that host.
-Existing live read-only snapshots and mock/fixture tests do not satisfy the
-parent's explicit disposable-container integration criterion, so the issue is
-not closed and no unsafe runtime test was attempted.
+At the 2026-11-05 audit, parent #3 remained open because the local rootful daemon
+could not safely serve as the disposable integration environment. That gap was
+later addressed in the marked QEMU/KVM guest documented above; the development
+host Docker daemon/firewall was not used. After evidence review, #3 was closed
+as completed on 2026-11-09.
 
 ### #11 — Policy semantics and legacy migration
 
