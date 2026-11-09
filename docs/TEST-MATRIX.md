@@ -251,6 +251,33 @@ recovery matrix, which remain the separately recorded prior candidate evidence.
 | OpenRC Apply/recovery | `RUN_OK`; real KVM guest, OpenRC init, nftables mutation/recovery and foreign-table preservation | Same run's guest evidence and `result.txt` |
 | Teardown | Passed; disposable guest stopped and marked state removed | Same run's `vm-down.log`; no active VM remains |
 
+### v0.4.0 recovery-storage hardening candidate revalidation (2026-11-09)
+
+The transaction-store and recovery-directory hardening candidate was rebuilt by
+each integration harness from the captured worktree before guest installation.
+Both harnesses now verify the tested binary against that fresh build and check
+the source manifest's contents and inventory after build and runtime. The
+systemd guest completed all 33 critical recovery scenarios and harness
+completion; the OpenRC guest completed its real recovery scenarios, including
+SSH loss/recovery and reboot recovery. Both disposable guests were destroyed.
+These are experimental isolated-guest results only; release eligibility and
+production authorization remain false.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| Systemd production recovery | Passed all 33 critical scenarios plus harness completion; `recovery_eligible: true`; `release_eligible: false`; Tailscale `NotApplicable` | Run `issue24-production-mfw-20261109T201050Z-454886`; `issue24-release-gate.json`, `status.tsv`, `metadata.txt`, `source-manifest.json`, and `vm-down.log` in operator-local evidence archive |
+| Systemd candidate binding | Base `219dd805ed77f099e4247649ca872b3b68a32343`; worktree SHA-256 `25125777677ad0bb89180ecd801c281a8f29135425929f2271ecc942308616ea`; GNU CLI SHA-256 `354cd53b360cb602a6b64938d9267c7652ab3bc5d9a531ad3a1c55c0d3aec7af`; manifest contains 222 source files | Same run's `metadata.txt`, `source-manifest.json`, and installed-binary receipt |
+| OpenRC production recovery | Passed; `RUN_OK`; actual SSH loss was observed after ManyFW's drop rule, recovery restored connectivity, reboot recovery completed, and foreign nftables state was preserved | Run `issue8-openrc-mfw-openrc-20261109T202112Z-462225`; `result.txt`, `ssh-loss-observed.txt`, transaction/recovery artifacts, and `vm-down.log` in operator-local evidence archive |
+| OpenRC candidate binding | Same base; implementation worktree SHA-256 `802dafb3c2d4b068682fd19f49f8eac569ec86db183c08b8e64d1e138f0d8e72`; static musl CLI SHA-256 `3fd8bf100f38b7eab918cec29321f5dc7f81768bd410ec767c74f9295c7e6825`; manifest contains 167 source files | Same run's `candidate-binding.txt`, `source-manifest.json`, `manyfw-binary.sha256`, and `vm-down.log` |
+| Failed candidate-bound OpenRC attempt | Not passed: all SSH probes remained reachable, so the required real firewall-induced management loss was not demonstrated; candidate binding was recorded and the guest was destroyed | Run `issue8-openrc-mfw-openrc-20261109T201749Z-459582`; retain `ssh-loss-probes.log` and `vm-down.log` as failed-attempt history |
+| Earlier incomplete systemd attempt | Not counted: run `issue24-production-mfw-20261109T200309Z-450511` stopped during evidence collection (`o: command not found`) after six scenarios; its release gate remained incomplete and the guest was destroyed. The subsequent run above completed the entire matrix. | Same run's `status.tsv`, `issue24-release-gate.json`, and `vm-down.log` |
+| Earlier OpenRC candidate reports | The earlier `RUN_OK` at `issue8-openrc-mfw-openrc-20261109T194224Z-438156` used a pre-existing static CLI (`0b7e027ee14f9cfbd5a3b9e59f5e4b81b9ddacbd4a374f4dd82cf94db681e767`) rather than a harness-verified fresh build of this candidate. It is not counted for the recovery-storage hardening candidate. Earlier evidence for its own recorded candidate remains historical. | Earlier run's `candidate-binding.txt`, `manyfw-binary.sha256`, and `result.txt` |
+
+The passing runs bind the exact pre-documentation worktree state listed above;
+the evidence-record edits in this section were made afterward and do not alter
+the reviewed implementation or tested binaries. Neither run authorizes
+production operation or mutation of the development host.
+
 ### Earlier immutable #24 generic candidate (not the current #8 candidate)
 
 The earlier #24 candidate was HEAD

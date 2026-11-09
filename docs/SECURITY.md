@@ -50,6 +50,15 @@ recovery validation.
 No production mutation adapter is approved or enabled. ADR-0005 records
 approval only for the bounded isolated experimental implementation.
 
+The transaction `FileStore` opens record and lock files without following
+symlinks, verifies that they are regular files owned by the effective user,
+and creates or tightens their permissions to owner-only. Callers must still
+provide a trusted transaction directory; the experimental CLI additionally
+requires the fixed recovery directories to be root-owned and mode `0700` before
+the supervisor or apply path accesses them. The generic core store is not an
+authorization mechanism and must not be pointed at an attacker-writable
+directory.
+
 Privileged implementation must only ship after network namespace/VM integration tests demonstrate:
 
 1. `validate` and deterministic `plan` with capability detection.

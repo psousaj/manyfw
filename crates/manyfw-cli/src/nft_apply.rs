@@ -22,17 +22,21 @@ pub(crate) struct NftBackend;
 
 impl NftBackend {
     pub(crate) fn prepare_recovery_storage() -> TxResult<()> {
-        std::fs::create_dir_all(STORE)
+        Self::prepare_recovery_storage_at(std::path::Path::new(STORE), 0)
+    }
+
+    fn prepare_recovery_storage_at(root: &std::path::Path, expected_uid: u32) -> TxResult<()> {
+        std::fs::create_dir_all(root)
             .map_err(|error| TransactionError::Store(error.to_string()))?;
-        secure_root_directory(std::path::Path::new(STORE))?;
-        let arm_dir = std::path::Path::new(STORE).join("arm");
+        secure_directory_owned_by(root, expected_uid)?;
+        let arm_dir = root.join("arm");
         std::fs::create_dir_all(&arm_dir)
             .map_err(|error| TransactionError::Store(error.to_string()))?;
-        secure_root_directory(&arm_dir)?;
-        let transaction_dir = std::path::Path::new(STORE).join("transactions");
+        secure_directory_owned_by(&arm_dir, expected_uid)?;
+        let transaction_dir = root.join("transactions");
         std::fs::create_dir_all(&transaction_dir)
             .map_err(|error| TransactionError::Store(error.to_string()))?;
-        secure_root_directory(&transaction_dir)
+        secure_directory_owned_by(&transaction_dir, expected_uid)
     }
 
     fn verify_recovery_arm_directory() -> TxResult<()> {
@@ -1449,11 +1453,11 @@ fn write_atomic(path: &str, data: Vec<u8>) -> TxResult<()> {
     Ok(())
 }
 
-fn secure_root_directory(path: &std::path::Path) -> TxResult<()> {
+fn secure_directory_owned_by(path: &std::path::Path, expected_uid: u32) -> TxResult<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| TransactionError::Store(error.to_string()))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.uid() != 0 {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.uid() != expected_uid {
         return Err(TransactionError::Store(
             "unsafe recovery-state directory".into(),
         ));
@@ -1465,6 +1469,34 @@ fn secure_root_directory(path: &std::path::Path) -> TxResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_storage_directory_rejects_symlinks_and_enforces_root_private_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("manyfw-storage-dir-{}-{nonce}", std::process::id()));
+        let expected_uid = unsafe { libc::geteuid() };
+        NftBackend::prepare_recovery_storage_at(&root, expected_uid).unwrap();
+        for path in [&root, &root.join("arm"), &root.join("transactions")] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(std::fs::metadata(path).unwrap().uid(), expected_uid);
+        }
+
+        std::fs::remove_dir_all(root.join("arm")).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("arm")).unwrap();
+        assert!(NftBackend::prepare_recovery_storage_at(&root, expected_uid).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn recovery_supervisor_selection_accepts_systemd_or_openrc_and_fails_closed() {

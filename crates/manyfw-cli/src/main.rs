@@ -406,6 +406,7 @@ fn run_confirm(transaction_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Err("confirmation token must be provided on stdin".into());
     }
     nft_apply::NftBackend::require_isolated_guest()?;
+    nft_apply::NftBackend::prepare_recovery_storage()?;
     let store = FileStore::new("/var/lib/manyfw/transactions");
     let runner = TransactionRunner::new(nft_apply::NftBackend, store, LinuxClock, OsTokenSource);
     runner.confirm(
@@ -429,6 +430,7 @@ fn run_recovery_worker(
     };
     if let Some(transaction_id) = rollback {
         nft_apply::NftBackend::require_guest()?;
+        nft_apply::NftBackend::prepare_recovery_storage()?;
         let runner = TransactionRunner::new(
             nft_apply::NftBackend,
             FileStore::new("/var/lib/manyfw/transactions"),

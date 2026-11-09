@@ -47,6 +47,25 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps({"base": subprocess.check_output
 print(digest.hexdigest())
 PY
 
+verify_candidate_sources() {
+    python3 - "$REPO_ROOT" "$evidence/source-manifest.json" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads(pathlib.Path(sys.argv[2]).read_text())
+for entry in manifest["sources"]:
+    path = root / entry["path"]
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+        raise SystemExit(f"candidate source changed during the run: {entry['path']}")
+tracked = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z"], text=False).split(b"\0")
+untracked = subprocess.check_output(["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"], text=False).split(b"\0")
+current = {name.decode() for name in tracked + untracked
+           if name and not name.decode().startswith(("target/", "docs/"))
+           and (root / name.decode()).is_file()}
+if current != {entry["path"] for entry in manifest["sources"]}:
+    raise SystemExit("candidate source inventory changed during the run")
+PY
+}
+
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 for tool in qemu-img qemu-system-x86_64 cloud-localds genisoimage ssh scp ssh-keygen sha512sum; do
@@ -135,6 +154,12 @@ cleanup() {
                 "$CURRENT_DIR" >>"$evidence/cleanup-warning.txt"
             status=1
         fi
+    fi
+    if ! verify_candidate_sources; then
+        rm -f -- "$evidence/result.txt"
+        printf 'candidate source manifest changed during runtime validation\n' \
+            >"$evidence/candidate-source-changed.txt"
+        status=1
     fi
     exit "$status"
 }
@@ -228,13 +253,19 @@ vm_ssh sudo cat /proc/1/comm >"$evidence/guest-init-comm.txt"
 vm_ssh sudo rc-status >"$evidence/guest-openrc-status-initial.txt"
 vm_ssh sudo ip route >"$evidence/guest-routes.txt"
 
-binary=${1:-$REPO_ROOT/target/x86_64-unknown-linux-musl/release/manyfw}
+built_binary="$REPO_ROOT/target/x86_64-unknown-linux-musl/release/manyfw"
+TMPDIR="$VM_ROOT/tmp" cargo build --locked --quiet --release \
+    --target x86_64-unknown-linux-musl -p manyfw
+binary=${1:-$built_binary}
 [[ -x "$binary" ]] || die "static musl ManyFW CLI is missing: $binary"
 file "$binary" >"$evidence/manyfw-binary-file.txt"
 if readelf -l "$binary" 2>/dev/null | grep -q 'INTERP'; then
     die 'OpenRC integration requires a static musl ManyFW executable'
 fi
 binary_sha=$(sha256sum "$binary" | awk '{print $1}')
+[[ "$binary_sha" == "$(sha256sum "$built_binary" | awk '{print $1}')" ]] \
+    || die 'tested binary does not match the freshly built candidate binary'
+verify_candidate_sources || die 'candidate sources changed while building the static binary'
 printf '%s  manyfw\n' "$binary_sha" >"$evidence/manyfw-binary.sha256"
 printf 'base=%s\nworktree_sha256=%s\nbinary_sha256=%s\n' \
     "$candidate_base" "$(cat "$evidence/worktree-sha256.txt")" "$binary_sha" \

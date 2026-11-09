@@ -45,17 +45,21 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps({"contract_version": "issue24-li
 print(h.hexdigest())
 PY
 )
-binary=${1:-$REPO_ROOT/target/release/manyfw}
-[[ -x "$binary" ]] || die "ManyFW executable missing: $binary"
-binary_sha256=$(sha256sum "$binary" | awk '{print $1}')
-guest_os=$(vm_ssh sudo bash -c '. /etc/os-release; printf "%s" "$PRETTY_NAME"')
-{
-    printf 'run_id=%s\n' "$run_id"
-    printf 'candidate_commit=%s\n' "$candidate_commit"
-    printf 'candidate_worktree_sha256=%s\n' "$candidate_worktree_digest"
-    printf 'binary_sha256=%s\n' "$binary_sha256"
-    printf 'guest=%s\n' "$guest_os"
-} >"$evidence/metadata.txt"
+verify_candidate_sources() {
+    python3 - "$REPO_ROOT" "$evidence/source-manifest.json" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads(pathlib.Path(sys.argv[2]).read_text())
+for entry in manifest["sources"]:
+    path = root / entry["path"]
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+        raise SystemExit(f"candidate source changed during the run: {entry['path']}")
+names = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).split(b"\0")
+current = {name.decode() for name in names if name and (root / name.decode()).is_file()}
+if current != {entry["path"] for entry in manifest["sources"]}:
+    raise SystemExit("candidate source inventory changed during the run")
+PY
+}
 write_release_gate() {
     python3 - "$evidence/status.tsv" "$evidence/issue24-release-gate.json" "${1:-incomplete}" "${guest_teardown:-pending}" <<'PY'
 import json, pathlib, sys
@@ -149,6 +153,12 @@ cleanup() {
         guest_teardown=diagnostic-retained
         cleanup_failed=yes
     fi
+    if ! verify_candidate_sources; then
+        printf 'candidate source manifest changed during runtime validation\n' \
+            >"$evidence/candidate-source-changed.txt"
+        cleanup_failed=yes
+        status=1
+    fi
     if [[ "$status" -eq 0 && "$cleanup_failed" == no && "$harness_body_completed" == yes ]]; then
         harness_completed=yes
     else
@@ -175,6 +185,22 @@ grep -qx ENABLED=no /etc/ufw/ufw.conf
 ' || die 'fresh disposable guest required: UFW firewall disabled, firewalld and ManyFW absent'
 # MANYFW_KEEP_VM=1 retains a diagnostic guest, not a reusable pristine baseline.
 trap cleanup EXIT
+TMPDIR="$VM_ROOT/tmp" cargo build --locked --quiet --release -p manyfw
+built_binary="$REPO_ROOT/target/release/manyfw"
+binary=${1:-$built_binary}
+[[ -x "$binary" ]] || die "ManyFW executable missing: $binary"
+binary_sha256=$(sha256sum "$binary" | awk '{print $1}')
+[[ "$binary_sha256" == "$(sha256sum "$built_binary" | awk '{print $1}')" ]] \
+    || die 'tested binary does not match the freshly built candidate binary'
+verify_candidate_sources || die 'candidate sources changed while building the release binary'
+guest_os=$(vm_ssh sudo bash -c '. /etc/os-release; printf "%s" "$PRETTY_NAME"')
+{
+    printf 'run_id=%s\n' "$run_id"
+    printf 'candidate_commit=%s\n' "$candidate_commit"
+    printf 'candidate_worktree_sha256=%s\n' "$candidate_worktree_digest"
+    printf 'binary_sha256=%s\n' "$binary_sha256"
+    printf 'guest=%s\n' "$guest_os"
+} >"$evidence/metadata.txt"
 vm_scp_to "$binary" /tmp/manyfw-issue24
 vm_scp_to "$REPO_ROOT/packaging/systemd/manyfw-recovery.service" /tmp/manyfw-recovery.service
 vm_scp_to "$SCRIPT_DIR/issue24-nft-test-shim.sh" /tmp/issue24-nft-test-shim

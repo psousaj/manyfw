@@ -533,3 +533,34 @@ receipt continues to report its own `source_runtime_review: pending` because
 that producer-only tool does not consume review dispositions. The separate
 review disposition is recorded here; generic acceptance and production
 authorization remain false.
+
+## Recovery-store hardening candidate review (2026-11-09)
+
+The transaction `FileStore` now rejects symlinked, non-regular, wrong-owner, or
+hard-linked record/lock files, creates private files, and tightens overly broad
+file permissions. The CLI validates the fixed root-owned mode-`0700` recovery
+directories before confirmation and explicit rollback access. This protects the
+durable recovery records from substitution or disclosure while retaining the
+documented trusted-parent-directory boundary for the generic core store.
+
+The Task 1 candidate was reviewed against base
+`219dd805ed77f099e4247649ca872b3b68a32343`. Standards and specification reviews
+were clean. A dedicated architecture/security review found no actionable
+findings and covered trust/ownership boundaries, privilege checks,
+failure/recovery, concurrency, interoperability, unsupported cases, and real
+isolated runtime evidence. This is Goal technical self-review under the
+project-specific owner-authorized disposable-KVM governance, not independent
+review or production approval.
+
+Candidate-bound production recovery passed in both verified disposable guests:
+the systemd matrix passed all 33 critical scenarios plus harness completion
+(`recovery_eligible: true`; `release_eligible: false`), and the OpenRC run passed
+with real SSH loss/recovery, reboot recovery, and foreign-table preservation.
+The exact artifacts, source manifests, worktree/binary digests, teardown
+receipts, and failed-attempt history are recorded in `TEST-MATRIX.md`. An
+OpenRC attempt that did not observe SSH loss is explicitly not counted; an
+earlier successful OpenRC run using an unverified pre-existing binary is also
+not evidence for this candidate. These runs validate only the bounded
+experimental recovery behavior in the named isolated guests. They do not
+establish generic packet acceptance, production authorization, or permission
+to mutate the development host.

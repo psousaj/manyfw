@@ -7,8 +7,25 @@ use manyfw_core::transaction::{
     TransactionRecord, TransactionRunner, TransactionState, TransactionStore,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
+
+fn fresh_store_directory() -> std::path::PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    for _ in 0..100 {
+        let directory = std::env::temp_dir().join(format!(
+            "manyfw-recovery-matrix-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => return directory,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("failed to create recovery test directory: {error}"),
+        }
+    }
+    panic!("could not allocate unique recovery test directory")
+}
 
 #[derive(Clone)]
 struct TestClock(ClockReading);
@@ -255,9 +272,7 @@ fn recovery_matrix_reports_supported_scenarios() {
 
     println!("Passed: durable restart and recovery fixture");
     let backend = FixtureBackend::new();
-    let directory =
-        std::env::temp_dir().join(format!("manyfw-recovery-matrix-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     file_runner(backend.clone(), store.clone(), 0)
         .start(plan("durable-restart"))
@@ -309,12 +324,7 @@ fn recovery_matrix_reports_supported_scenarios() {
 
 #[test]
 fn independent_supervisor_recovers_durable_transaction_without_runner() {
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-supervisor-matrix-{}-{}",
-        std::process::id(),
-        plan("supervisor-restart").transaction_id
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend::new();
 
@@ -377,11 +387,7 @@ fn independent_supervisor_recovers_durable_transaction_without_runner() {
 fn independent_supervisor_retries_transient_rollback_failure() {
     let backend = FixtureBackend::new();
     backend.fail_rollback.store(true, Ordering::SeqCst);
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-supervisor-retry-rollback-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let inner = Arc::new(FileStore::new(&directory));
     let store = Arc::new(FailRollbackFailureSave {
         inner: inner.clone(),
@@ -420,11 +426,7 @@ fn independent_supervisor_retries_transient_rollback_failure() {
 #[test]
 fn rollback_failure_persistence_error_keeps_record_recoverable_without_lock_leak() {
     let backend = FixtureBackend::new();
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-rollback-store-failure-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let inner = Arc::new(FileStore::new(&directory));
     let store = Arc::new(FailRollbackFailureSave {
         inner: inner.clone(),
@@ -484,9 +486,7 @@ fn pending_record_reserves_domain_after_process_lock_is_released() {
 
 #[test]
 fn confirming_file_store_transaction_releases_domain_for_next_transaction() {
-    let directory =
-        std::env::temp_dir().join(format!("manyfw-confirm-lock-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend::new();
     let runner = file_runner(backend.clone(), store.clone(), 0);
@@ -506,11 +506,7 @@ fn confirming_file_store_transaction_releases_domain_for_next_transaction() {
 
 #[test]
 fn runner_recovery_releases_original_and_recovery_domain_locks() {
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-runner-recovery-lock-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend::new();
     let runner = file_runner(backend.clone(), store.clone(), 0);
@@ -538,11 +534,7 @@ fn runner_recovery_releases_original_and_recovery_domain_locks() {
 
 #[test]
 fn explicit_rollback_releases_original_and_operation_domain_locks() {
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-explicit-rollback-lock-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend::new();
     let runner = file_runner(backend, store, 0);
@@ -560,11 +552,7 @@ fn explicit_rollback_releases_original_and_operation_domain_locks() {
 
 #[test]
 fn rollback_failure_keeps_domain_reserved_for_administrative_recovery() {
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-rollback-failure-lock-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend {
         partial: true,
@@ -586,9 +574,7 @@ fn rollback_failure_keeps_domain_reserved_for_administrative_recovery() {
 
 #[test]
 fn reboot_expires_confirmation_even_when_wall_clock_moves_backwards() {
-    let directory =
-        std::env::temp_dir().join(format!("manyfw-supervisor-reboot-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend::new();
     let initiating_runner = TransactionRunner::new(
@@ -650,11 +636,7 @@ fn unavailable_clock_rolls_back_pending_confirmation_and_sanitizes_error() {
 
 #[test]
 fn concurrent_supervisor_recovery_is_exclusive_across_instances() {
-    let directory = std::env::temp_dir().join(format!(
-        "manyfw-supervisor-concurrent-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
+    let directory = fresh_store_directory();
     let store = Arc::new(FileStore::new(&directory));
     let backend = FixtureBackend::new();
     file_runner(backend.clone(), store.clone(), 0)

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -461,13 +461,31 @@ impl FileStore {
             .directory
             .join(format!("{}.lock", safe_file_component(domain)));
         fs::create_dir_all(&self.directory).map_err(|e| TransactionError::Store(e.to_string()))?;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&lock)
             .map_err(|error| TransactionError::Store(error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| TransactionError::Store(error.to_string()))?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err(TransactionError::Store(
+                "unsafe transaction lock file".into(),
+            ));
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| TransactionError::Store(error.to_string()))?;
+        }
         // SAFETY: flock only reads the valid descriptor owned by `file`; the
         // lock is released automatically when that descriptor closes/process exits.
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -501,6 +519,7 @@ impl FileStore {
 
 impl TransactionStore for FileStore {
     fn save(&self, record: &TransactionRecord) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
         fs::create_dir_all(&self.directory).map_err(|e| TransactionError::Store(e.to_string()))?;
         let path = self.path(&record.plan.transaction_id);
         let bytes = serde_json::to_vec_pretty(record)
@@ -515,6 +534,7 @@ impl TransactionStore for FileStore {
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
+                .mode(0o600)
                 .open(&candidate)
             {
                 Ok(file) => break (candidate, file),
@@ -539,13 +559,11 @@ impl TransactionStore for FileStore {
             .map_err(|e| TransactionError::Store(e.to_string()))
     }
     fn load(&self, id: &str) -> Result<Option<TransactionRecord>> {
-        match fs::read(self.path(id)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| TransactionError::Store(e.to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(TransactionError::Store(e.to_string())),
-        }
+        read_secure_record(&self.path(id))?
+            .map(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|e| TransactionError::Store(e.to_string()))
+            })
+            .transpose()
     }
     fn list(&self) -> Result<Vec<TransactionRecord>> {
         let entries = match fs::read_dir(&self.directory) {
@@ -563,8 +581,9 @@ impl TransactionStore for FileStore {
             {
                 continue;
             }
-            let bytes = fs::read(entry.path())
-                .map_err(|error| TransactionError::Store(error.to_string()))?;
+            let bytes = read_secure_record(&entry.path())?.ok_or_else(|| {
+                TransactionError::Store("transaction record disappeared during listing".into())
+            })?;
             let record = serde_json::from_slice(&bytes)
                 .map_err(|error| TransactionError::Store(error.to_string()))?;
             records.push(record);
@@ -590,6 +609,36 @@ impl TransactionStore for FileStore {
             }
         }
     }
+}
+
+fn read_secure_record(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let mut file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(TransactionError::Store(error.to_string())),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| TransactionError::Store(error.to_string()))?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1
+    {
+        return Err(TransactionError::Store(
+            "unsafe transaction record file".into(),
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| TransactionError::Store(error.to_string()))?;
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)
+        .map_err(|error| TransactionError::Store(error.to_string()))?;
+    Ok(Some(bytes))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1580,6 +1629,22 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn fresh_test_directory(label: &str) -> PathBuf {
+        for attempt in 0..100 {
+            let candidate = std::env::temp_dir().join(format!(
+                "manyfw-{label}-{}-{}-{attempt}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => return candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("failed to create test directory: {error}"),
+            }
+        }
+        panic!("could not allocate unique test directory")
+    }
+
     #[test]
     fn confirmation_token_debug_output_is_redacted() {
         let token = ConfirmationToken::from_secret("sensitive-test-token".into());
@@ -2176,8 +2241,8 @@ mod tests {
 
     #[test]
     fn file_store_round_trips_durable_record() {
-        let directory =
-            std::env::temp_dir().join(format!("manyfw-transaction-{}", std::process::id()));
+        use std::os::unix::fs::PermissionsExt;
+        let directory = fresh_test_directory("transaction");
         let store = FileStore::new(&directory);
         let record = TransactionRecord {
             plan: plan("nine"),
@@ -2191,14 +2256,66 @@ mod tests {
         };
         store.save(&record).unwrap();
         assert_eq!(store.load("nine").unwrap(), Some(record));
+        fs::set_permissions(store.path("nine"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.load("nine").unwrap().is_some());
+        assert_eq!(
+            fs::metadata(store.path("nine"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_rejects_symlinked_records_and_lock_files() {
+        use std::os::unix::fs::symlink;
+
+        let directory = fresh_test_directory("symlink-store");
+        let outside = directory.with_extension("outside");
+        fs::write(&outside, b"must not be read or modified").unwrap();
+        symlink(&outside, directory.join("7265636f7264.json")).unwrap();
+        symlink(&outside, directory.join("646f6d61696e.lock")).unwrap();
+        fs::hard_link(&outside, directory.join("6c696e6b6564.json")).unwrap();
+        let store = FileStore::new(&directory);
+
+        assert!(store.load("record").is_err());
+        assert!(store.load("linked").is_err());
+        assert!(store.list().is_err());
+        assert!(store.acquire_domain_exclusive("domain", "owner").is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"must not be read or modified");
+
+        let _ = fs::remove_dir_all(&directory);
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_creates_private_locks_and_tightens_existing_lock_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = fresh_test_directory("lock-mode");
+        let store = FileStore::new(&directory);
+        let lock_path = directory.join("646f6d61696e.lock");
+        fs::write(&lock_path, b"").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.acquire_domain_exclusive("domain", "owner").unwrap();
+        assert_eq!(
+            fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        store.release_domain("domain", "owner");
+
         let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
     fn file_store_domain_locks_are_kernel_exclusive_across_store_instances() {
-        let directory =
-            std::env::temp_dir().join(format!("manyfw-domain-lock-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
+        let directory = fresh_test_directory("domain-lock");
         let first = FileStore::new(&directory);
         let second = FileStore::new(&directory);
 
