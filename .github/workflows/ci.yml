@@ -104,6 +104,8 @@ jobs:
         run: python3 -m unittest scripts/test_validate_recovery_report.py
       - name: Validate workflow policy contracts
         run: python3 -m unittest scripts/test_workflow_contracts.py
+      - name: Validate release installer contracts
+        run: python3 -m unittest scripts/test_install.py
 
   dependency-audit:
     name: dependency audit

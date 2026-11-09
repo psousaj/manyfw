@@ -80,6 +80,10 @@ The installer supports Linux `x86_64` and `aarch64` with GNU libc or musl. It
 detects the architecture and libc, downloads the matching archive, verifies
 its published SHA-256 checksum, and
 checks the binary version before installing it to `/usr/local/bin/manyfw`.
+Running the installer again updates an existing ManyFW binary after validating
+the downloaded release. To remove only the binary, pass `--uninstall`; the
+installer preserves configuration, services, transaction state, and firewall
+rules. Set `MANYFW_INSTALL_DIR` to select a non-default location.
 
 Install the current stable release explicitly:
 

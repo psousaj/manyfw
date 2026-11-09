@@ -96,9 +96,14 @@ prereleases are not published by this workflow.
 The release installer at `scripts/install.sh` detects Linux architecture and
 GNU versus musl libc, selects the matching release archive, verifies its
 SHA-256 checksum and binary version, then installs `manyfw` into
-`/usr/local/bin` (using `sudo` only when needed). It fails closed for unsupported
-platforms or missing release assets. The installer does not perform firewall
-operations.
+`/usr/local/bin` (using `sudo` only when needed). Re-running it updates an
+existing recognized ManyFW binary; unrelated files and symlinks are never
+overwritten. `--uninstall` removes only that executable from
+`MANYFW_INSTALL_DIR` (default `/usr/local/bin`), preserving services,
+configuration, transaction state, and firewall rules. The installer fails
+closed for unsupported platforms or missing release assets and performs no
+firewall operations. Offline installer contract tests run with
+`python3 -m unittest scripts.test_install`.
 
 The v0.4.0 candidate is not published by this PR or by merging it. The release
 workflow has `contents: write` only on its publish job. It does
