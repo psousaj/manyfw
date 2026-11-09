@@ -2,7 +2,7 @@
 
 **Policy-first firewall coordination for Linux, containers and private networks.**
 
-> **Current stable release: [v0.3.0](https://github.com/psousaj/manyfw/releases/tag/v0.3.0).** ManyFW remains read-only and must never be relied on for host protection.
+> **Current stable release: [v0.3.0](https://github.com/psousaj/manyfw/releases/tag/v0.3.0).** Published releases are read-only. This branch also contains an opt-in experimental Apply path restricted to marked disposable QEMU/KVM guests; it must never be relied on for host protection.
 
 ManyFW aims to provide one declarative policy model, a comprehensible `explain`/`audit` experience, and safe integration with existing firewall managers. It is **not** intended to overwrite Docker, UFW or firewalld rules.
 
@@ -46,12 +46,15 @@ concise summary.
 `audit` and `explain` analyze a saved snapshot; neither performs live collection.
 `explain` reports observed paths, policy evaluation, evidence, and unknowns; it
 does not establish external reachability. `plan` currently prints a **policy
-summary**, not an executable kernel ruleset. There is intentionally no `apply`
-command.
+summary**, not an executable kernel ruleset. The stable v0.3.0 release has no
+Apply command. This branch's `apply --file BUNDLE --experimental` path is for
+the explicitly marked disposable QEMU/KVM test environment only; see
+[`ADR-0005`](docs/adr/0005-scoped-experimental-nftables-apply.md). It is not
+production enforcement or authorization to modify a development host.
 
 ## Supported build environment
 
-The current v0.2.0 release provides Linux x86_64 and aarch64 binaries for GNU libc and
+The current v0.3.0 release provides Linux x86_64 and aarch64 binaries for GNU libc and
 musl. These targets were built and their packaged artifacts smoke-tested by the
 release workflow; see the [CI/CD policy](docs/CI-CD.md) for the validation
 matrix and its limits. The minimum supported Rust version (MSRV) is 1.85.0. CI verifies the
@@ -67,7 +70,7 @@ checks the binary version before installing it to `/usr/local/bin/manyfw`.
 Install the current stable release explicitly:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/psousaj/manyfw/main/scripts/install.sh | bash -s -- 0.2.0
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/psousaj/manyfw/main/scripts/install.sh | bash -s -- 0.3.0
 ```
 
 To install whichever release is latest at install time, omit the version:
@@ -81,8 +84,8 @@ detected without `ldd`). It uses `sudo` only if the destination is not writable.
 To install a specific release or choose a writable destination:
 
 ```sh
-bash scripts/install.sh 0.2.0
-MANYFW_INSTALL_DIR="$HOME/.local/bin" bash scripts/install.sh 0.2.0
+bash scripts/install.sh 0.3.0
+MANYFW_INSTALL_DIR="$HOME/.local/bin" bash scripts/install.sh 0.3.0
 ```
 
 Review the script before piping it to a shell. Published ManyFW releases are
@@ -106,8 +109,10 @@ applicable and blocked plans. Test-only reference translation verifies one
 IPv4 loopback UDP Allow/Deny verdict, and nftables rules remain unchanged during
 planning. This is not external-reachability or enforcement evidence. See the
 detailed [validation evidence](docs/validation/v0.3.0-planner.md).
-No `apply` command exists; guarded enforcement remains a later milestone. See
-the [roadmap](docs/ROADMAP.md) and [security model](docs/SECURITY.md).
+The stable v0.3.0 release has no `apply` command. This branch contains the
+opt-in experimental guest-only Apply path described above; broader guarded
+enforcement remains gated and production use is unauthorized. See the
+[roadmap](docs/ROADMAP.md) and [security model](docs/SECURITY.md).
 
 ## Direction
 

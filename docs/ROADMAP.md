@@ -1,10 +1,12 @@
 # Roadmap and release gates
 
-The highest completed and published roadmap milestone is **v0.2.0**. The
-[GitHub Release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0) was
-published on 2026-11-05 from commit `07cbf3e`; the
-[release workflow](https://github.com/psousaj/manyfw/actions/runs/42066292818)
-completed successfully.
+The highest completed and published roadmap milestone is **v0.3.0**; v0.4.0
+remains unreleased experimental work. The
+[v0.2.0 GitHub Release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0)
+was published on 2026-11-05 from commit `07cbf3e`, and the
+[v0.3.0 release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0) was
+subsequently published and verified by its
+[release workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087).
 
 ## v0.1.0 — Read-only scaffold
 - [x] Cargo workspace with one CLI binary
@@ -27,7 +29,7 @@ completed successfully.
 - [x] PR compatibility CI runs disposable host-namespace and distro smoke gates for stacked feature PRs
 - [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
-## v0.3.0 — Real planner (release candidate; remains read-only)
+## v0.3.0 — Real planner (published; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
 - [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), PR #38)
