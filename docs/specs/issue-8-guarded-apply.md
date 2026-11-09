@@ -53,10 +53,11 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
   that must not be overwritten. Never restore a global snapshot blindly.
 - Use a supervisor independent of the CLI and business/discovery process. It
   must recover pending state after terminal loss and reboot, without assuming
-  systemd is present in the general architecture. The current ADR-0005
-  experimental subset deliberately requires verified systemd and refuses
-  non-systemd Apply. This bounded exception is not completion of the parent's
-  portable supervisor requirement or a Linux portability claim.
+  systemd is present in the general architecture. The bounded experimental
+  implementation supports verified systemd and OpenRC integrations and refuses
+  unknown service managers. These explicitly installed integrations do not
+  establish support for every Linux init system or automatic supervisor
+  installation.
 - Use cryptographically unpredictable transaction-bound confirmation tokens;
   persist deadlines, reject expired/wrong tokens, make confirmation idempotent,
   and never log tokens.
@@ -80,6 +81,8 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
   supervisor failure, SSH loss, reboot during applying/verifying/confirmation,
   partial apply, partial rollback, corrupt checkpoint, wrong/expired token,
   ownership divergence, concurrent manager changes, IPv4/IPv6, Docker modes,
+  Docker daemon restart and an actual container address change, with ManyFW
+  foreign-state preservation checked after the address change,
   UFW/firewalld, and no-global-flush invariants. The authoritative generic
   packet contract and separately retained local Tailscale disconnect/compatibility
   contract are in [issue #24](issue-24-linux-enforcement.md). External tailnet
@@ -109,6 +112,19 @@ the detailed evidence and residual unsupported paths are recorded in the #24
 contract and ADR-0005. Historical evidence and false gates remain unchanged;
 #8 acceptance is not advanced by #24.
 
-This issue cannot start until #7 is complete, the threat model is documented,
-and the required isolated test environments are available. A normal successful
-apply is insufficient evidence for release.
+For parent #8, the 2026-11-08 current-candidate run in
+[`TEST-MATRIX.md`](../TEST-MATRIX.md#parent-8-current-candidate-acceptance-follow-up-2026-11-08)
+records packet, recovery, Docker restart/IP-change, SSH loss, and teardown
+evidence for the tested systemd-based experimental scope. The parent supervisor
+acceptance gap was closed for the bounded OpenRC integration by the separately
+reviewed and validated follow-up in this document and the test matrix; unknown
+service managers remain unsupported. The local owner-reconciled criterion replaces the old
+tailnet-disconnect requirement with technology-agnostic real Linux connectivity
+loss/recovery; Tailscale remains a separate pending compatibility contract and
+is not claimed by #8 generic acceptance.
+
+The original entry gate was completion of #7, a documented threat model, and
+available isolated test environments. #7 is complete and the current isolated
+environment has been used for the bounded systemd- and OpenRC-based evidence
+above. This does not claim universal Linux supervisor support; a normal
+successful apply is insufficient evidence for release.

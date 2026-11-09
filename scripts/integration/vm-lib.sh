@@ -14,7 +14,7 @@ BASE_NAME=noble-server-cloudimg-amd64.img
 BASE_URL=https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img
 BASE_SUMS_URL=https://cloud-images.ubuntu.com/noble/20261017/SHA256SUMS
 BASE_SHA256=04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
-GUEST_USER=mfw
+GUEST_USER=${MANYFW_GUEST_USER:-mfw}
 GUEST_MEMORY_MB=${MANYFW_VM_MEMORY_MB:-2048}
 GUEST_CPUS=${MANYFW_VM_CPUS:-2}
 GUEST_DISK_GB=${MANYFW_VM_DISK_GB:-20}
@@ -104,6 +104,9 @@ ssh_options() {
 
 vm_ssh() {
     ssh_options
+    if [[ -n "${MANYFW_VM_PRIVILEGE_COMMAND:-}" && "${1:-}" == sudo ]]; then
+        set -- "$MANYFW_VM_PRIVILEGE_COMMAND" "${@:2}"
+    fi
     local remote
     printf -v remote '%q ' "$@"
     ssh "${SSH_OPTIONS[@]}" "$GUEST_USER@127.0.0.1" "$remote"
@@ -120,11 +123,11 @@ vm_scp_to() {
 }
 
 vm_pid_matches() {
-    local pid=$1 args
+    local pid=$1 args disk_name=${MANYFW_VM_DISK_NAME:-ubuntu-overlay.qcow2}
     [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
     args=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
     [[ "$args" == *qemu-system-x86_64* \
-        && "$args" == *"$CURRENT_DIR/ubuntu-overlay.qcow2"* \
+        && "$args" == *"$CURRENT_DIR/$disk_name"* \
         && "$args" == *accel=kvm* \
         && "$args" == *"-netdev user,"* \
         && "$args" == *"hostfwd=tcp:127.0.0.1:"* ]]

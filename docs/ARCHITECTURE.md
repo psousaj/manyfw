@@ -15,7 +15,7 @@ authorize production or claim protection for a host or unsupported packet path.
 - **Docker adapter**: the CLI uses Bollard for read-only `list`/`inspect` operations over a local Unix socket and projects only allowlisted fields.
 - **Linux host adapter**: the separate `manyfw-linux` crate uses Netlink for interfaces, addresses, and routes, and Socket Diagnostics for TCP/UDP sockets. Read-only sysfs/procfs fallbacks are explicitly partial; the core contains only typed source contracts and normalization.
 - **Backends**: typed capability/feasibility planning in the core. The Linux adapter may collect nftables and iptables listings using fixed, read-only invocations; collection failures and unverified mode/ownership remain unknown. ADR-0005 accepts a narrowly scoped nftables host-input adapter only for explicitly opted-in experimental use in disposable isolated QEMU/KVM guests; production deployment and development-host mutation remain unauthorized.
-- **Transaction runner**: durable state-machine primitives and an independently supervised recovery worker retain wall-clock metadata and use boot-scoped monotonic deadlines; a boot change expires pending confirmation conservatively. ADR-0005 supplies a narrowly scoped experimental apply command and systemd unit for disposable isolated QEMU/KVM guests only; neither is approved for production deployment.
+- **Transaction runner**: durable state-machine primitives and an independently supervised recovery worker retain wall-clock metadata and use boot-scoped monotonic deadlines; a boot change expires pending confirmation conservatively. ADR-0005 supplies a narrowly scoped experimental apply command with explicitly installed systemd or OpenRC service integration for disposable isolated QEMU/KVM guests only; neither is approved for production deployment.
 
 ## Integration constraints
 
@@ -25,9 +25,9 @@ Within supported INPUT composition, deny must prevail over external accepts;
 allow cannot override external drops. The expanded packet suite and dedicated
 runtime review are recorded in ADR-0005 for the bounded experimental subset;
 the historical clean-input-hook approval alone did not cover this change.
-OUTPUT/FORWARD remain unsupported. Systemd is a verified
-experimental dependency, not an assumption of universal Linux availability;
-non-systemd Apply refuses.
+OUTPUT/FORWARD remain unsupported. The experimental adapter supports explicitly
+installed, verified systemd and OpenRC recovery integrations. It refuses unknown
+service managers and does not claim universal Linux portability.
 
 Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic.
 

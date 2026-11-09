@@ -78,7 +78,8 @@ critical = [
     "reboot_restores_nonempty_checkpoint",
     "timeout_automatic_recovery", "wall_clock_rollback_monotonic_recovery", "reboot_pending_apply",
     "concurrent_manyfw_transaction", "ipv4_real_loopback", "ipv6_real_loopback",
-    "docker_iptables", "docker_native_nftables", "ufw_coexistence", "firewalld_coexistence",
+    "docker_iptables", "docker_container_ip_change",
+    "docker_native_nftables", "ufw_coexistence", "firewalld_coexistence",
     "concurrent_external_manager_divergence", "no_global_or_table_flush",
 ]
 reported = {scenario: statuses.get(scenario, "NotRun") for scenario in critical}
@@ -490,26 +491,21 @@ mark rollback_failure_and_retry Passed
 
 # nft applies rollback atomically, so a partial in-kernel table restore is not
 # representable. Exercise the ambiguous boundary where the real atomic delete
-# committed but the command reports failure; operator retry must recognize the
-# already-restored checkpoint and persist terminal recovery safely.
+# committed but the command reports failure; supervisor retry must recognize
+# the already-restored checkpoint and persist terminal recovery safely.
 ambiguous_rollback_output=$(apply_plan /tmp/issue24-plan-v4.json 8)
 save_apply ambiguous-rollback-apply "$ambiguous_rollback_output"
 ambiguous_rollback_id=$(APPLY_OUTPUT="$ambiguous_rollback_output" python3 -c 'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
 vm_ssh sudo touch /run/manyfw-issue24/fail-after-rollback-commit
-ambiguous_rollback_state=
-for _ in $(seq 1 25); do
-    ambiguous_rollback_state=$(vm_ssh sudo python3 -c 'import glob,json; r=[json.load(open(p)) for p in glob.glob("/var/lib/manyfw/transactions/*.json")]; print(next((x["state"] for x in r if x["plan"]["transaction_id"]=="'"$ambiguous_rollback_id"'"),"missing"))')
-    [[ "$ambiguous_rollback_state" == rollback_failure ]] && break
-    sleep 1
-done
-[[ "$ambiguous_rollback_state" == rollback_failure ]] \
-    || die "post-commit rollback error was not recorded: $ambiguous_rollback_state"
-vm_ssh sudo rm -f /run/manyfw-issue24/fail-after-rollback-commit
-wait_table_absent "$ambiguous_rollback_id" 5 \
+wait_table_absent "$ambiguous_rollback_id" 15 \
     || die 'atomic rollback commit did not restore the original state'
-vm_ssh sudo manyfw recover --rollback "$ambiguous_rollback_id" \
-    >"$evidence/ambiguous-rollback-retry.json"
-wait_state rolled_back 10 "$ambiguous_rollback_id" >/dev/null
+wait_state rolled_back 15 "$ambiguous_rollback_id" >/dev/null
+vm_ssh sudo rm -f /run/manyfw-issue24/fail-after-rollback-commit
+vm_ssh sudo journalctl -u manyfw-recovery.service --no-pager \
+    >"$evidence/ambiguous-rollback-retry-worker.log"
+grep -F "independent recovery supervisor completed rollback retry for transaction $ambiguous_rollback_id" \
+    "$evidence/ambiguous-rollback-retry-worker.log" \
+    || die 'ambiguous rollback was not completed by the independent supervisor'
 mark ambiguous_rollback_commit_retry Passed
 
 # Corrupt only the persisted checkpoint digest during the confirmation window.
@@ -896,6 +892,47 @@ vm_ssh sudo systemctl is-active --quiet docker
 docker_native_config_touched=no
 docker_restart_required=no
 mark docker_native_nftables "$docker_native_status"
+
+# Exercise a real container address change between distinct bridge subnets;
+# daemon restart is exercised independently by the native-backend transition
+# immediately above. Apply/confirm against the resulting stable manager state.
+vm_ssh sudo docker network create issue24-ip-a >"$evidence/docker-ip-network-a.txt"
+vm_ssh sudo docker network create issue24-ip-b >"$evidence/docker-ip-network-b.txt"
+vm_ssh sudo docker run --detach --restart unless-stopped --name issue24-ip-change \
+    --network issue24-ip-a busybox:1.36 sh -c 'while :; do sleep 3600; done' \
+    >"$evidence/docker-ip-container-id.txt"
+docker_ip_a=$(vm_ssh sudo docker inspect --format \
+    '{{(index .NetworkSettings.Networks "issue24-ip-a").IPAddress}}' issue24-ip-change)
+[[ -n "$docker_ip_a" ]] || die 'Docker did not assign the initial container address'
+printf '%s\n' "$docker_ip_a" >"$evidence/docker-container-ip-before.txt"
+vm_ssh sudo docker network disconnect issue24-ip-a issue24-ip-change
+vm_ssh sudo docker network connect issue24-ip-b issue24-ip-change
+docker_ip_b=$(vm_ssh sudo docker inspect --format \
+    '{{(index .NetworkSettings.Networks "issue24-ip-b").IPAddress}}' issue24-ip-change)
+[[ -n "$docker_ip_b" && "$docker_ip_b" != "$docker_ip_a" ]] \
+    || die "Docker container IP did not change: before=$docker_ip_a after=$docker_ip_b"
+printf '%s\n' "$docker_ip_b" >"$evidence/docker-container-ip-after-change.txt"
+vm_ssh sudo docker inspect --format '{{.State.Running}}' issue24-ip-change \
+    | grep -Fx true >"$evidence/docker-container-running-after-ip-change.txt" \
+    || die 'Docker container did not remain running after its address change'
+vm_ssh sudo nft --json list ruleset >"$evidence/docker-ip-ruleset-before-apply.json"
+docker_ip_apply=$(apply_plan /tmp/issue24-plan-v4.json 60)
+save_apply docker-ip-change-apply "$docker_ip_apply"
+docker_ip_transaction=$(APPLY_OUTPUT="$docker_ip_apply" python3 -c \
+    'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
+docker_ip_token=$(APPLY_OUTPUT="$docker_ip_apply" python3 -c \
+    'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["confirmation_token"])')
+confirm_apply "$docker_ip_transaction" "$docker_ip_token" \
+    >"$evidence/docker-ip-change-confirm.json"
+wait_state confirmed 10 "$docker_ip_transaction" >/dev/null
+vm_ssh sudo nft --json list ruleset >"$evidence/docker-ip-ruleset-after-apply.json"
+assert_foreign_rules_preserved "$evidence/docker-ip-ruleset-before-apply.json" \
+    "$evidence/docker-ip-ruleset-after-apply.json" \
+    || die 'ManyFW changed Docker or other foreign firewall state after container IP change'
+vm_ssh sudo docker rm --force issue24-ip-change >/dev/null
+vm_ssh sudo docker network rm issue24-ip-a issue24-ip-b \
+    >"$evidence/docker-ip-networks-removed.txt"
+mark docker_container_ip_change Passed
 
 # External manager mutation during the confirmation window must be preserved;
 # ManyFW records critical divergence and refuses destructive rollback. Once the

@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="ManyFW experimental firewall recovery supervisor"
+command="/usr/bin/manyfw"
+command_args_foreground="recover --watch"
+command_user="root:root"
+pidfile="/run/${RC_SVCNAME}.pid"
+supervisor="supervise-daemon"
+respawn_delay=1
+respawn_max=0
+respawn_period=60
+umask=077
+output_log="/var/log/manyfw-recovery.log"
+error_log="/var/log/manyfw-recovery.log"
+
+depend() {
+	need localmount
+	after nftables
+}

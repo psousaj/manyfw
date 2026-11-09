@@ -62,9 +62,9 @@ Historical reports keep their original false gate. The expanded deny-authority
 and exact INPUT selector scope passed fresh packet/recovery evidence and a
 dedicated review, as recorded in ADR-0005. This approval is limited to the
 bounded experimental scope; allow never overrides foreign drop, and
-unsupported/bypassed paths cannot be claimed protected. Verified systemd is
-mandatory only within the current bounded experimental scope; other supervisors
-refuse Apply. Production remains unauthorized.
+unsupported/bypassed paths cannot be claimed protected. The bounded experimental
+integrations verify systemd or OpenRC; unknown supervisors refuse Apply. This is
+not universal Linux portability. Production remains unauthorized.
 Observed nftables flowtables are rejected before mutation because they may
 bypass INPUT; other kernel/device offload or unobservable paths remain unknown
 unless independently excluded or measured.

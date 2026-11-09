@@ -80,6 +80,11 @@ if [[ "${1:-}" == -f && "${2:-}" == - ]]; then
     fi
     "$real_nft" -f "$batch"
     result=$?
+    if grep -q 'add table inet manyfw' "$batch" \
+        && [[ $result -eq 0 && -e /run/manyfw-issue24/pause-after-commit ]]; then
+        touch /run/manyfw-issue24/apply-committed
+        while [[ -e /run/manyfw-issue24/hold-after-commit ]]; do sleep 0.1; done
+    fi
     if grep -q 'delete table inet manyfw' "$batch" \
         && [[ $result -eq 0 && -e /run/manyfw-issue24/fail-after-rollback-commit ]]; then
         exit 45

@@ -86,8 +86,10 @@ impl NftBackend {
 
     pub(crate) fn require_isolated_guest() -> TxResult<()> {
         Self::require_guest()?;
-        if !systemd_service_active() {
-            return Err(backend_error("manyfw-recovery.service is not active"));
+        if !recovery_supervisor_ready() {
+            return Err(backend_error(
+                "an enabled and active ManyFW recovery supervisor is required",
+            ));
         }
         Ok(())
     }
@@ -102,13 +104,7 @@ impl NftBackend {
                 "experimental Apply requires explicit root privilege",
             ));
         }
-        let virtualization = Command::new("systemd-detect-virt")
-            .arg("--vm")
-            .output()
-            .map_err(|error| backend_error(&format!("cannot verify guest identity: {error}")))?;
-        if !virtualization.status.success()
-            || String::from_utf8_lossy(&virtualization.stdout).trim() != "kvm"
-        {
+        if !kvm_guest_detected() {
             return Err(backend_error("target is not a verified KVM guest"));
         }
         if !nft_available() {
@@ -1349,11 +1345,76 @@ fn nft_available() -> bool {
         .output()
         .is_ok_and(|o| o.status.success())
 }
-fn systemd_service_active() -> bool {
-    Command::new("systemctl")
-        .args(["is-active", "--quiet", "manyfw-recovery.service"])
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoverySupervisor {
+    Systemd,
+    OpenRc,
+}
+
+fn select_recovery_supervisor(
+    systemd_runtime: bool,
+    openrc_runtime: bool,
+) -> Option<RecoverySupervisor> {
+    if systemd_runtime {
+        Some(RecoverySupervisor::Systemd)
+    } else if openrc_runtime {
+        Some(RecoverySupervisor::OpenRc)
+    } else {
+        None
+    }
+}
+
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|status| status.success())
+}
+
+fn recovery_supervisor_ready() -> bool {
+    match select_recovery_supervisor(
+        std::path::Path::new("/run/systemd/system").is_dir(),
+        std::path::Path::new("/run/openrc/softlevel").is_file(),
+    ) {
+        Some(RecoverySupervisor::Systemd) => {
+            command_succeeds(
+                "systemctl",
+                &["is-active", "--quiet", "manyfw-recovery.service"],
+            ) && command_succeeds(
+                "systemctl",
+                &["is-enabled", "--quiet", "manyfw-recovery.service"],
+            )
+        }
+        Some(RecoverySupervisor::OpenRc) => {
+            std::path::Path::new("/etc/runlevels/default/manyfw-recovery").exists()
+                && command_succeeds("rc-service", &["manyfw-recovery", "status"])
+        }
+        None => false,
+    }
+}
+
+fn kvm_guest_detected() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let features = std::arch::x86_64::__cpuid(1);
+        if features.ecx & (1 << 31) == 0 {
+            return false;
+        }
+        let leaf = std::arch::x86_64::__cpuid(0x4000_0000);
+        let mut vendor = Vec::with_capacity(12);
+        vendor.extend_from_slice(&leaf.ebx.to_le_bytes());
+        vendor.extend_from_slice(&leaf.ecx.to_le_bytes());
+        vendor.extend_from_slice(&leaf.edx.to_le_bytes());
+        vendor == b"KVMKVMKVM\0\0\0"
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::fs::read_to_string("/sys/hypervisor/type").is_ok_and(|value| value.trim() == "kvm")
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
 }
 fn fingerprint(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -1399,6 +1460,25 @@ fn secure_root_directory(path: &std::path::Path) -> TxResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_supervisor_selection_accepts_systemd_or_openrc_and_fails_closed() {
+        assert_eq!(
+            select_recovery_supervisor(true, false),
+            Some(RecoverySupervisor::Systemd)
+        );
+        assert_eq!(
+            select_recovery_supervisor(false, true),
+            Some(RecoverySupervisor::OpenRc)
+        );
+        assert_eq!(select_recovery_supervisor(false, false), None);
+        // On hybrid or containerized systems, prefer the actively mounted
+        // systemd runtime; readiness still independently checks enabled+active.
+        assert_eq!(
+            select_recovery_supervisor(true, true),
+            Some(RecoverySupervisor::Systemd)
+        );
+    }
 
     #[test]
     fn reboot_restore_creates_checkpoint_marker_in_the_exclusive_declaration() {

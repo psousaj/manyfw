@@ -47,9 +47,9 @@ path coverage; Tailscale interoperability remains a separate pending contract.
 
 This material expansion supersedes the clean-input-hook-only target and its
 historical ADR-0005 approval. The expanded experimental scope and its review
-disposition are recorded below. The presently reviewed environment remains
-disposable QEMU/KVM with verified systemd; non-systemd Apply is refused. This is
-not Linux supervisor portability.
+disposition are recorded below. The bounded experimental integrations support
+verified systemd and OpenRC in disposable QEMU/KVM; unknown service managers
+refuse Apply. This is not universal Linux supervisor portability.
 
 ## Generic Linux evidence and acceptance (reviewed 2026-11-08)
 

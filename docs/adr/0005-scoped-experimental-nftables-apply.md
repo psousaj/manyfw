@@ -22,9 +22,9 @@ This is a material change from the clean-input-hook-only implementation
 reviewed below. The expanded subset now has fresh candidate-bound packet and
 recovery evidence plus a dedicated post-remediation source/runtime review, all
 recorded below. Acceptance is limited to the exact tested scope and does not
-authorize production or development-host operation. Verified systemd remains
-an explicit experimental dependency; non-systemd Apply refuses, rather than
-claiming portable supervision.
+authorize production or development-host operation. A verified explicit
+supervisor integration is required; systemd and OpenRC are supported by the
+bounded implementation, while unknown service managers refuse Apply.
 
 External Tailscale access is removed from generic acceptance, not from local
 compatibility tracking. All historical review findings and evidence remain
@@ -441,5 +441,75 @@ rollback failure, then the independent systemd worker restored the scoped
 ManyFW table after the test trigger was removed; no CLI retry was issued. Its
 journal records both the failed attempt and successful retry. Standards, Spec,
 and dedicated Goal Architecture/Security reassessments are clean for this
-reviewed subset. This updates no production authorization and does not expand
-Docker, UFW, firewalld, Tailscale, non-systemd, OUTPUT, or FORWARD support.
+reviewed subset. At that time this updated no production authorization and did
+not expand Docker, UFW, firewalld, Tailscale, non-systemd, OUTPUT, or FORWARD
+support. The separately reviewed OpenRC follow-up is recorded below.
+
+## Parent #8 bounded-candidate evidence and review (2026-11-08)
+
+The owner-reconciled #8 generic connectivity-loss criterion is covered by the
+real externally observed firewall-induced SSH interruption and independent
+recovery scenario. Tailscale disconnect/interoperability remains a separate
+pending compatibility contract; this review does not claim Tailscale support.
+The fresh #8 candidate also exercised a real Docker container moving from
+`172.18.0.2` to `172.19.0.2` across distinct bridge subnets, verified it stayed
+running, then applied and confirmed a ManyFW transaction while comparing
+foreign nftables state before and after. Docker daemon restart and coexistence
+were exercised separately during the native-backend transition. Docker
+publication/forwarding enforcement remains unsupported and was not tested by
+the IP-change case.
+
+| Acceptance evidence | Result |
+| --- | --- |
+| Generic real packet semantics | 104/104 packet scenarios passed in disposable KVM; no missing coverage or cleanup failures. |
+| Production CLI recovery | 33/33 critical recovery scenarios and harness completion passed, including SSH loss, interruption, reboot, rollback retry, Docker modes, concurrent manager divergence, UFW/firewalld, and no-global/table flush. |
+| Docker lifecycle | Actual container IP changed `172.18.0.2` → `172.19.0.2`; container remained running; ManyFW apply/confirmation passed; foreign nftables state was unchanged. Daemon restart/coexistence passed separately. |
+| Candidate binding | Base `0f5a4221bd607ebfdc6f523c52f4b83007065ace`; worktree SHA-256 `32d3f4b94a49629a167da3148f9a6c1b9d74edb6c01d287b75713dbacb0da174`; CLI SHA-256 `7a58dbf51ecc0d5759e19be11cd887d5d4f18651816501f6e607b52ea42b8968`. Both 151-file manifests included `scripts/integration/issue24-production-vm-test.sh` and matched that test-time version exactly. The script hash in the recovery manifest is `c885eb1ab6e74c69e5d909dd0c496a9fa6c6ae6afd7a87a47e085747b69cdfb0`; current script hash is unchanged. Subsequent edits to ROADMAP, TEST-MATRIX, this ADR and the #8 spec are documentation-only. |
+| Guest boundaries | Both disposable KVM guests verified destroyed after evidence collection. No development/WSL or production firewall was mutated. |
+| Review | Standards, Spec, and dedicated Goal Architecture/Security reviews are clean for this bounded #8 acceptance. This is technical self-review under owner-authorized isolated-KVM governance, not independent review. |
+
+The current candidate's bounded KVM evidence and reviews are complete, but
+**parent #8 acceptance remains incomplete**: the formal #8 contract requires
+an independent supervisor without assuming systemd in the general architecture,
+and at that candidate the experimental implementation intentionally required
+verified systemd and refused non-systemd Apply. This documented exception did
+not satisfy the parent's portability criterion at that time. The later OpenRC
+implementation and acceptance are assessed separately below. Historical #24
+evidence remains unchanged.
+The generic release receipt still reports `release_eligible: false`, and
+production authorization remains false. This disposition does not expand
+supported operation paths, establish Docker publication or Tailscale
+interoperability, promise zero lockout, or authorize deployment.
+
+## Parent #8 OpenRC supervisor follow-up (2026-11-09)
+
+The implementation adds a separately packaged OpenRC `supervise-daemon`
+integration alongside systemd. Apply selects only verified systemd or OpenRC
+runtime, checks that the selected service is enabled and active, and refuses
+unknown service managers. Installation remains explicit; no universal init
+system support or automatic service installation is claimed.
+
+The disposable Alpine 3.23.8/OpenRC KVM run is documented in
+[`TEST-MATRIX.md`](../TEST-MATRIX.md#parent-8-openrc-supervisor-acceptance-2026-11-09).
+It ran the static candidate CLI and real nftables on an isolated guest and
+verified worker respawn, post-commit CLI SIGKILL recovery, externally observed
+SSH loss/recovery, pending transaction reboot recovery, and same-boot foreign
+table preservation. The archived evidence binds base, code-source manifest,
+worktree digest, and CLI hash; the guest was destroyed. Kernel nftables state
+does not survive guest reboot, so foreign-table preservation is asserted only
+for same-boot rollback scenarios.
+
+The same base, implementation sources and binary were also rerun through the
+Ubuntu/systemd production recovery matrix: 33 critical scenarios plus harness
+completion passed, including IPv4/IPv6, Docker modes and IP change, UFW,
+firewalld, external manager divergence, reboot, SSH loss and no-global-flush.
+The test-time full-worktree digest and machine gate are archived in the test
+matrix; only the evidence-record documentation was updated afterward.
+Tailscale remains separately pending and is not claimed.
+
+This implements the parent's non-systemd supervisor requirement for the tested
+OpenRC integration. The generic Linux path remains bounded to the named
+integrations; unknown service managers, Tailscale interoperability, production
+deployment, and development-host firewall mutation remain unsupported or
+unauthorized. This technical review is a dedicated Goal self-review under the
+owner-authorized isolated-KVM policy, not independent review.

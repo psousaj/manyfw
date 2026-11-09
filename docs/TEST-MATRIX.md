@@ -130,14 +130,74 @@ This follow-up does not rewrite the earlier #24 run or its separate
 `tailscale_interoperability: NotApplicable` result, does not claim Tailscale
 compatibility, and leaves production authorization false.
 
-The candidate was HEAD `a002a08fa512fe7248c6913e123d97b478974c07`, with CLI
-SHA-256 `3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`.
-Acceptance is limited to the tested experimental INPUT operation/composition
+### Parent #8 current-candidate acceptance follow-up (2026-11-08)
+
+The current #8 candidate reran both mandatory generic Linux evidence suites
+against the exact worktree and release CLI. The packet suite passed 104/104
+cases; the production recovery suite passed all 33 critical scenarios plus
+harness completion, including real firewall-induced SSH loss/recovery and the
+new Docker container IP-change case. The Docker case moved a live BusyBox
+container between distinct real bridge subnets (`172.18.0.2` to `172.19.0.2`),
+then applied and confirmed a ManyFW transaction against the stable post-change
+state while verifying foreign nftables state remained unchanged. The adjacent
+Docker-native backend transition separately restarted Docker and exercised
+ManyFW coexistence. Both KVM guests were destroyed.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| Generic INPUT packet suite | Passed 104/104; `packet_eligible: true`; complete evidence; no missing coverage or cleanup failures | `/home/jose/.cache/manyfw-packets/evidence/issue24-linux-packet-1794176951-939864` |
+| Production CLI/recovery/Docker lifecycle suite | Passed 33/33 critical scenarios plus harness completion; `recovery_eligible: true`; Docker IP changed and foreign firewall objects preserved | `/home/jose/.cache/manyfw-generic/evidence/issue24-production-mfw-20261108T222218Z-936929` |
+| Candidate and release binary | Base commit `0f5a4221bd607ebfdc6f523c52f4b83007065ace`; worktree SHA-256 `32d3f4b94a49629a167da3148f9a6c1b9d74edb6c01d287b75713dbacb0da174`; CLI SHA-256 `7a58dbf51ecc0d5759e19be11cd887d5d4f18651816501f6e607b52ea42b8968` | Recovery `metadata.txt`; packet `commit.txt`, `worktree.patch`, `artifacts.sha256` |
+| Source manifest | 151 source files matched exactly for both runs | Each evidence directory's `source-manifest.json` |
+| Tailscale / production gate | Tailscale remains separately pending and not claimed; release eligibility and production authorization remain false | Both machine gate receipts and `docs/specs/issue-24-linux-enforcement.md` |
+
+These runs supplement, and do not rewrite, the earlier immutable #24 evidence.
+They provide evidence for #8 generic requirements only for the recorded isolated
+Ubuntu/KVM environment and tested scope. OpenRC acceptance is recorded below.
+They do not establish Tailscale
+interoperability, universal manager behavior, zero lockout risk, or production
+authorization.
+
+## Parent #8 OpenRC supervisor acceptance (2026-11-09)
+
+The production recovery harness ran the static ManyFW CLI in an official Alpine
+3.23.8 BIOS cloud-init guest under QEMU/KVM, with loopback-only host forwarding
+and no systemd runtime. It exercises the explicitly installed OpenRC
+`supervise-daemon` service, real nftables state, independent worker respawn,
+post-commit CLI SIGKILL recovery, externally observed SSH loss and recovery,
+pending-transaction reboot recovery, and same-boot foreign table preservation.
+It captures a candidate source manifest, worktree digest, CLI binary digest,
+guest identity, QEMU command line, transaction state, recovery logs, and
+effective nftables state. The guest was destroyed after evidence collection.
+The same final candidate was also rerun through the full Ubuntu/systemd
+production recovery matrix; this provides the IPv4/IPv6, Docker restart/IP-change,
+UFW/firewalld, and manager-concurrency coverage outside the focused OpenRC
+supervisor scenarios. Tailscale remains separately pending by explicit scope.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| OpenRC production recovery | Passed; `RUN_OK`; real marked ManyFW nftables mutation recovered after CLI SIGKILL, actual SSH interruption recovered, pending confirmation rolled back after reboot, foreign table preserved in same-boot recovery | `/home/jose/.cache/manyfw-openrc-vm/evidence/issue8-openrc-mfw-openrc-20261109T044055Z-23612` |
+| Candidate binding | Base `0f5a4221bd607ebfdc6f523c52f4b83007065ace`; code/worktree SHA-256 `24b28b6daa92ada7311da207fe43453d882332ddf6358482eb51ff9a958ffe54`; static CLI SHA-256 `bdb1050c48c03930adfaa34432707808bcd7ae1f31ee574305ac2ac3c3b48986` | `candidate-binding.txt`, `source-manifest.json`, `manyfw-binary.sha256` in evidence directory; manifest covers implementation/repository sources and excludes documentation |
+| Current systemd production recovery matrix | Passed all 33 critical scenarios plus harness completion, including IPv4/IPv6, Docker IP change and native/iptables modes, UFW/firewalld, manager divergence, SSH loss, reboot, and no-global-flush; Tailscale remains separately NotApplicable | `/home/jose/.cache/manyfw-openrc-vm/evidence/issue24-production-mfw-20261109T044758Z-26881`; base `0f5a4221bd607ebfdc6f523c52f4b83007065ace`, worktree SHA-256 `f9e1df29d80724c27aea1e10447bb0eb4d54146cb62815f9664afdd12a08cc08`, CLI SHA-256 `bdb1050c48c03930adfaa34432707808bcd7ae1f31ee574305ac2ac3c3b48986` |
+| Scope | OpenRC and systemd are bounded experimental integrations; unknown service managers refuse. The VM's reboot resets kernel nftables state, so foreign table preservation is asserted during same-boot rollback, not across reboot. No universal Linux, Tailscale, or production support claim. | OpenRC guest logs and `docs/specs/issue-8-guarded-apply.md` |
+
+This supplies the missing non-systemd supervisor acceptance for the named
+OpenRC integration. It does not satisfy unrelated release gates or authorize
+production/development-host mutation.
+
+### Earlier immutable #24 generic candidate (not the current #8 candidate)
+
+The earlier #24 candidate was HEAD
+`a002a08fa512fe7248c6913e123d97b478974c07`, with CLI SHA-256
+`3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`. Its
+acceptance was limited to its tested experimental INPUT operation/composition
 subset. Other offload, unobservable and bypass paths remain unsupported/unknown;
 OUTPUT, FORWARD, arbitrary destination CIDRs, Docker publication, and Tailscale
-interoperability are not covered. No production or development-host operation
-is authorized. The evidence aggregate validates producer data only and cannot
-self-assert review or approval.
+interoperability were not covered. The later #8 Docker container-IP lifecycle
+check above verifies a real Docker IP change and foreign-state preservation; it
+does not test Docker publication/forwarding enforcement. No production or
+development-host operation is authorized. The evidence aggregate validates
+producer data only and cannot self-assert review or approval.
 
 ## Historical #24 production-code KVM candidate evidence
 
@@ -196,8 +256,11 @@ but that historical gate was **not clean** while its required environment and
 evidence were missing. At that time, generic acceptance awaited the new packet
 suite and review; those gates are now complete for the bounded experimental
 INPUT contract as documented above. The historical failure and false release
-gate are unchanged. Issue #24 remains OPEN, and #8 must not start before its #7
-prerequisites are verified. No production approval, production deployment, or
+gate are unchanged. Issue #24 was subsequently closed after the generic/Tailscale
+contract reconciliation; this older report remains immutable. At the time of
+this run, #8 was not ready to start before its #7 prerequisites were verified.
+Those prerequisites are now complete, and the separate current #8 acceptance
+follow-up is recorded above. No production approval, production deployment, or
 development-host firewall mutation is implied.
 
 The production nftables batch is atomic. Its partial-apply scenario tests
