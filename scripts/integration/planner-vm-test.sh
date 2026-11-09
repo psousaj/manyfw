@@ -12,6 +12,11 @@ run_id=$(cat "$CURRENT_DIR/run-id")
 [[ "$(vm_ssh systemd-detect-virt)" == kvm ]] || die 'SSH target is not a KVM guest'
 [[ "$(vm_ssh sudo cat /etc/manyfw-disposable-vm)" == "$run_id" ]] \
     || die 'guest marker does not match the owned VM state'
+guest_cap_eff=$(vm_ssh sudo awk '/^CapEff:/ { print $2 }' /proc/self/status)
+[[ "$guest_cap_eff" =~ ^[[:xdigit:]]+$ ]] \
+    || die "could not read guest root CapEff: $guest_cap_eff"
+(( (16#$guest_cap_eff & (1 << 12)) != 0 )) \
+    || die "guest root lacks effective CAP_NET_ADMIN (CapEff=$guest_cap_eff); refusing privileged tests"
 
 cargo test --locked -p manyfw-core --test planner_netns --no-run
 binary=$(find "$REPO_ROOT/target/debug/deps" -maxdepth 1 -type f \
@@ -29,6 +34,11 @@ mkdir -p -m 0700 -- "$evidence"
     printf 'worktree_status=%s\n' "$(git -C "$REPO_ROOT" status --porcelain | tr '\n' ';')"
     printf 'source_diff_sha256=%s\n' "$(git -C "$REPO_ROOT" diff HEAD | sha256sum | awk '{print $1}')"
     printf 'test_binary_sha256=%s\n' "$(sha256sum "$binary" | awk '{print $1}')"
+    printf 'execution_context=disposable-qemu-kvm-guest\n'
+    printf 'guest_run_id=%s\n' "$run_id"
+    printf 'guest_CapEff_hex=%s\n' "$guest_cap_eff"
+    printf 'required_capabilities=CAP_NET_ADMIN\n'
+    printf 'CAP_NET_RAW=not-required (tests use TCP/UDP sockets, not raw sockets)\n'
 } >"$evidence/metadata.txt"
 set +e
 vm_ssh sudo env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

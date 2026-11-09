@@ -79,6 +79,27 @@ versioned goldens and are never executed as firewall changes by this test.
 | Source and binary binding | Base `5c041a2c29437da96028cd56c09e36b3f84f68e9`, source diff digest and test binary digest in adjacent `metadata.txt` | Adjacent `metadata.txt` |
 | Guest teardown | Passed; harness reports stopped/removed and no current guest state remains | `mfw-planner-20261108T205258Z-893457/vm-down.log` in operator-local evidence archive |
 
+### CAP_NET_ADMIN runner verification (2026-11-09)
+
+The reusable planner guest harness now installs its test tools in the disposable
+Ubuntu KVM guest, checks the guest root process's effective `CAP_NET_ADMIN`
+bit from `/proc/self/status`, and records the capability mask with the test
+binary/source digests. It fails before running the tests if that bit is absent.
+No `CAP_NET_ADMIN` or unrestricted sudo was granted to WSL. The probes use
+ordinary TCP sockets; `CAP_NET_RAW` is not required or provisioned. An initial
+guest run passed the dual-stack host test but exposed a stale Docker-native
+fixture declaring `docker_mode=Unsupported`; that run was not counted as a
+passing suite. After the fixture declared the tested native mode as supported,
+the complete final run passed 2/2 tests.
+
+| Evidence | Result | Artifact |
+| --- | --- | --- |
+| Effective guest capability | Passed; `CapEff=000001ffffffffff`, including bit 12 (`CAP_NET_ADMIN`) | `mfw-planner-20261109T160117Z-323514/planner/metadata.txt` in operator-local evidence archive |
+| Host INPUT packet outcomes | Passed: 8 real TCP probes across IPv4/IPv6; allow/deny, precedence, and source mismatch; ruleset unchanged by planning | Same run's `planner/test.log` |
+| Native Docker DNAT/FORWARD outcomes | Passed: real packet to published TCP/18080 allowed to observed target; TCP/18081 denied; planning leaves ruleset unchanged | Same run's `planner/test.log` |
+| Source and binary binding | Base `16f9b81f698ce2cda1ddb09d788081f46c20766f`; source diff SHA-256 `1ffeb6138f88b2ce7cb2a664dbcd2b19c8565e474a13e8f35446da99c599795b`; test binary SHA-256 `fa6b6d579d897ce382b2f86e8ec1c9f06b495312f43d0e752d89d58474a7230c` | Same run's `planner/metadata.txt` |
+| Guest teardown | Passed; disposable VM state removed after evidence collection | `mfw-planner-20261109T160117Z-323514/vm-down.log` in operator-local evidence archive |
+
 Eight checked-in planner golden plans continue to cover host-only, Docker
 iptables with/without observed `DOCKER-USER`, native nftables DNAT/FORWARD,
 userland-proxy INPUT, mixed managers, unknown capability, and conflicting hook

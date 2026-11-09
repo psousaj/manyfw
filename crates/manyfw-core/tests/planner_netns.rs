@@ -225,6 +225,7 @@ fn docker_native_nat_input() -> PlannerInput {
     });
     input.observation = snapshot::ObservationSnapshot::compose(docker, input.observation.host());
     input.backend.observation.mode = BackendMode::NativeNftables;
+    input.backend.capabilities.docker_mode = CapabilityState::Supported;
     input.backend.observation.hooks = vec![
         HookObservation {
             hook: Hook::Forward,

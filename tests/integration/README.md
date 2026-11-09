@@ -74,5 +74,26 @@ The ignored test `crates/manyfw-core/tests/planner_netns.rs` requires root and
 executable into the verified KVM guest. The test itself checks KVM virtualization
 and the exact disposable-guest marker before privileged setup; its two named
 namespaces and nftables table are guest-local and removed with the test. The
-result is `NotApplicable` when KVM or required guest tools are unavailable; it
-refuses to proceed outside the verified guest.
+guest provisioning and runner check and record the effective capability set of
+guest root before executing the tests. Missing
+`CAP_NET_ADMIN` is a hard failure, not a skipped/pass result. Both ignored tests
+are executed by the verified guest runner. They use normal TCP/UDP sockets,
+not raw sockets, so `CAP_NET_RAW` is neither provisioned nor needed. The result
+is `NotApplicable` when KVM or required host tools are unavailable; the guest
+test refuses to proceed outside the verified guest. Guest namespaces and nft
+state are test-owned and cleaned up by Rust drop guards; the guest itself is
+removed by `vm-down.sh` after evidence has been retained.
+
+## Privilege-dependent test inventory
+
+| Test | Privileged execution context | Scope / status |
+| --- | --- | --- |
+| `typed_plan_matches_isolated_packet_verdicts_and_does_not_mutate_rules` | Root process in disposable QEMU/KVM guest | `CAP_NET_ADMIN`; ignored by ordinary `cargo test`; run through `planner-vm-test.sh`. |
+| `docker_native_nat_plan_matches_real_forwarded_packets_without_planning_mutation` | Root process in disposable QEMU/KVM guest | `CAP_NET_ADMIN`; ignored by ordinary `cargo test`; run through `planner-vm-test.sh`. |
+| `tests/planner_readonly_namespace.sh` | Dedicated nested Docker container on the CI/local runner | `--network none`; `NET_ADMIN` is container-only and planner child drops it; no host network mode. |
+| `tests/host_namespace.sh` fixture setup | Dedicated nested Docker container on the CI/local runner | `--network none`; `NET_ADMIN` is container-only; baseline discovery container has all capabilities dropped. |
+
+The Docker-based namespace checks are ordinary compatibility/release workflow
+steps rather than Rust tests skipped by Cargo. The two Rust integration tests
+above are the only `#[ignore]` cases in the workspace specifically gated on
+`CAP_NET_ADMIN`.

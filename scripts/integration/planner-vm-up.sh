@@ -17,6 +17,10 @@ test "$(systemd-detect-virt)" = kvm
 test -x "$(command -v ip)"
 test -x "$(command -v nft)"
 test -x "$(command -v python3)"
+cap_eff=$(awk '/^CapEff:/ { print $2 }' /proc/self/status)
+[[ "$cap_eff" =~ ^[[:xdigit:]]+$ ]] || { echo "invalid guest CapEff: $cap_eff" >&2; exit 1; }
+(( (16#$cap_eff & (1 << 12)) != 0 )) || { echo 'guest root lacks effective CAP_NET_ADMIN' >&2; exit 1; }
+printf 'Guest root CapEff: %s (CAP_NET_ADMIN effective)\n' "$cap_eff"
 GUEST
 
 printf 'Planner integration guest ready: %s\n' "$run_id"
