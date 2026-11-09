@@ -6,7 +6,9 @@ This file defines how a coding agent should implement ManyFW safely and incremen
 
 ManyFW is a Rust workspace producing **one CLI executable**, with independently testable library components. Its purpose is to coordinate and explain Linux/container/private-network firewall policy while respecting ownership of rules managed by Docker, UFW, firewalld and other software.
 
-**Current code is a read-only prototype. Never claim it protects a host.**
+**v0.3.0 is a read-only release. This checkout also contains opt-in experimental
+enforcement restricted to verified disposable KVM guests; it is not authorized
+for production or development-host operation. Never claim it protects a host.**
 
 ## Source of truth
 

@@ -45,12 +45,21 @@ managers' chains; the planner is diagnostic and planning remains read-only.
 Issue #24 Milestone A is fixture evidence only. It neither validates ManyFW's
 production code nor approves an adapter.
 
-## Reviewed experimental decision
+## Original #23 clean-hook-only experimental decision (historical; superseded)
+
+The decision below records the initial clean-input-hook-only design and its
+review; it is retained as historical context, not the current supported
+contract. The owner-reconciled expanded #24 INPUT operation/composition scope
+and its review/evidence are authoritative for the bounded experimental
+implementation and are recorded in the later “Expanded #24 generic Linux
+review and evidence” section. The historical empty-hook and systemd-only
+restrictions below must not be read as current requirements.
 
 ### Backend and supported operations
 
-- Start with exactly one production backend: native nftables. Do not add
-  production iptables in this scope.
+- Start with exactly one backend in the production code: native nftables. Do
+  not add an iptables execution backend in this scope. This describes code, not
+  production deployment authorization.
 - Restrict operations to host `input` rules/defaults that can be translated
   exactly from canonical typed planner operations to an nftables `inet` table.
   The initial allowlist is: input `SetManagedDefault` with a concrete
@@ -216,6 +225,61 @@ post-implementation security review and real guest tests. Those gates are
 recorded in the Post-implementation Architecture/Security Review below.
 
 ## Consequences
+
+### Owner-accepted supervisor identity boundary (2026-11-09)
+
+**Status: accepted architectural limitation, not an unresolved security
+finding.** The project owner accepts the residual trust boundary for experimental
+v0.4.0: unrestricted root authority belongs to the operating system trusted
+computing base, and a process already possessing unrestricted root privileges
+is outside the untrusted-adversary model. ManyFW does not require a cryptographic
+identity unique to each supervisor invocation. Transaction IDs and integrity-
+bound recovery arms identify and bind transaction state; they are not claimed to
+authenticate an individual supervisor process. No per-invocation identity
+infrastructure should be introduced solely to address this accepted limitation.
+
+This decision does not waive protection from unauthorized non-root callers,
+secure durable state, tamper detection, cross-process locking, checkpoint
+integrity, actual owned-resource rollback verification, foreign-resource
+preservation, fail-closed behavior, or independent recovery during interrupted
+Apply. Apply continues to require root, the marked KVM environment, and an
+active explicitly installed supervisor with the existing transaction-bound
+arming handshake. Unattended interrupted-Apply, deadline, and reboot recovery
+continue to depend on the independent service being available and enabled.
+
+The implementation already permits the guarded manual `recover --rollback`
+path while the supervisor is stopped. It requires root and the marked KVM
+environment and retains secure storage preparation, transaction locking,
+transaction-state and checkpoint-integrity validation, ownership/fingerprint
+checks, scoped rollback, and post-rollback resource verification. The production
+systemd KVM matrix stops the supervisor before repairing a deliberately
+corrupted checkpoint and successfully performs the explicit guarded retry;
+this is recorded as
+`corrupt_checkpoint_refusal_and_retry` in `TEST-MATRIX.md`. No production stub
+or alternate recovery path was added for this decision.
+
+#### Review findings and disposition
+
+The separate post-remediation Standards, Spec, and Architecture/Security
+reviews found no remaining findings for this decision. Initial documentation
+reconciliation identified stale empty-hook/systemd-only wording in the old ADR
+and CLI specification, ambiguous use of “production backend,” and acceptance
+language that needed an explicit bounded-experimental qualifier. Remediation
+marked the old ADR section historical and superseded, aligned the current CLI
+specification with the reviewed Issue #24 composition contract, clarified that
+“production code” does not authorize production operation, and bounded the
+acceptance language. No runtime behavior or privilege boundary was changed.
+
+The security review verified the Apply readiness gate, root-only manual rollback
+path, transaction/checkpoint guards, exact ManyFW resource restoration, and
+supervisor recovery behavior. Runtime evidence includes the candidate-bound
+systemd matrix with all 33 critical scenarios plus harness completion passed;
+`corrupt_checkpoint_refusal_and_retry` specifically passes with the service
+stopped during the explicit manual retry. The separately recorded OpenRC KVM
+recovery run also passed with teardown verified. Details, source/binary
+bindings, and release-gate dispositions are in `TEST-MATRIX.md`. This is Goal
+technical self-review under the owner-authorized isolated-KVM policy, not
+independent review, release approval, or production authorization.
 
 ### Issue #24 nonempty reboot recovery remediation (reviewed candidate)
 

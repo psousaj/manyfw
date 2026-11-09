@@ -66,9 +66,10 @@ or NotApplicable result blocks this contract.
    external drop before and after ManyFW, and supported composition across
    relevant Linux nftables/iptables paths without changing foreign objects.
 3. Assert reject/default-reject support or explicit pre-mutation refusal;
-   assert OUTPUT/FORWARD, arbitrary destination CIDRs, unresolved selectors,
-   bypass/unknown composition and
-   non-systemd refusal. Do not count a refusal as successful packet support.
+    assert OUTPUT/FORWARD, arbitrary destination CIDRs, unresolved selectors,
+    bypass/unknown composition, and refusal for unknown service managers.
+    Verified systemd/OpenRC recovery is bounded experimental support; do not
+    count a refusal as successful packet support.
 4. Retain the recovery, interruption, reboot, corrupt-checkpoint, ownership,
    concurrency, Docker-mode, UFW/firewalld refusal/coexistence and no-global-flush
    scenarios tracked in TEST-MATRIX. Recovery passes do not substitute for

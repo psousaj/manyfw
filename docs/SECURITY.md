@@ -25,6 +25,35 @@ Chain names and comments alone do not establish ownership or Docker mode.
 - IPv4 and IPv6, host-network containers, routed traffic, NAT and proxies must be accounted for.
 - An audit finding describes observable policy and potential exposure, not a guaranteed internet reachability test.
 
+### Experimental supervisor trust boundary
+
+For the experimental v0.4.0 scope, the operating system's unrestricted root
+authority is part of the trusted computing base. A process already possessing
+unrestricted root privileges is not treated as an untrusted adversary; this
+threat model does not promise protection from hostile root processes. A unique
+cryptographic identity for every supervisor invocation is not required. The
+absence of that identity is an owner-accepted architectural limitation, not an
+unresolved security finding. Do not add per-invocation identity infrastructure
+solely to address this accepted boundary.
+
+This acceptance does not weaken non-root authorization or transaction
+protection. Apply remains gated on effective root, a marked disposable KVM
+guest, an active explicitly installed recovery supervisor, and the existing
+durable transaction/arm protocol. OS-enforced ownership, restrictive file
+permissions, process privileges, and applicable service authorization remain
+the controls. Transaction identity and recovery-arm binding continue to scope
+each transaction; they are not represented as cryptographic supervisor-process
+identity.
+
+An authorized root operator may invoke `recover --rollback` while the recovery
+supervisor is inactive. That path still requires the marked KVM guest and root,
+prepares/validates protected recovery storage, serializes transaction access,
+verifies transaction/checkpoint integrity and ownership/fingerprint guards,
+restores only ManyFW-owned resources, and verifies the resulting state. This
+manual recovery path does not replace independent supervisor recovery: Apply
+still requires the active supervisor, and unattended interrupted-Apply,
+timeout, and reboot recovery retain their existing supervisor requirements.
+
 ## Apply/rollback design gate
 
 Experimental architecture/security approval for implementations developed and
@@ -71,13 +100,14 @@ Privileged implementation must only ship after network namespace/VM integration 
 The same contract separately retains real Tailscale change/interoperability
 coverage. External tailnet access is not mandatory for generic Linux acceptance;
 missing specialized evidence blocks Tailscale claims, not the generic contract.
-Historical reports keep their original false gate. The expanded deny-authority
-and exact INPUT selector scope passed fresh packet/recovery evidence and a
-dedicated review, as recorded in ADR-0005. This approval is limited to the
-bounded experimental scope; allow never overrides foreign drop, and
-unsupported/bypassed paths cannot be claimed protected. The bounded experimental
-integrations verify systemd or OpenRC; unknown supervisors refuse Apply. This is
-not universal Linux portability. Production remains unauthorized.
+Historical reports keep their original false gate. The bounded experimental
+deny-authority and exact INPUT selector/composition scope passed fresh
+packet/recovery evidence and a dedicated review, as recorded in ADR-0005. This
+approval is limited to the bounded experimental scope; allow never overrides
+foreign drop, and unsupported/bypassed paths cannot be claimed protected. The
+bounded experimental integrations verify systemd or OpenRC; unknown supervisors
+refuse Apply. This is not universal Linux portability. Production remains
+unauthorized.
 Observed nftables flowtables are rejected before mutation because they may
 bypass INPUT; other kernel/device offload or unobservable paths remain unknown
 unless independently excluded or measured.

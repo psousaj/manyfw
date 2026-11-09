@@ -46,6 +46,12 @@ tests. The feature remains opt-in and cannot claim zero lockout risk.
   an unresolved failure remains visible, retains recovery evidence, and
   requires administrative recovery. A retry is never reported as success until
   the exact scoped checkpoint is verified restored.
+- A privileged operator may explicitly invoke the guarded rollback retry while
+  the independent supervisor is inactive. This does not replace the required
+  independent supervisor for unattended timeout, interruption, or reboot
+  recovery, and it must preserve transaction locking, checkpoint integrity,
+  ownership/fingerprint checks, scoped restoration, and post-rollback resource
+  verification.
 - Persist plan, preconditions, ownership, affected resources, checkpoint,
   confirmation deadline, progress, and recovery evidence durably before
   mutation.

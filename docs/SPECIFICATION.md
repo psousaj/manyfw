@@ -315,9 +315,11 @@ Implemented commands:
   manager. It requires root in a marked KVM guest, an active explicitly
   installed recovery supervisor (verified `manyfw-recovery.service` under
   systemd or the installed `manyfw-recovery` OpenRC service), a matching
-  applicable planner bundle,
-  and an otherwise empty nftables input hook. Only the narrowly reviewed
-  ManyFW-owned `inet` input table is changed. Default actions are translated
+  applicable planner bundle, and input-hook composition admitted by the
+  reviewed [Issue #24 contract](specs/issue-24-linux-enforcement.md). The input
+  hook need not otherwise be empty, but unsupported, incomplete, or unknown
+  composition fails closed. Only the narrowly reviewed ManyFW-owned `inet`
+  input table is changed. Default actions are translated
   with explicit family-scoped nftables fallback rules, never as an unscoped
   `inet` chain policy. Unsupported or stale plans fail before mutation. Apply
   returns a one-time confirmation token and automatically rolls back
@@ -387,7 +389,13 @@ Implemented commands:
   retained rollback diagnostic history is capped at 16 entries. A failure
   remains visible and is never reported as recovered. If automatic recovery cannot resolve it, an operator must
   investigate/remediate and may retry the transaction with
-  `manyfw recover --rollback <transaction-id>`.
+  `manyfw recover --rollback <transaction-id>`. This root-authorized manual
+  retry is available even while the recovery supervisor is inactive; it still
+  enforces the marked-KVM guard, protected storage, transaction locking,
+  checkpoint integrity, ownership/fingerprint checks, scoped restoration, and
+  actual resource verification. It does not relax Apply's active-supervisor
+  prerequisite or replace independent recovery for unattended interrupted
+  transactions.
 
 Apply is not enabled by default and is not authorized on development/WSL or
 production hosts. The test harness must verify disposable VM identity from
