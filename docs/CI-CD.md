@@ -7,7 +7,7 @@ workflows:
 | --- | --- | --- |
 | `ci.yml` | fmt, clippy, workspace tests, docs, fixtures, dependency audit | Yes |
 | `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro/binary smoke tests, disposable host-namespace discovery | Main, scheduled, manual, relevant PRs |
-| `release.yml` | Detect unpublished Cargo workspace versions, package/checksum/smoke artifacts, create an annotated tag and GitHub Release | Version/lock/workflow changes on `main`, or manual dispatch from `main` |
+| `release.yml` | Detect unpublished Cargo workspace versions, package/checksum/smoke artifacts, create an annotated tag and GitHub Release | Explicit manual dispatch from `main` only |
 
 The optional issue #24 recovery and candidate-evidence gate are consolidated
 into `compatibility.yml` rather than maintained as additional workflows. A
@@ -71,9 +71,9 @@ compatibility coverage is required.
 
 1. Change `[workspace.package].version` in the root `Cargo.toml`; both crates
    inherit this version. Update and commit `Cargo.lock` with the change.
-2. Open and merge the version bump through the normal PR checks. The release
-   workflow only publishes commits that have reached `main`.
-3. On a matching push to `main` (or a manual dispatch from `main`),
+2. Open and merge the version bump through normal PR checks. CI and compatibility
+   workflows validate PRs and `main`; merging a version bump does not publish.
+3. An operator must explicitly dispatch `release.yml` from `main`.
    `release.yml` reads the workspace version. If its
    matching `vX.Y.Z` tag/release is absent, it validates the workspace and runs
    the full four-target Linux build and artifact smoke matrix.
@@ -84,8 +84,9 @@ compatibility coverage is required.
 The first successful run published `v0.2.0` from commit `07cbf3e`; see the
 [release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0) and its
 [successful workflow run](https://github.com/psousaj/manyfw/actions/runs/42066292818).
-Subsequent releases are triggered by bumping the workspace version and merging
-it. A push at an already released version is a no-op. The tag and release are
+Subsequent releases require a version bump merged to `main` and an explicit
+manual workflow dispatch. A push at an already released version is not a
+publication trigger. The tag and release are
 created in the same workflow run so publication does not depend on a tag-push
 event from `GITHUB_TOKEN` (which would not trigger another workflow). The
 workflow rejects stale main-branch commits, non-increasing versions, and
@@ -99,7 +100,8 @@ SHA-256 checksum and binary version, then installs `manyfw` into
 platforms or missing release assets. The installer does not perform firewall
 operations.
 
-The release workflow has `contents: write` only on its publish job. It does
+The v0.4.0 candidate is not published by this PR or by merging it. The release
+workflow has `contents: write` only on its publish job. It does
 not publish an artifact if a build, checksum, or final smoke test fails.
 
 Issue #24 remains independent. Its SSH-loss, reboot, rollback, and privileged

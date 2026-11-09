@@ -7,6 +7,10 @@ The ordinary CLI validates local policy and analyzes supplied observation
 snapshots. `discover` performs read-only Docker Engine and host-network
 collection; it does not inspect or modify firewall state.
 
+The v0.4.0 candidate is under review and is not published. A future release
+must not be interpreted as operational authorization; production and
+development-host firewall mutation remain unauthorized.
+
 Backend observation is separate from `discover`. Linux firewall listings use
 fixed read-only argument vectors (`nft -j list ruleset`, `iptables-save -c`,
 and `ip6tables-save -c`); no shell is invoked. Missing tools, permission failures,

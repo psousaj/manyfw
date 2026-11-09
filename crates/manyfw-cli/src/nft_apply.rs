@@ -1393,14 +1393,19 @@ fn recovery_supervisor_ready() -> bool {
     }
 }
 
+// Rust 1.85 exposes these intrinsics as unsafe, while newer toolchains have
+// made them safe. Keep the explicit blocks for the declared MSRV.
+#[allow(unused_unsafe)]
 fn kvm_guest_detected() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        let features = std::arch::x86_64::__cpuid(1);
+        // SAFETY: CPUID is available on every x86_64 CPU and reads no memory.
+        let features = unsafe { std::arch::x86_64::__cpuid(1) };
         if features.ecx & (1 << 31) == 0 {
             return false;
         }
-        let leaf = std::arch::x86_64::__cpuid(0x4000_0000);
+        // SAFETY: CPUID is available on every x86_64 CPU and reads no memory.
+        let leaf = unsafe { std::arch::x86_64::__cpuid(0x4000_0000) };
         let mut vendor = Vec::with_capacity(12);
         vendor.extend_from_slice(&leaf.ebx.to_le_bytes());
         vendor.extend_from_slice(&leaf.ecx.to_le_bytes());

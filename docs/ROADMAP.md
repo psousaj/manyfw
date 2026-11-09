@@ -29,7 +29,7 @@ subsequently published and verified by its
 - [x] PR compatibility CI runs disposable host-namespace and distro smoke gates for stacked feature PRs
 - [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
-## v0.3.0 — Real planner (published; remains read-only)
+## v0.3.0 — Read-only Planner (published; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
 - [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), closed)
@@ -43,12 +43,14 @@ gates. v0.3.0 remains read-only and does not include or authorize
 `apply`; the bounded loopback UDP verdict fixture is not evidence of external
 reachability or complete behavior for every firewall manager and packet path.
 
-## v0.4.0 — Guarded enforcement, experimental (not release-ready)
+## v0.4.0 — Experimental Guarded Enforcement (candidate; not published)
 
-The unchecked items below are broader v0.4 production/release gates and do not
-indicate unfinished bounded Issue #8 acceptance. The completed #8/#24 work
-validates only the named experimental INPUT subset; it does not make v0.4
-release-ready or authorize production enforcement.
+The unchecked items below are broader v0.4 release gates. The completed #8/#24
+work validates only the named experimental INPUT subset; it does not imply
+complete Linux enforcement, resolve the separately tracked Tailscale contract,
+or authorize production enforcement. This candidate is not published, and its
+release requires explicit owner/operator approval and a manual release workflow
+dispatch after review and merge.
 
 - [ ] Owned-chain isolation and reconciliation with Docker
 - [x] Durable transaction state machine, checkpoint model, and confirmation-token primitives (fixture-tested)
@@ -61,6 +63,12 @@ release-ready or authorize production enforcement.
 - [x] Complete and review the bounded generic #24 Linux packet/recovery contract: exact INPUT selectors and verdict composition, corrupt checkpoint, ownership divergence, Docker modes, UFW/firewalld, manager concurrency, no-global-flush verification, and flowtable refusal ([contract](specs/issue-24-linux-enforcement.md), [evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
 - [ ] Separately complete the local Tailscale compatibility contract before claiming Tailscale support; external tailnet access is not a generic acceptance prerequisite
 - [x] Issue #8 bounded generic Linux guarded-apply acceptance; systemd packet/recovery/Docker IP-change evidence and OpenRC recovery evidence are recorded in [ADR-0005](adr/0005-scoped-experimental-nftables-apply.md#parent-8-openrc-supervisor-follow-up-2026-11-09) and the [test matrix](TEST-MATRIX.md#parent-8-openrc-supervisor-acceptance-2026-11-09). Verified systemd and OpenRC are supported experimental integrations; unknown service managers refuse Apply. This does not authorize production or expand support to unknown supervisors.
+
+The v0.4.0 version in this branch identifies a release candidate for review,
+not an already-published release. v0.3.0 remains the latest published version.
+The release workflow is manual-only: merging this PR will not create a tag or
+publish artifacts. Normal CI and compatibility jobs validate the candidate;
+their build/smoke results are not privileged packet or recovery evidence.
 
 Final generic #24 evidence (2026-11-08) uses candidate HEAD
 `a002a08fa512fe7248c6913e123d97b478974c07` and CLI SHA-256

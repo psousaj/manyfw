@@ -98,6 +98,21 @@ class WorkflowContractTests(unittest.TestCase):
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertIn('      - ".github/workflows/**"', ci)
 
+    def test_release_is_manual_only_and_does_not_publish_on_merge(self) -> None:
+        release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        self.assertNotRegex(release, r"(?m)^  push:")
+        self.assertRegex(release, r"(?m)^  workflow_dispatch:")
+
+    def test_workspace_candidate_version_is_040(self) -> None:
+        cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        lock = (ROOT / "Cargo.lock").read_text(encoding="utf-8")
+        self.assertRegex(cargo, r'(?m)^version = "0\.4\.0"$')
+        for package in ("manyfw", "manyfw-core", "manyfw-linux"):
+            self.assertRegex(
+                lock,
+                rf'(?ms)^name = "{re.escape(package)}"\nversion = "0\.4\.0"',
+            )
+
     def test_actions_are_pinned_to_full_commit_shas(self) -> None:
         reference = re.compile(r"^[^\s@]+@[0-9a-f]{40}(?:\s+#.*)?$")
         for path in sorted(WORKFLOWS.glob("*.yml")):

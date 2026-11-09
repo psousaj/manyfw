@@ -1,12 +1,6 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:

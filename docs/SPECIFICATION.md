@@ -5,6 +5,12 @@ opted-in experimental Apply below changes only verified ManyFW-owned nftables
 state in disposable KVM guests; it does not modify foreign managers' objects
 or prove internet reachability.
 
+The latest published version is v0.3.0 and is read-only. This branch prepares
+the v0.4.0 experimental candidate for review; it is not published. Its release
+requires a separate explicit workflow dispatch after merge and review. Version
+distribution does not authorize applying firewall policy on production or
+development hosts.
+
 The expanded Linux INPUT execution target is specified once in
 [issue #24](specs/issue-24-linux-enforcement.md): exact source interfaces,
 source CIDRs and resolved local Host `host_address` destination matches,
