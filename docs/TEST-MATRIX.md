@@ -117,15 +117,18 @@ packet suite passed all 104 cases (`packet_eligible: true`); the production
 recovery matrix passed all 33 critical scenarios plus `harness_completion`
 (`recovery_eligible: true`). Both disposable guests were destroyed. The
 evidence-only aggregate has `evidence_gates_passed: true`, but keeps
-`generic_linux_accepted: false`, `production_authorized: false`, and the separate
-source/runtime review blocker. Tailscale remains NotApplicable and unclaimed.
+`generic_linux_accepted: false` and `production_authorized: false`. The separate
+technical source/runtime review is clean; the aggregate verifier's review field
+is still pending because it records producer evidence only. Tailscale remains
+NotApplicable and unclaimed.
 
 | Gate | Result | Candidate-bound evidence |
 | --- | --- | --- |
 | Generic Linux INPUT packets | Passed 104/104; complete; `packet_eligible: true` | Run `issue24-linux-packet-1794236897-292749`, operator-local evidence archive (`gate.json`, `evidence.json`, `commit.txt`, `source-manifest.json`, `SHA256SUMS`) |
 | Production systemd recovery | Passed all 33 critical scenarios and harness completion; `recovery_eligible: true` | Run `issue24-production-mfw-20261109T150817Z-292756`, operator-local evidence archive (`issue24-release-gate.json`, `status.tsv`, `metadata.txt`, `source-manifest.json`) |
 | Source/binary binding | Candidate commit `bf8f27e2176a3f45bd228e0efc489097b23f78d8`; production source manifest matched across runs; CLI SHA-256 `108554723cf38ecbb42afa300131533825cb9c10331c49cfbacf8850f372cc31` | Both evidence directories' manifests and binary receipts |
-| Combined evidence receipt | `evidence_gates_passed: true`; acceptance and production authorization remain false; source/runtime review pending | Run `acceptance-bf8f27e.json`, operator-local evidence archive |
+| Combined evidence receipt | `evidence_gates_passed: true`; acceptance and production authorization remain false; the producer-only verifier's `source_runtime_review` field stays pending | Run `acceptance-bf8f27e.json`, operator-local evidence archive |
+| Dedicated source/runtime review | Clean; bounded experimental scope; not owner authorization | Review disposition in [`ADR-0005`](adr/0005-scoped-experimental-nftables-apply.md#candidate-sourceruntime-review-2026-11-09) |
 
 These runs supersede the earlier-candidate packet/recovery claims above only for
 the tested generic scope. They do not confer release approval, production

@@ -513,3 +513,23 @@ integrations; unknown service managers, Tailscale interoperability, production
 deployment, and development-host firewall mutation remain unsupported or
 unauthorized. This technical review is a dedicated Goal self-review under the
 owner-authorized isolated-KVM policy, not independent review.
+
+## Candidate source/runtime review (2026-11-09)
+
+A dedicated post-remediation source/runtime review was completed against
+production-source candidate `bf8f27e2176a3f45bd228e0efc489097b23f78d8`. The
+current branch head adds only evidence documentation after that candidate; the
+production source inventory is unchanged. The review found no blocking or
+actionable findings for this bounded experimental scope and covered ownership
+and trust boundaries, privilege gates, failure/recovery, concurrency,
+interoperability, unsupported paths, and isolated runtime evidence.
+
+The review checked the candidate-bound 104/104 packet run and 33-critical-case
+systemd recovery run listed in `TEST-MATRIX.md`, both using the same CLI digest
+and destroyed disposable guests. It is technical self-review under the
+project's owner-authorized isolated-KVM governance, not independent review,
+project-owner authorization, or production approval. The evidence verifier
+receipt continues to report its own `source_runtime_review: pending` because
+that producer-only tool does not consume review dispositions. The separate
+review disposition is recorded here; generic acceptance and production
+authorization remain false.
