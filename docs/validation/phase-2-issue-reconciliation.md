@@ -7,7 +7,7 @@ after their child requirements and parent-level acceptance criteria are
 verified. Planner and enforcement issues remain governed by the release gates
 in `docs/ROADMAP.md`.
 
-Audit branch: `chore/phase-2-issue-reconciliation`  
+Audit branch: `chore/phase-2-issue-reconciliation`
 Initial base: `d6b745b7b28e4aa896ecfde95091ad9d6b9c19b0`
 
 ## Audited and completed
@@ -143,7 +143,7 @@ state.
 | Validate binaries, archives, checksums, release metadata before publish | Release workflow checks version/tag source, smoke-tests packaged archives, requires four checksums, verifies every checksum, extracts all archives, then publishes | Release run 42066292818 all jobs succeeded; downloaded all four published archives and verified all SHA-256 manifests locally; x86_64 GNU artifact passed `--version` and valid-policy CLI smoke |
 | Keep pull-request checks fast; reserve expensive matrix for main/manual | Compatibility build, distro, and recovery-contract matrices exclude `pull_request`; normal CI owns build/test/fixture checks, while the read-only namespace smoke remains available on PRs. A CI contract test guards these conditions. | `actionlint` and `python3 -m unittest scripts/test_workflow_contracts.py` validate the local workflow set. Historical PR run 42156392188 is not evidence for the gate: its workflow source at `2b1db9e3c43c4b37fbd679d3229eb1eda58b7a57` lacks the pull-request exclusions. A hosted PR run of the guarded workflow is still unavailable in this read-only execution. |
 | Least-privilege permissions and pinned third-party actions | Workflow permissions default to `contents: read`; publishing job alone grants `contents: write`; every `uses:` is pinned to a full commit SHA | Source audit of exactly three workflow files: `ci.yml`, `compatibility.yml`, `release.yml` |
-| Do not imply issue #24 privileged recovery evidence | Workflow labels privileged kernel/VM recovery and destructive integration as separate evidence; candidate gate requires candidate-bound evidence | Issue #24 remains OPEN; release/compatibility runs do not claim privileged recovery success |
+| Do not imply issue #24 privileged recovery evidence | Workflow labels privileged kernel/VM recovery and destructive integration as separate evidence; candidate gate requires candidate-bound evidence | Issue #24 was OPEN at the 2026-11-05 audit; release/compatibility runs do not claim privileged recovery success |
 
 Release record: GitHub release `v0.2.0` is published and non-prerelease. Its
 annotated tag resolves to the release run's
@@ -201,15 +201,17 @@ candidate-bound disposable QEMU/KVM experiment committed as `a62a880`; it
 satisfies the prerequisite for beginning #23 but does not complete or close
 issue #24. #23 implements the real scoped experimental CLI/supervisor path.
 Milestone B then exercises those production components under the remaining
-recovery and failure conditions. Issue #24 remains OPEN until that work and its
+recovery and failure conditions. As of 2026-11-07, Issue #24 remained OPEN until that work and its
 remaining Docker/Tailscale/UFW/firewalld, ownership, checkpoint, concurrency,
 and no-global-flush criteria pass. Keep production Apply experimental,
 explicitly opt-in, and separate from any general production deployment claim.
-Both issues remain open; fixture evidence does not imply production approval.
+At that date, both #23 and #24 remained open; fixture evidence did not imply
+production approval.
 
-No planner or enforcement issue was closed based solely on fixture tests or
-artifact smoke. Repository remains on local reconciliation branch
-`chore/phase-2-issue-reconciliation`; no changes were pushed or made to GitHub.
+As of 2026-11-07, no planner or enforcement issue had been closed based solely
+on fixture tests or artifact smoke. The repository was on local reconciliation
+branch `chore/phase-2-issue-reconciliation`; no changes had been pushed or made
+to GitHub at that time.
 
 ### #7 — Planner implementation and original packet evidence
 
@@ -258,9 +260,11 @@ namespaces; packets are real kernel traffic, not simulated verdicts, and this is
 not a live Docker-daemon integration claim. Source-diff and test-binary digests
 are recorded in `metadata.txt`; guest teardown evidence is `vm-down.log`.
 
-Current tracker state is #7 CLOSED, #8 OPEN, and #24 CLOSED. This closes only
-the planner dependency. The broader #8 threat-model, enforcement, operational
-and production-release criteria remain independent and unfinished.
+At this 2026-11-08 acceptance record, tracker state was #7 CLOSED, #8 OPEN, and
+#24 CLOSED. GitHub #8 was subsequently closed on 2026-11-09 for its bounded
+generic acceptance; #23 remains OPEN while #24, #7, and #8 are CLOSED. This
+closes only the planner dependency. Broader #8 production-release criteria
+remain independent and unfinished.
 
 ### #3 — Read-only Docker discovery (parent issue; remains open)
 

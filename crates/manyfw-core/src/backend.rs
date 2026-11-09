@@ -116,11 +116,14 @@ pub struct BackendObservation {
 pub struct BackendObservationSet {
     pub observations: Vec<BackendObservation>,
     pub complete: CapabilityState,
+    /// Collection status for each backend/address-family pair.
     #[serde(default)]
     pub family_completeness:
         std::collections::BTreeMap<(BackendKind, AddressFamily), CapabilityState>,
+    /// Errors limited to a single backend/address-family observation.
     #[serde(default)]
     pub family_limitations: std::collections::BTreeMap<(BackendKind, AddressFamily), Vec<String>>,
+    /// Set-wide failures; family-scoped diagnostics belong in family_limitations.
     #[serde(default)]
     pub limitations: Vec<String>,
 }
@@ -148,14 +151,29 @@ impl BackendObservationSet {
     /// level collection failures into every candidate. This deliberately does
     /// not infer Docker mode or ownership from chain names.
     pub fn capability_observations(&self) -> Vec<BackendCapabilityObservation> {
+        // `limitations` is set-wide; family-specific diagnostics live only in
+        // `family_limitations`. Keep their provenance distinct even when text
+        // happens to be identical.
+        let global_limitations = self.limitations.clone();
+        let unscoped_incomplete = self.complete != CapabilityState::Supported
+            && (global_limitations.is_empty() && self.family_limitations.is_empty());
         self.observations
             .iter()
             .map(|observation| {
                 let mut observation = observation.clone();
-                if self.complete != CapabilityState::Supported {
+                let backend_complete = self.complete == CapabilityState::Supported
+                    || self
+                        .family_completeness
+                        .iter()
+                        .any(|((backend, _), state)| {
+                            *backend == observation.backend && *state == CapabilityState::Supported
+                        });
+                if !global_limitations.is_empty() {
                     observation
                         .limitations
-                        .extend(self.limitations.iter().cloned());
+                        .extend(global_limitations.iter().cloned());
+                }
+                if unscoped_incomplete {
                     observation
                         .limitations
                         .push("backend observation collection is incomplete".into());
@@ -163,7 +181,7 @@ impl BackendObservationSet {
                 observation.limitations.sort();
                 observation.limitations.dedup();
                 let hook_state = |hook| {
-                    if self.complete != CapabilityState::Supported {
+                    if !backend_complete {
                         CapabilityState::Unknown
                     } else if observation.hooks.iter().any(|value| {
                         value.hook == hook && value.present == CapabilityState::Supported
@@ -180,25 +198,22 @@ impl BackendObservationSet {
                         .hooks
                         .iter()
                         .all(|value| value.priority.is_some());
-                let family_state = |family| {
-                    if self.family_completeness.get(&(observation.backend, family))
-                        == Some(&CapabilityState::Unknown)
-                    {
-                        CapabilityState::Unknown
-                    } else if observation
+                let family_state = |family| match self
+                    .family_completeness
+                    .get(&(observation.backend, family))
+                {
+                    Some(state) => *state,
+                    None if self.complete != CapabilityState::Supported => CapabilityState::Unknown,
+                    None if observation
                         .resources
                         .iter()
-                        .any(|value| value.family == family)
+                        .any(|value| value.family == family) =>
                     {
                         CapabilityState::Supported
-                    } else {
-                        self.family_completeness
-                            .get(&(observation.backend, family))
-                            .copied()
-                            .unwrap_or(CapabilityState::Unknown)
                     }
+                    None => CapabilityState::Unknown,
                 };
-                let docker_user = if self.complete != CapabilityState::Supported {
+                let docker_user = if !backend_complete {
                     CapabilityState::Unknown
                 } else if observation.resources.iter().any(|value| {
                     value.name.eq_ignore_ascii_case("DOCKER-USER")
@@ -210,7 +225,7 @@ impl BackendObservationSet {
                 } else {
                     CapabilityState::Unknown
                 };
-                let ownership_boundary = if self.complete != CapabilityState::Supported
+                let ownership_boundary = if !backend_complete
                     || observation.resources.is_empty()
                     || observation
                         .resources
@@ -568,6 +583,14 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     }
     for rule in &input.policy.rules {
         policy_priorities.insert(rule.priority);
+        if matches!(rule.destination, Selector::Docker(_)) {
+            require_capability(
+                &mut reasons,
+                &mut unknowns,
+                "docker_mode",
+                backend.capabilities.docker_mode,
+            );
+        }
         let paths = match &rule.destination {
             Selector::Host(selector) if selector.starts_with("local-address:") => {
                 let address = selector
@@ -717,14 +740,6 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                 Some(h) => {
                     required_priorities.insert(h.priority.unwrap_or_default());
                 }
-            }
-            if matches!(rule.destination, Selector::Docker(_)) {
-                require_capability(
-                    &mut reasons,
-                    &mut unknowns,
-                    "docker_mode",
-                    backend.capabilities.docker_mode,
-                );
             }
             let uses_nat = publication == Some(docker::PublicationMechanism::Nat);
             if uses_nat {
@@ -1969,29 +1984,69 @@ mod tests {
                 limitations: vec![],
             }],
             complete: CapabilityState::Unknown,
-            family_completeness: BTreeMap::from([(
+            family_completeness: BTreeMap::from([
+                (
+                    (BackendKind::Nftables, AddressFamily::Ipv4),
+                    CapabilityState::Supported,
+                ),
+                (
+                    (BackendKind::Nftables, AddressFamily::Ipv6),
+                    CapabilityState::Unknown,
+                ),
+            ]),
+            family_limitations: BTreeMap::from([(
                 (BackendKind::Nftables, AddressFamily::Ipv6),
-                CapabilityState::Unknown,
+                vec!["IPv6 source permission denied".into()],
             )]),
-            family_limitations: BTreeMap::new(),
-            limitations: vec!["IPv6 source permission denied".into()],
+            limitations: Vec::new(),
         };
         let candidate = set.capability_observations().pop().unwrap();
         assert_eq!(candidate.capabilities.ipv4, CapabilityState::Supported);
         assert_eq!(candidate.capabilities.ipv6, CapabilityState::Unknown);
-        assert_eq!(candidate.capabilities.input_hook, CapabilityState::Unknown);
+        assert_eq!(
+            candidate.capabilities.input_hook,
+            CapabilityState::Supported
+        );
         assert_eq!(
             candidate.capabilities.ownership_boundary,
             CapabilityState::Unknown
         );
         assert_eq!(candidate.observation.mode, BackendMode::Unknown);
-        assert!(
-            candidate
-                .observation
-                .limitations
-                .iter()
-                .any(|value| value.contains("permission denied"))
-        );
+        assert!(candidate.observation.limitations.is_empty());
+    }
+
+    #[test]
+    fn incomplete_collection_does_not_infer_family_support_from_partial_resources() {
+        let set = BackendObservationSet {
+            observations: vec![input(CapabilityState::Supported).backend.observation],
+            complete: CapabilityState::Unknown,
+            family_completeness: BTreeMap::new(),
+            family_limitations: BTreeMap::new(),
+            limitations: vec!["iptables IPv6 collection failed".into()],
+        };
+        let candidate = set.capability_observations().pop().unwrap();
+        assert_eq!(candidate.capabilities.ipv4, CapabilityState::Unknown);
+        assert_eq!(candidate.capabilities.ipv6, CapabilityState::Unknown);
+    }
+
+    #[test]
+    fn same_text_in_global_and_family_limitations_keeps_global_blocker() {
+        let detail = "IPv6 source permission denied".to_string();
+        let set = BackendObservationSet {
+            observations: vec![input(CapabilityState::Supported).backend.observation],
+            complete: CapabilityState::Unknown,
+            family_completeness: BTreeMap::from([(
+                (BackendKind::Nftables, AddressFamily::Ipv4),
+                CapabilityState::Supported,
+            )]),
+            family_limitations: BTreeMap::from([(
+                (BackendKind::Nftables, AddressFamily::Ipv6),
+                vec![detail.clone()],
+            )]),
+            limitations: vec![detail.clone()],
+        };
+        let candidate = set.capability_observations().pop().unwrap();
+        assert_eq!(candidate.observation.limitations, vec![detail]);
     }
 
     #[test]
@@ -2057,7 +2112,7 @@ mod tests {
     fn unavailable_ipv6_observation_does_not_taint_ipv4_capability() {
         let mut set = BackendObservationSet {
             observations: vec![input(CapabilityState::Supported).backend.observation],
-            complete: CapabilityState::Supported,
+            complete: CapabilityState::Unknown,
             family_completeness: BTreeMap::from([
                 (
                     (BackendKind::Nftables, AddressFamily::Ipv4),
@@ -2072,7 +2127,7 @@ mod tests {
                 (BackendKind::Nftables, AddressFamily::Ipv6),
                 vec!["IPv6 source permission denied".into()],
             )]),
-            limitations: vec!["IPv6 source permission denied".into()],
+            limitations: Vec::new(),
         };
         set.observations[0]
             .resources
@@ -2083,6 +2138,18 @@ mod tests {
         assert!(candidate.observation.limitations.is_empty());
         assert!(
             candidate.family_limitations[&AddressFamily::Ipv6][0].contains("permission denied")
+        );
+
+        let mut fixture = input(CapabilityState::Supported);
+        fixture.policy.zones.get_mut("lan").unwrap().subnets =
+            vec!["192.0.2.0/24".parse().unwrap()];
+        let mut candidate = candidate;
+        candidate.capabilities.actions = CapabilityState::Supported;
+        candidate.capabilities.interface_matching = CapabilityState::Supported;
+        fixture.backend = candidate;
+        assert_eq!(
+            Planner::plan(&fixture).applicability,
+            PlanApplicability::Applicable
         );
     }
 

@@ -43,8 +43,8 @@ privileges, recovery supervisor, or environment invalidate the experimental
 approval and require reassessment. Test-only recovery is not production-code
 recovery validation.
 
-Until ADR-0005 records a clean dedicated review and owner authorization, no
-production mutation adapter is approved or enabled.
+No production mutation adapter is approved or enabled. ADR-0005 records
+approval only for the bounded isolated experimental implementation.
 
 Privileged implementation must only ship after network namespace/VM integration tests demonstrate:
 

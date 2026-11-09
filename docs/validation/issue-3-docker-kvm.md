@@ -1,7 +1,7 @@
 # Issue #3 real Docker/KVM integration evidence
 
-Run: `mfw-20261107T024711Z-55114` (2026-11-07 UTC)  
-Result: **Passed** (exit status 0)  
+Run: `mfw-20261107T024711Z-55114` (2026-11-07 UTC)
+Result: **Passed** (exit status 0)
 Host isolation: QEMU `q35,accel=kvm`; Ubuntu reports `systemd-detect-virt=kvm`; SSH forwarding was bound to `127.0.0.1`; Docker used only the guest socket and `/var/lib/docker` on the guest overlay.
 
 Guest: Ubuntu 24.04.5 LTS, x86_64. Docker Engine 29.9.3, `overlayfs`. Docker installed the iptables driver through Ubuntu's `nf_tables` compatibility frontend. Docker's own bridge/publish lifecycle changed guest-owned networking only; ManyFW discovery did not change normalized guest iptables/ip6tables/nftables rules.

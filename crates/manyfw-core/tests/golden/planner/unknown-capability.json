@@ -129,7 +129,7 @@
     }
   ],
   "preconditions": {
-    "input_fingerprint": "fnv1a64:a61914183dd0c84b",
+    "input_fingerprint": "fnv1a64:00bb1701157d13a9",
     "observation_generation": 7,
     "backend_identity": "nftables",
     "backend_version": "1",

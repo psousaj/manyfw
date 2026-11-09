@@ -108,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ],
                 limitations: Vec::new(),
             },
+            family_limitations: Default::default(),
             capabilities: BackendCapabilities {
                 backend: BackendKind::Nftables,
                 mode: BackendMode::NativeNftables,
@@ -121,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dnat_original_destination: CapabilityState::Unsupported,
                 conntrack: CapabilityState::Unsupported,
                 docker_user: CapabilityState::Unsupported,
+                docker_mode: CapabilityState::Unsupported,
                 ownership_boundary: CapabilityState::Supported,
             },
         },

@@ -147,6 +147,7 @@ fn planner_input() -> PlannerInput {
         dnat_original_destination: CapabilityState::Unsupported,
         conntrack: CapabilityState::Unsupported,
         docker_user: CapabilityState::Unsupported,
+        docker_mode: CapabilityState::Unsupported,
         ownership_boundary: CapabilityState::Supported,
     };
     PlannerInput {
@@ -171,6 +172,7 @@ fn planner_input() -> PlannerInput {
         backend: BackendCapabilityObservation {
             observation,
             capabilities,
+            family_limitations: Default::default(),
         },
     }
 }

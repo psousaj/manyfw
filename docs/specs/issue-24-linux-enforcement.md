@@ -126,7 +126,8 @@ The fresh final candidate passed 104/104 packet cases and all 32 named recovery
 scenarios plus harness completion, with both guests destroyed. The standards,
 specification, and architecture/security reviews are recorded as clean in the
 ADR. The user-authorized GitHub #24 description reconciliation records the
-Tailscale split; the issue remains open. See [TEST-MATRIX](../TEST-MATRIX.md)
-and the ADR for evidence identities and scope. Tailscale remains pending in its
-separate contract, and #8's own prerequisite gates are not satisfied by this
-acceptance. The historical run above remains immutable and is not upgraded.
+Tailscale split. Issue #24 was subsequently closed after generic acceptance;
+the specialized Tailscale contract remains pending in its separate tracker
+issue. See [TEST-MATRIX](../TEST-MATRIX.md) and the ADR for evidence identities
+and scope. This acceptance does not by itself satisfy #8's separate prerequisite
+gates. The historical run above remains immutable and is not upgraded.

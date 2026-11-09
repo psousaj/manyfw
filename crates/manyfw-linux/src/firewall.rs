@@ -175,7 +175,6 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
                         .entry((BackendKind::Iptables, family))
                         .or_insert_with(Vec::new)
                         .push(format!("{program} response was malformed"));
-                    limitations.push(format!("{program} response was malformed"));
                 }
             },
             Err(error) => {
@@ -186,10 +185,6 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
                         "{program} observation failed: {}",
                         error_label(error.clone())
                     ));
-                limitations.push(format!(
-                    "{program} observation failed: {}",
-                    error_label(error)
-                ));
             }
         }
     }
@@ -481,7 +476,17 @@ mod tests {
         let observed = observe_with(&runner);
         assert_eq!(observed.complete, CapabilityState::Unknown);
         assert!(observed.observations.is_empty());
-        assert_eq!(observed.limitations.len(), 4);
+        assert_eq!(observed.limitations.len(), 2);
+        assert!(
+            observed.family_limitations[&(BackendKind::Iptables, AddressFamily::Ipv4)]
+                .iter()
+                .any(|value| value.contains("unavailable"))
+        );
+        assert!(
+            observed.family_limitations[&(BackendKind::Iptables, AddressFamily::Ipv6)]
+                .iter()
+                .any(|value| value.contains("unavailable"))
+        );
     }
 
     #[test]
@@ -545,6 +550,17 @@ mod tests {
         assert_eq!(
             observed.family_completeness[&(BackendKind::Iptables, AddressFamily::Ipv6)],
             CapabilityState::Unknown
+        );
+        assert!(
+            !observed
+                .limitations
+                .iter()
+                .any(|value| value.contains("permission denied"))
+        );
+        assert!(
+            observed.family_limitations[&(BackendKind::Iptables, AddressFamily::Ipv6)]
+                .iter()
+                .any(|value| value.contains("permission denied"))
         );
         assert!(
             !iptables

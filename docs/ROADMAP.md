@@ -32,13 +32,11 @@ subsequently published and verified by its
 ## v0.3.0 — Real planner (published; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
-- [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), PR #38)
-- [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), PR #38)
-- [x] Isolated planner check exercises Applicable and Blocked plans and packet verdicts ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](validation/v0.3.0-planner.md))
-- [x] Prove planning does not mutate nftables rules in a disposable namespace; compatibility and release workflows enforce it; no development-host firewall mutation
-- [x] Publish and verify `v0.3.0` ([release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0); [workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087))
+- [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), closed)
+- [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), closed)
 - [x] Complete isolated planner integration evidence for host INPUT and native Docker DNAT/FORWARD semantics ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](TEST-MATRIX.md#issue-7-isolated-planner-acceptance))
 - [x] Prove applicable, blocked, and conflicting-priority planning does not mutate observed kernel rules in disposable namespaces/VMs ([#7 evidence](TEST-MATRIX.md#issue-7-isolated-planner-acceptance))
+- [x] Publish and verify `v0.3.0` ([release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0); [workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087))
 
 Release publication passed artifact build, checksum, and packaged smoke-test
 gates. v0.3.0 remains read-only and does not include or authorize
@@ -58,7 +56,7 @@ release-ready or authorize production enforcement.
 - [ ] Require confirmation for real remote firewall changes
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
 - [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
-- [x] Issue #23 scoped experimental nftables Apply, with dedicated architecture/security review and real disposable-KVM confirmation/timeout evidence ([validation](validation/issue-23/issue23-mfw-20261107T174332Z-427044/)); remains non-production and opt-in
+- [x] Implement the scoped experimental nftables Apply from #23, with dedicated architecture/security review and real disposable-KVM confirmation/timeout evidence ([validation](validation/issue-23/issue23-mfw-20261107T174332Z-427044/)); it remains non-production and opt-in. GitHub #23 remains OPEN; this reconciliation does not mutate issue state.
 - [x] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration ([final evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
 - [x] Complete and review the bounded generic #24 Linux packet/recovery contract: exact INPUT selectors and verdict composition, corrupt checkpoint, ownership divergence, Docker modes, UFW/firewalld, manager concurrency, no-global-flush verification, and flowtable refusal ([contract](specs/issue-24-linux-enforcement.md), [evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
 - [ ] Separately complete the local Tailscale compatibility contract before claiming Tailscale support; external tailnet access is not a generic acceptance prerequisite
