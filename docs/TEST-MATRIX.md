@@ -88,9 +88,9 @@ unsupported/unknown semantics. The isolated suite complements rather than
 replaces those goldens; it does not claim live Docker-daemon integration or
 general enforcement authorization.
 
-## Issue #24 final generic Linux evidence
+## Issue #24 historical generic Linux evidence
 
-The final candidate for the owner-reconciled generic Linux contract used two
+The 2026-11-08 candidate for the owner-reconciled generic Linux contract used two
 disposable Ubuntu 24.04.5 KVM guests and the same release CLI. Packet run
 `issue24-linux-packet-1794162697-855068` passed 104/104 required cases, including
 real packet outcomes, IPv6/TCP and IPv4/UDP external accept/drop composition at
@@ -100,11 +100,36 @@ critical scenarios and `harness_completion`. Both guests were destroyed.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| Generic Linux INPUT packet contract | Passed (104/104); packet gate eligible, not release eligible | Run `issue24-linux-packet-1794162697-855068`, operator-local evidence archive |
-| Production-code recovery | Passed (32 critical + harness completion); recovery eligible, not release eligible | Run `issue24-production-mfw-20261108T153526Z-812910`, operator-local evidence archive |
+| Generic Linux INPUT packet contract | Passed (104/104); packet gate eligible, not release eligible | Historical run `issue24-linux-packet-1794162697-855068`, operator-local evidence archive |
+| Production-code recovery | Passed (32 critical + harness completion); recovery eligible, not release eligible | Historical run `issue24-production-mfw-20261108T153526Z-812910`, operator-local evidence archive |
 | Combined evidence aggregate | `evidence_gates_passed: true`; acceptance and production authorization remain false in this evidence-only receipt | `acceptance-20261108-final-104.json`, operator-local evidence archive |
 | Standards / Spec / Architecture-Security review | Clean for the bounded experimental subset | Disposition recorded in ADR-0005 |
 | Separate Tailscale compatibility | Pending; not claimed Passed or covered by generic acceptance | [`issue-24-linux-enforcement.md`](specs/issue-24-linux-enforcement.md) |
+
+### Candidate-bound generic Linux rerun (2026-11-09)
+
+After the packet harness was corrected to install the real packaged recovery
+unit and run it inside the packet target namespace, both mandatory suites were
+rerun against source commit `bf8f27e2176a3f45bd228e0efc489097b23f78d8` and the
+same release CLI (SHA-256
+`108554723cf38ecbb42afa300131533825cb9c10331c49cfbacf8850f372cc31`). The
+packet suite passed all 104 cases (`packet_eligible: true`); the production
+recovery matrix passed all 33 critical scenarios plus `harness_completion`
+(`recovery_eligible: true`). Both disposable guests were destroyed. The
+evidence-only aggregate has `evidence_gates_passed: true`, but keeps
+`generic_linux_accepted: false`, `production_authorized: false`, and the separate
+source/runtime review blocker. Tailscale remains NotApplicable and unclaimed.
+
+| Gate | Result | Candidate-bound evidence |
+| --- | --- | --- |
+| Generic Linux INPUT packets | Passed 104/104; complete; `packet_eligible: true` | Run `issue24-linux-packet-1794236897-292749`, operator-local evidence archive (`gate.json`, `evidence.json`, `commit.txt`, `source-manifest.json`, `SHA256SUMS`) |
+| Production systemd recovery | Passed all 33 critical scenarios and harness completion; `recovery_eligible: true` | Run `issue24-production-mfw-20261109T150817Z-292756`, operator-local evidence archive (`issue24-release-gate.json`, `status.tsv`, `metadata.txt`, `source-manifest.json`) |
+| Source/binary binding | Candidate commit `bf8f27e2176a3f45bd228e0efc489097b23f78d8`; production source manifest matched across runs; CLI SHA-256 `108554723cf38ecbb42afa300131533825cb9c10331c49cfbacf8850f372cc31` | Both evidence directories' manifests and binary receipts |
+| Combined evidence receipt | `evidence_gates_passed: true`; acceptance and production authorization remain false; source/runtime review pending | Run `acceptance-bf8f27e.json`, operator-local evidence archive |
+
+These runs supersede the earlier-candidate packet/recovery claims above only for
+the tested generic scope. They do not confer release approval, production
+authorization, or Tailscale compatibility.
 
 ### Current-source supervisor-retry runtime follow-up (2026-11-08)
 
@@ -145,8 +170,8 @@ ManyFW coexistence. Both KVM guests were destroyed.
 
 | Evidence | Result | Artifact |
 | --- | --- | --- |
-| Generic INPUT packet suite | Passed 104/104; `packet_eligible: true`; complete evidence; no missing coverage or cleanup failures | Run `issue24-linux-packet-1794176951-939864`, operator-local evidence archive |
-| Production CLI/recovery/Docker lifecycle suite | Passed 33/33 critical scenarios plus harness completion; `recovery_eligible: true`; Docker IP changed and foreign firewall objects preserved | Run `issue24-production-mfw-20261108T222218Z-936929`, operator-local evidence archive |
+| Generic INPUT packet suite | Passed 104/104; `packet_eligible: true`; complete evidence; no missing coverage or cleanup failures | Historical run `issue24-linux-packet-1794176951-939864`, operator-local evidence archive |
+| Production CLI/recovery/Docker lifecycle suite | Passed 33/33 critical scenarios plus harness completion; `recovery_eligible: true`; Docker IP changed and foreign firewall objects preserved | Historical run `issue24-production-mfw-20261108T222218Z-936929`, operator-local evidence archive |
 | Candidate and release binary | Base commit `0f5a4221bd607ebfdc6f523c52f4b83007065ace`; worktree SHA-256 `32d3f4b94a49629a167da3148f9a6c1b9d74edb6c01d287b75713dbacb0da174`; CLI SHA-256 `7a58dbf51ecc0d5759e19be11cd887d5d4f18651816501f6e607b52ea42b8968` | Recovery `metadata.txt`; packet `commit.txt`, `worktree.patch`, `artifacts.sha256` |
 | Source manifest | 151 source files matched exactly for both runs | Each evidence directory's `source-manifest.json` |
 | Tailscale / production gate | Tailscale remains separately pending and not claimed; release eligibility and production authorization remain false | Both machine gate receipts and `docs/specs/issue-24-linux-enforcement.md` |
