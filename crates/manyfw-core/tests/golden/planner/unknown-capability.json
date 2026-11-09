@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "applicability": {
+    "Blocked": {
+      "reasons": [
+        {
+          "Capability": {
+            "name": "actions",
+            "state": "unknown"
+          }
+        },
+        {
+          "Capability": {
+            "name": "hook_priorities",
+            "state": "unknown"
+          }
+        },
+        {
+          "Capability": {
+            "name": "input_hook",
+            "state": "unknown"
+          }
+        },
+        {
+          "Capability": {
+            "name": "interface_matching",
+            "state": "unknown"
+          }
+        },
+        {
+          "Capability": {
+            "name": "ipv4",
+            "state": "unknown"
+          }
+        },
+        {
+          "Capability": {
+            "name": "ipv6",
+            "state": "unknown"
+          }
+        },
+        {
+          "Capability": {
+            "name": "ownership_boundary",
+            "state": "unknown"
+          }
+        }
+      ]
+    }
+  },
+  "operations": [
+    {
+      "EnsureRule": {
+        "rule_id": "r1",
+        "source": {
+          "Zone": "lan"
+        },
+        "source_interfaces": [
+          {
+            "Exact": "eth0"
+          }
+        ],
+        "source_subnets": [],
+        "destination": {
+          "Host": "service"
+        },
+        "priority": 10,
+        "requires_dnat_original_destination": false,
+        "requires_conntrack": false,
+        "path": "input",
+        "family": "ipv4",
+        "action": "Allow",
+        "protocol": "Tcp",
+        "ports": "Any",
+        "host_port": null,
+        "container_port": null,
+        "publication": null,
+        "container_targets": [],
+        "host_address": null,
+        "managed_resource": "manyfw-input-v4"
+      }
+    },
+    {
+      "EnsureRule": {
+        "rule_id": "r1",
+        "source": {
+          "Zone": "lan"
+        },
+        "source_interfaces": [
+          {
+            "Exact": "eth0"
+          }
+        ],
+        "source_subnets": [],
+        "destination": {
+          "Host": "service"
+        },
+        "priority": 10,
+        "requires_dnat_original_destination": false,
+        "requires_conntrack": false,
+        "path": "input",
+        "family": "ipv6",
+        "action": "Allow",
+        "protocol": "Tcp",
+        "ports": "Any",
+        "host_port": null,
+        "container_port": null,
+        "publication": null,
+        "container_targets": [],
+        "host_address": null,
+        "managed_resource": "manyfw-input-v6"
+      }
+    },
+    {
+      "SetManagedDefault": {
+        "action": "Deny",
+        "path": "input",
+        "family": "ipv4",
+        "managed_resource": "manyfw-input-v4"
+      }
+    },
+    {
+      "SetManagedDefault": {
+        "action": "Deny",
+        "path": "input",
+        "family": "ipv6",
+        "managed_resource": "manyfw-input-v6"
+      }
+    }
+  ],
+  "preconditions": {
+    "input_fingerprint": "fnv1a64:00bb1701157d13a9",
+    "observation_generation": 7,
+    "backend_identity": "nftables",
+    "backend_version": "1",
+    "required_hooks": [
+      "input"
+    ],
+    "required_priorities": [
+      0
+    ],
+    "policy_priorities": [
+      10
+    ],
+    "backend": "nftables",
+    "mode": "native_nftables"
+  },
+  "ownership": [
+    {
+      "resource": "manyfw-input-v4",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "manyfw-input-v6",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "r1",
+      "owner": "manyfw",
+      "reason": "planned operation is scoped to the ManyFW ownership boundary"
+    }
+  ],
+  "unknowns": [
+    "capability actions is unknown",
+    "capability hook_priorities is unknown",
+    "capability input_hook is unknown",
+    "capability interface_matching is unknown",
+    "capability ipv4 is unknown",
+    "capability ipv6 is unknown",
+    "capability ownership_boundary is unknown"
+  ],
+  "explanations": [
+    "plan generation is read-only and produces typed diagnostic operations",
+    "native nftables mode is evaluated independently and does not require DOCKER-USER",
+    "applicability is blocked; proposed operations are not executable",
+    "foreign manager resources are preserved and global atomicity is not assumed"
+  ]
+}

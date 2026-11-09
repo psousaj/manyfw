@@ -733,21 +733,26 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "manyfw"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bollard",
  "clap",
+ "ipnet",
+ "libc",
  "manyfw-core",
  "manyfw-linux",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
 [[package]]
 name = "manyfw-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ipnet",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -757,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "manyfw-linux"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "manyfw-core",

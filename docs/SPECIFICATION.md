@@ -1,8 +1,29 @@
 # Configuration and CLI
 
-ManyFW is a read-only policy coordination tool. It describes and validates
-policy intent; it does not prove internet reachability and it does not modify
-Docker, nftables, iptables, UFW, firewalld, or any other firewall manager.
+Ordinary ManyFW commands are read-only policy coordination. The separately
+opted-in experimental Apply below changes only verified ManyFW-owned nftables
+state in disposable KVM guests; it does not modify foreign managers' objects
+or prove internet reachability.
+
+The latest published version is v0.3.0 and is read-only. This branch prepares
+the v0.4.0 experimental candidate for review; it is not published. Its release
+requires a separate explicit workflow dispatch after merge and review. Version
+distribution does not authorize applying firewall policy on production or
+development hosts.
+
+The expanded Linux INPUT execution target is specified once in
+[issue #24](specs/issue-24-linux-enforcement.md): exact source interfaces,
+source CIDRs and resolved local Host `host_address` destination matches,
+TCP/UDP ports, ICMP/ICMPv6,
+allow/deny defaults, deny authority against external accept, and allow's
+inability to override external drop. The bounded experimental INPUT subset was
+validated with candidate-bound packet/recovery evidence and reviewed as
+recorded in ADR-0005; this does not authorize production or claim universal
+Linux path coverage.
+OUTPUT/FORWARD are explicitly unsupported; default reject requires exact
+implementation or pre-mutation refusal. Current schema details below remain
+the current contract. CIDR selectors remain source-only; arbitrary destination
+CIDRs are unsupported and refused, with no destination-CIDR schema expansion.
 
 ## Schema version
 
@@ -271,17 +292,133 @@ Implemented commands:
 - `manyfw explain <service> --file <policy> --snapshot <snapshot.json> [--format human|json]`
   resolves a stable identity (or a unique short Docker selector) and renders a
   versioned explanation from the snapshot. Ambiguous and unresolved selectors
-  are explicit outcomes; the command performs no live collection and never
-  claims external reachability or effective firewall enforcement.
+  emit the typed explanation, candidates, and a nonzero command status; the
+  command performs no live collection and never
+  claims external reachability or effective firewall enforcement. Explanations
+  explicitly retain host firewall state, upstream NAT, cloud security-group
+  policy, and host proxies as unknown because those systems are not inspected.
 - `manyfw discover [--output <path|->]` performs read-only collection from the
   local Docker Engine Unix socket and the current Linux network namespace,
   composes a sanitized versioned observation snapshot, and writes JSON to the
-  requested file or stdout (`-`). Docker socket, permission, and partial-source
-  failures remain represented in the snapshot; discovery never reads or writes
-  firewall rules.
+  requested file or stdout (`-`). On an interactive terminal, stdout defaults
+  to a concise human-readable report; when stdout is redirected or piped, it
+  defaults to JSON. `--format human|json` selects the stdout format explicitly,
+  while `--verbose` includes per-record detail in human mode. File output is
+  always JSON. Docker socket, permission, and partial-source
+  failures remain represented in the report or snapshot; discovery never reads
+  or writes firewall rules.
+- `manyfw plan --diagnostic-input <planner-input.json>` emits a versioned JSON
+  planner bundle for integration/diagnostic use. It does not inspect live
+  firewall state and does not apply the plan.
+- `manyfw apply --file <planner-bundle.json> --experimental [--timeout N]` is an
+  isolated experimental operation, not a supported production firewall
+  manager. It requires root in a marked KVM guest, an active explicitly
+  installed recovery supervisor (verified `manyfw-recovery.service` under
+  systemd or the installed `manyfw-recovery` OpenRC service), a matching
+  applicable planner bundle, and input-hook composition admitted by the
+  reviewed [Issue #24 contract](specs/issue-24-linux-enforcement.md). The input
+  hook need not otherwise be empty, but unsupported, incomplete, or unknown
+  composition fails closed. Only the narrowly reviewed ManyFW-owned `inet`
+  input table is changed. Default actions are translated
+  with explicit family-scoped nftables fallback rules, never as an unscoped
+  `inet` chain policy. Unsupported or stale plans fail before mutation. Apply
+  returns a one-time confirmation token and automatically rolls back
+  unconfirmed changes at the bounded deadline. After reboot, if the ManyFW
+  table is already absent and the recorded checkpoint expected no ManyFW table,
+  recovery may mark the scoped transaction restored without modifying foreign
+  ruleset state. For a nonempty checkpoint, recreation of an absent table
+  requires a proven boot-ID change, an intact transaction-bound checkpoint and
+  matching durable recovery arm/deadline, and a currently compatible input hook.
+  Only the adapter's validated single-table checkpoint grammar is accepted;
+  unknown listing formats fail closed. The atomic batch exclusively creates
+  `inet manyfw` with its ownership marker in the same exclusive declaration
+  and emits explicit `add chain`/`add rule` commands from the validated
+  checkpoint in the same atomic batch. It never relies on nested objects in a
+  `create table` declaration or an empty unmarked table followed by declaration
+  replay. It refuses a
+  racing table creator, and verifies the restored owned
+  state. An exactly restored table is an idempotent no-op; a present divergent
+  table is never overwritten. Same-boot disappearance does not authorize
+  recreation. This exceptional reboot path does not require foreign state to
+  equal the pre-reboot whole-ruleset fingerprint; ordinary recovery retains its
+  whole-ruleset concurrency guards. Uncertain or divergent ManyFW-owned state
+  remains a visible critical failure. Interrupted apply recovery without a
+  durable post-apply fingerprint additionally requires the exact reviewed
+  owned table/chain/rule state, including `type filter` and `policy accept`,
+  and an unchanged foreign-ruleset fingerprint persisted in the integrity-bound
+  checkpoint. This fingerprint excludes only `inet manyfw` objects and volatile
+  handles/counters. Forwarding/NAT divergence is refused before rollback writes;
+  older checkpoints missing this fingerprint cannot authorize that ordinary
+  interrupted path. The separately authorized reboot exception is unchanged.
+  Inspected disposable-KVM run `mfw-20261107T233747Z-573265` supports
+  the nonempty-checkpoint reboot remediation; dedicated source and runtime
+  architecture/security review found no code findings for that remediation.
+  Under that historical gate, full #24 acceptance was considered blocked by
+  missing Tailscale interoperability evidence. The current owner-reconciled
+  generic/specialized separation is defined in the issue #24 contract above.
+  evidence-retention review found that `/run` batch logs were lost across boots.
+  The harness now uses persistent
+  `/var/log/manyfw-issue24/production-batches.log`. Final retention run
+  `mfw-20261107T234657Z-576778` supersedes that pending validation: archived
+  `production-nft-batches.txt` retains pre-reboot batches and exclusive checkpoint
+  restoration at lines 115–117. Its gate records 32 named Passed scenarios plus
+  Passed harness completion; Tailscale is the sole NotApplicable blocker and
+  `release_eligible` remains false. Guest destruction was verified. The tested
+  worktree digest is `20631b7b68bdec08aee94d2e192b67760c7d4654756e255ca606823ec436b505`;
+  the CLI digest is unchanged (see [test matrix](TEST-MATRIX.md#latest-24-production-code-kvm-candidate-evidence)).
+  That historical run did not include the later 104-case packet suite or final
+  source/runtime review. Current bounded generic acceptance and its evidence are
+  recorded in ADR-0005 and the [test matrix](TEST-MATRIX.md#issue-24-final-generic-linux-evidence).
+  This does not authorize production or development-host mutation, establish
+  Tailscale compatibility, or satisfy #8's separate prerequisites.
+  A malformed or mismatched recovery arm for a known
+  transaction routes the persisted transaction through guarded rollback (or
+  aborts before mutation) rather than silently leaving it pending. The worker
+  also scans durable pending records for missing arm requests; orphaned arms or
+  unreadable transaction storage are surfaced as critical and block new applies
+  rather than being silently ignored.
+- `manyfw confirm <transaction-id>` confirms a verified pending apply by
+  reading the one-time token from stdin, so it is not exposed in process
+  arguments or command history.
+  `manyfw recover --watch` runs the separately supervised worker; operators
+  must install/enable the packaged unit explicitly. If an automatic rollback
+  attempt fails, the worker retains the durable critical record and matching
+  recovery arm, then retries at a throttled interval only while the arm and
+  transaction identity still match. Each retry uses the same checkpoint and
+  ownership guards; repeated identical diagnostics are deduplicated and the
+  retained rollback diagnostic history is capped at 16 entries. A failure
+  remains visible and is never reported as recovered. If automatic recovery cannot resolve it, an operator must
+  investigate/remediate and may retry the transaction with
+  `manyfw recover --rollback <transaction-id>`. This root-authorized manual
+  retry is available even while the recovery supervisor is inactive; it still
+  enforces the marked-KVM guard, protected storage, transaction locking,
+  checkpoint integrity, ownership/fingerprint checks, scoped restoration, and
+  actual resource verification. It does not relax Apply's active-supervisor
+  prerequisite or replace independent recovery for unattended interrupted
+  transactions.
+
+Apply is not enabled by default and is not authorized on development/WSL or
+production hosts. The test harness must verify disposable VM identity from
+outside the guest and may mutate firewall state only inside that guest. A
+successful input-chain rule is not a global reachability guarantee.
+
+All human-readable CLI commands accept `--color auto|always|never`. `auto`
+colors only terminal output, respects `NO_COLOR`, and leaves JSON untouched.
 
 The CLI must present diagnostic codes and actionable messages. Diagnostic data
 must remain suitable for future JSON output and CI automation.
+
+Discovery examples:
+
+```sh
+manyfw discover                         # human report in a terminal
+manyfw discover --format json           # JSON to stdout
+manyfw discover --output snapshot.json  # JSON file
+manyfw discover --format human --color always
+```
+
+Experimental Apply is documented separately from ordinary read-only CLI use;
+do not run its integration command against a development or production host.
 
 ## Testing contract
 
@@ -301,12 +438,18 @@ stable.
 ## Not implemented in this issue
 
 - Docker event discovery.
-- Firewall-state inspection.
+- General-purpose firewall-state inspection beyond the experimental adapter's
+  narrowly scoped ownership/preflight checks.
 - Host resource identity resolution beyond observed host records.
 - Runtime expansion of interface globs.
 - ICMP type/code filters.
-- nftables or iptables translation.
-- Any privileged operation, firewall mutation, apply, confirm, or rollback.
+- General-purpose nftables or iptables translation. The experimental nftables
+  adapter supports only the bounded operation allowlist documented above; no
+  iptables adapter is implemented.
+- General-purpose or host-enabled enforcement. The experimental nftables
+  `apply`, `confirm`, rollback, and recovery path is limited to the reviewed
+  disposable-KVM scope described in the security and architecture documents;
+  it is not supported on development or production hosts.
 - Reachability proofs or claims that a policy protects a host.
 
 Future planners must verify target resolution, backend capabilities, effective

@@ -958,7 +958,7 @@ fn transport_error_message(outcome: &CollectionOutcome) -> &'static str {
         CollectionOutcome::Interrupted => "collection interrupted",
         CollectionOutcome::Malformed => "malformed response",
         CollectionOutcome::TemporalInconsistency => "temporal inconsistency",
-        CollectionOutcome::Partial => "partial collection",
+        CollectionOutcome::Partial => "partial collection; some Docker observations may be missing",
         CollectionOutcome::Complete => "complete",
     }
 }
@@ -1295,6 +1295,28 @@ mod tests {
         .collect();
         assert_eq!(unavailable.outcome, CollectionOutcome::Unavailable);
         assert_eq!(unavailable.completeness, Completeness::Unavailable);
+
+        let permission_denied = DockerDiscovery::new(
+            Fake {
+                result: Err(TransportError::PermissionDenied),
+            },
+            T(10),
+        )
+        .collect();
+        assert_eq!(
+            permission_denied.outcome,
+            CollectionOutcome::PermissionDenied
+        );
+        assert_eq!(permission_denied.completeness, Completeness::Unknown);
+        assert_eq!(
+            permission_denied.limitations,
+            [Limitation::PermissionDenied]
+        );
+        assert_eq!(
+            permission_denied.diagnostics[0].message,
+            "Docker container listing failed: permission denied"
+        );
+        assert!(permission_denied.containers.is_empty());
     }
 
     #[test]
@@ -1340,6 +1362,34 @@ mod tests {
         assert_eq!(
             result.diagnostics[0].message,
             "Docker inspection failed for an allowlisted instance"
+        );
+
+        let result = DockerDiscovery::new(
+            Fake {
+                result: Ok(ContainerList {
+                    collected_at: 10,
+                    containers: vec![record("valid", &[("com.manyfw.service-id", "svc")])],
+                    inspection_failures: vec![InspectionFailure {
+                        instance_id: "restricted-instance".into(),
+                        kind: InspectionFailureKind::PermissionDenied,
+                    }],
+                    inspected_at: Some(10),
+                }),
+            },
+            T(10),
+        )
+        .collect();
+        assert_eq!(result.outcome, CollectionOutcome::Partial);
+        assert_eq!(result.completeness, Completeness::Partial);
+        assert_eq!(result.containers.len(), 1);
+        assert!(result.limitations.contains(&Limitation::InspectionFailed));
+        assert_eq!(
+            result.diagnostics[0].message,
+            "permission denied while inspecting a Docker container"
+        );
+        assert_eq!(
+            result.diagnostics[0].instance_id.as_deref(),
+            Some("restricted-instance")
         );
     }
 

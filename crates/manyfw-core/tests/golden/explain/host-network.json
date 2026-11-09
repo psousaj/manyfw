@@ -1,0 +1,68 @@
+{
+  "version": 3,
+  "snapshot_version": 1,
+  "subject": {
+    "selector": "[redacted]"
+  },
+  "identity": {
+    "outcome": "resolved",
+    "identity": "docker:demo/web",
+    "replicas": [
+      {
+        "instance_id": "replica-1",
+        "replica_key": "replica-key-1",
+        "lifecycle": "running",
+        "operational_status": "running"
+      }
+    ]
+  },
+  "identity_evidence": [
+    "evidence-1"
+  ],
+  "paths": [],
+  "policy": {
+    "matching_rule_count": 0,
+    "declared_action": "default_deny",
+    "precedence": [],
+    "static_conclusion": "no_observed_endpoint_to_evaluate",
+    "runtime_enforcement": "unverified",
+    "evidence": [
+      "evidence-2"
+    ]
+  },
+  "runtime": {
+    "status": "unknown",
+    "statement": "the runtime path remains unknown",
+    "evidence": []
+  },
+  "evidence": [
+    {
+      "id": "evidence-1",
+      "source": "docker_identity",
+      "resource": "service selector (redacted)",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-2",
+      "source": "policy_evaluation",
+      "resource": "declared policy summary; runtime enforcement unverified",
+      "interval": null,
+      "limitations": [
+        "policy is static and has no collection timestamp",
+        "policy evidence describes declared intent only"
+      ]
+    }
+  ],
+  "unknowns": [
+    "runtime path is not fully observed",
+    "service uses host networking without Docker publication mappings; observed host listeners cannot be attributed to this service because process ownership correlation is unavailable",
+    "host firewall state and external reachability are unknown: upstream NAT, cloud security groups, host proxies, and effective firewall enforcement were not inspected"
+  ],
+  "limitations": [
+    "NoReachabilityProbe"
+  ]
+}

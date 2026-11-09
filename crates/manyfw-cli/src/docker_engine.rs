@@ -378,12 +378,57 @@ fn classify_bollard_error(error: BollardError) -> DockerApiError {
             io::ErrorKind::TimedOut => DockerApiError::Timeout,
             _ => DockerApiError::Other,
         },
+        BollardError::HyperResponseError { err } => {
+            classify_io_source(&err).unwrap_or_else(|| {
+                // Hyper does not expose every connect-time OS error through
+                // `source()`. Preserve actionable Unix socket permission
+                // failures without retaining the raw transport error.
+                if err
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("permission denied")
+                {
+                    DockerApiError::PermissionDenied
+                } else {
+                    DockerApiError::Other
+                }
+            })
+        }
+        BollardError::HyperLegacyError { err } => classify_io_source(&err).unwrap_or_else(|| {
+            let message = format!("{err:?}").to_ascii_lowercase();
+            if message.contains("permissiondenied") || message.contains("permission denied") {
+                DockerApiError::PermissionDenied
+            } else if message.contains("connectionrefused") {
+                DockerApiError::Unavailable
+            } else {
+                DockerApiError::Other
+            }
+        }),
         BollardError::RequestTimeoutError => DockerApiError::Timeout,
         BollardError::JsonDataError { .. } | BollardError::JsonSerdeError { .. } => {
             DockerApiError::Malformed
         }
         _ => DockerApiError::Other,
     }
+}
+
+fn classify_io_source(error: &(dyn std::error::Error + 'static)) -> Option<DockerApiError> {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<io::Error>() {
+            return Some(match io_error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                    DockerApiError::Unavailable
+                }
+                io::ErrorKind::PermissionDenied => DockerApiError::PermissionDenied,
+                io::ErrorKind::Interrupted => DockerApiError::Interrupted,
+                io::ErrorKind::TimedOut => DockerApiError::Timeout,
+                _ => DockerApiError::Other,
+            });
+        }
+        source = error.source();
+    }
+    None
 }
 
 fn to_transport_error(error: DockerApiError) -> TransportError {

@@ -1,10 +1,12 @@
 # Roadmap and release gates
 
-The highest completed and published roadmap milestone is **v0.2.0**. The
-[GitHub Release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0) was
-published on 2026-11-05 from commit `07cbf3e`; the
-[release workflow](https://github.com/psousaj/manyfw/actions/runs/42066292818)
-completed successfully.
+The highest completed and published roadmap milestone is **v0.3.0**; v0.4.0
+remains unreleased experimental work. The
+[v0.2.0 GitHub Release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0)
+was published on 2026-11-05 from commit `07cbf3e`, and the
+[v0.3.0 release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0) was
+subsequently published and verified by its
+[release workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087).
 
 ## v0.1.0 — Read-only scaffold
 - [x] Cargo workspace with one CLI binary
@@ -27,13 +29,13 @@ completed successfully.
 - [x] PR compatibility CI runs disposable host-namespace and distro smoke gates for stacked feature PRs
 - [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
-## v0.3.0 — Real planner (release candidate; remains read-only)
+## v0.3.0 — Read-only Planner (published; remains read-only)
 - [x] Backend capability interface and nftables/iptables feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
-- [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), PR #38)
-- [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), PR #38)
-- [x] Isolated planner check exercises Applicable and Blocked plans and packet verdicts ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](validation/v0.3.0-planner.md))
-- [x] Prove planning does not mutate nftables rules in a disposable namespace; compatibility and release workflows enforce it; no development-host firewall mutation
+- [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), closed)
+- [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), closed)
+- [x] Complete isolated planner integration evidence for host INPUT and native Docker DNAT/FORWARD semantics ([#7](https://github.com/psousaj/manyfw/issues/7), [evidence](TEST-MATRIX.md#issue-7-isolated-planner-acceptance))
+- [x] Prove applicable, blocked, and conflicting-priority planning does not mutate observed kernel rules in disposable namespaces/VMs ([#7 evidence](TEST-MATRIX.md#issue-7-isolated-planner-acceptance))
 - [x] Publish and verify `v0.3.0` ([release](https://github.com/psousaj/manyfw/releases/tag/v0.3.0); [workflow](https://github.com/psousaj/manyfw/actions/runs/42154037087))
 
 Release publication passed artifact build, checksum, and packaged smoke-test
@@ -41,13 +43,64 @@ gates. v0.3.0 remains read-only and does not include or authorize
 `apply`; the bounded loopback UDP verdict fixture is not evidence of external
 reachability or complete behavior for every firewall manager and packet path.
 
-## v0.4.0 — Guarded enforcement, experimental (not release-ready)
+## v0.4.0 — Experimental Guarded Enforcement (candidate; not published)
+
+The unchecked items below are broader v0.4 release gates. The completed #8/#24
+work validates only the named experimental INPUT subset; it does not imply
+complete Linux enforcement, resolve the separately tracked Tailscale contract,
+or authorize production enforcement. This candidate is not published, and its
+release requires explicit owner/operator approval and a manual release workflow
+dispatch after review and merge.
+
 - [ ] Owned-chain isolation and reconciliation with Docker
 - [x] Durable transaction state machine, checkpoint model, and confirmation-token primitives (fixture-tested)
-- [ ] Independent rollback supervisor outside the applying CLI process
+- [x] Independent rollback supervisor outside the applying CLI process for the supported, explicitly installed systemd and OpenRC integrations; unknown service managers remain unsupported
 - [ ] Require confirmation for real remote firewall changes
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
-- [ ] SSH, IPv6, Docker and Tailscale privileged regression matrix in disposable VMs
+- [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
+- [x] Implement the scoped experimental nftables Apply from #23, with dedicated architecture/security review and real disposable-KVM confirmation/timeout evidence ([validation](validation/issue-23/issue23-mfw-20261107T174332Z-427044/)); it remains non-production and opt-in. GitHub #23 remains OPEN; this reconciliation does not mutate issue state.
+- [x] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration ([final evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
+- [x] Complete and review the bounded generic #24 Linux packet/recovery contract: exact INPUT selectors and verdict composition, corrupt checkpoint, ownership divergence, Docker modes, UFW/firewalld, manager concurrency, no-global-flush verification, and flowtable refusal ([contract](specs/issue-24-linux-enforcement.md), [evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
+- [ ] Separately complete the local Tailscale compatibility contract before claiming Tailscale support; external tailnet access is not a generic acceptance prerequisite
+- [x] Issue #8 bounded generic Linux guarded-apply acceptance; systemd packet/recovery/Docker IP-change evidence and OpenRC recovery evidence are recorded in [ADR-0005](adr/0005-scoped-experimental-nftables-apply.md#parent-8-openrc-supervisor-follow-up-2026-11-09) and the [test matrix](TEST-MATRIX.md#parent-8-openrc-supervisor-acceptance-2026-11-09). Verified systemd and OpenRC are supported experimental integrations; unknown service managers refuse Apply. This does not authorize production or expand support to unknown supervisors.
+
+The v0.4.0 version in this branch identifies a release candidate for review,
+not an already-published release. v0.3.0 remains the latest published version.
+The release workflow is manual-only: merging this PR will not create a tag or
+publish artifacts. Normal CI and compatibility jobs validate the candidate;
+their build/smoke results are not privileged packet or recovery evidence.
+
+Final generic #24 evidence (2026-11-08) uses candidate HEAD
+`a002a08fa512fe7248c6913e123d97b478974c07` and CLI SHA-256
+`3bb96e125889e00a3735217f71e74e3f3c40dc43525fdf87d1c05643f16e5f76`.
+The packet suite passed **104/104** cases, including observed flowtable
+pre-mutation refusal; the production-code recovery suite passed **32 critical
+scenarios plus harness completion**. Both disposable guests were destroyed.
+The evidence aggregate reports `evidence_gates_passed: true`; dedicated
+Standards, Spec, and Architecture/Security reviews are clean. The bounded #24
+generic Linux contract is recorded as accepted in ADR-0005. Tailscale remains
+separately pending and is not claimed supported; production remains
+unauthorized. Evidence paths and scope limits are in the [test matrix](TEST-MATRIX.md#issue-24-final-generic-linux-evidence).
+
+Issue #7's M2 planner acceptance is complete and closed after actual disposable
+KVM packet-verdict evidence and clean review. #8 bounded generic guarded-apply
+acceptance is complete with current-candidate evidence for systemd behavior,
+Docker IP change, and OpenRC recovery. The separately installed OpenRC
+integration demonstrates independent recovery in a non-systemd environment;
+this does not imply support for unknown managers or universal init-system
+portability, or authorize production or development-host firewall mutation.
+
+The generic #24 acceptance and its required review are complete for the bounded
+experimental scope; the specialized Tailscale contract remains pending and no
+production authorization is granted. Issue #24 is closed in GitHub. Issue #7 is
+closed with the isolated planner acceptance recorded in the test matrix. Issue
+#8 is closed for its bounded generic Linux acceptance after isolated systemd and
+OpenRC validation; its formal completion is recorded in GitHub and the test
+matrix. Verified systemd and OpenRC are supported experimental integrations;
+unknown supervisors remain unsupported. Tailscale remains separate in #42, and
+production authorization remains false.
+Keep Apply experimental and opt-in; no global host-firewall mutation is
+authorized.
 
 ## Later
 - [ ] Daemon watching Docker events; reconciliation after container changes

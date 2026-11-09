@@ -508,8 +508,24 @@ pub fn explain(
     {
         unknowns.push("runtime path is not fully observed".into());
     }
-    unknowns
-        .push("external reachability and effective firewall enforcement were not probed".into());
+    if selected.is_some_and(|identity| {
+        docker.containers.iter().any(|container| {
+            container
+                .logical_identity
+                .as_ref()
+                .is_some_and(|observed| observed.value == identity)
+                && container.network_mode == docker::NetworkMode::Host
+                && container.observed_endpoints.is_empty()
+        })
+    }) {
+        unknowns.push(
+            "service uses host networking without Docker publication mappings; observed host listeners cannot be attributed to this service because process ownership correlation is unavailable".into(),
+        );
+    }
+    unknowns.push(
+        "host firewall state and external reachability are unknown: upstream NAT, cloud security groups, host proxies, and effective firewall enforcement were not inspected"
+            .into(),
+    );
     let mut limitations = observation
         .limitations()
         .iter()
@@ -859,8 +875,20 @@ fn evaluate_policy(
                     "udp" => Some(docker::TransportProtocol::Udp),
                     _ => None,
                 }?;
+                let family = match path.family.as_str() {
+                    "ipv4" => docker::IpFamily::Ipv4,
+                    "ipv6" => docker::IpFamily::Ipv6,
+                    _ => docker::IpFamily::Unspecified,
+                };
                 Some(
-                    crate::audit::matching_rules(policy, identity, protocol, path.container_port).0,
+                    crate::audit::matching_rules(
+                        policy,
+                        identity,
+                        protocol,
+                        family,
+                        path.container_port,
+                    )
+                    .0,
                 )
             })
             .flatten()
@@ -940,6 +968,7 @@ fn evaluate_policy_for_endpoint(
                 policy,
                 identity,
                 endpoint.protocol,
+                endpoint.family,
                 endpoint.container_port,
             )
         },
@@ -1042,6 +1071,371 @@ fn path_conclusion(steps: &[PathStep], container: &docker::ContainerObservation)
 mod tests {
     use super::*;
 
+    fn snapshot_for_identities(identities: &[&str]) -> snapshot::ObservationSnapshot {
+        let docker = docker::DockerDiscoveryResult {
+            collected_at: docker::CollectionInterval {
+                started_at: 1,
+                finished_at: 2,
+            },
+            outcome: docker::CollectionOutcome::Complete,
+            completeness: docker::Completeness::Complete,
+            containers: identities
+                .iter()
+                .enumerate()
+                .map(|(index, identity)| docker::ContainerObservation {
+                    logical_identity: Some(docker::LogicalIdentity {
+                        value: (*identity).into(),
+                        source: docker::IdentitySource::ComposeLabels,
+                    }),
+                    instance: docker::ContainerInstance {
+                        id: format!("instance-{index}"),
+                        replica_key: format!("replica-{index}"),
+                    },
+                    lifecycle: docker::LifecycleState::Running,
+                    operational_status: docker::OperationalStatus::Running,
+                    network_mode: docker::NetworkMode::Bridge,
+                    configured_publications: Vec::new(),
+                    observed_endpoints: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Vec::new(),
+            provenance: docker::Provenance {
+                source: "fixture".into(),
+                operation: "read".into(),
+            },
+            limitations: Vec::new(),
+        };
+        fn dimension<T>(records: Vec<T>) -> crate::host::DimensionObservation<T> {
+            crate::host::DimensionObservation {
+                records,
+                alternative_records: Vec::new(),
+                completeness: crate::host::Completeness::Complete,
+                outcome: crate::host::CollectionOutcome::Complete,
+                interval: crate::host::CollectionInterval {
+                    started_at: 1,
+                    finished_at: 2,
+                },
+                provenance: Vec::new(),
+                alternative_provenance: Vec::new(),
+                limitations: Vec::new(),
+            }
+        }
+        let host = crate::host::HostNetworkObservation {
+            namespace: crate::host::NamespaceScope {
+                kind: crate::host::NamespaceKind::CurrentNetworkNamespace,
+                description: "fixture".into(),
+            },
+            collected_at: crate::host::CollectionInterval {
+                started_at: 1,
+                finished_at: 2,
+            },
+            interfaces: dimension(Vec::<crate::host::NetworkInterface>::new()),
+            addresses: dimension(Vec::<crate::host::InterfaceAddress>::new()),
+            listeners: dimension(Vec::<crate::host::SocketListener>::new()),
+            routes: dimension(Vec::<crate::host::NetworkRoute>::new()),
+            tailscale: dimension(Vec::<crate::host::TailscaleObservation>::new()),
+            diagnostics: Vec::new(),
+        };
+        snapshot::ObservationSnapshot::compose(docker, host)
+    }
+
+    fn empty_policy() -> NormalizedPolicy {
+        NormalizedPolicy {
+            version: 1,
+            default_action: Action::Deny,
+            zones: Default::default(),
+            rules: Vec::new(),
+        }
+    }
+
+    fn explain_golden(
+        name: &str,
+        policy: &NormalizedPolicy,
+        snapshot: &snapshot::ObservationSnapshot,
+    ) {
+        let actual = explain(policy, snapshot, "web")
+            .expect("golden scenario should produce an explanation")
+            .json()
+            .unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/explain")
+            .join(format!("{name}.json"));
+        if std::env::var_os("UPDATE_EXPLAIN_GOLDENS").is_some() {
+            std::fs::write(path, &actual).expect("write explain golden");
+            return;
+        }
+        let expected = match name {
+            "nat" => include_str!("../tests/golden/explain/nat.json"),
+            "host-network" => include_str!("../tests/golden/explain/host-network.json"),
+            "multiple-mappings" => include_str!("../tests/golden/explain/multiple-mappings.json"),
+            "conflicting-policies" => {
+                include_str!("../tests/golden/explain/conflicting-policies.json")
+            }
+            _ => panic!("unknown explain golden scenario {name}"),
+        };
+        assert_eq!(actual, expected, "explain golden changed: {name}");
+    }
+
+    fn explain_golden_scenario(name: &str) -> (NormalizedPolicy, snapshot::ObservationSnapshot) {
+        use crate::docker::{
+            ContainerAddress, ContainerInstance, ContainerObservation, FieldProvenance,
+            HostBinding, IdentitySource, IpFamily, LifecycleState, LogicalIdentity, NetworkMode,
+            ObservedPublishedEndpoint, OperationalStatus, PublicationMechanism, TransportProtocol,
+        };
+        use crate::host::{
+            AddressScope, InterfaceAddress, InterfaceState, NetworkInterface, SocketListener,
+            SocketOwner,
+        };
+
+        let mut endpoints = match name {
+            "nat" | "conflicting-policies" => vec![("203.0.113.10", 8443, 8080)],
+            "multiple-mappings" => vec![("203.0.113.10", 8443, 8080), ("203.0.113.10", 9443, 9443)],
+            "host-network" => Vec::new(),
+            "host-network-with-endpoint" => vec![("203.0.113.10", 8443, 8080)],
+            _ => panic!("unknown explain golden scenario {name}"),
+        };
+        endpoints.sort();
+        let network_mode = if name.starts_with("host-network") {
+            NetworkMode::Host
+        } else {
+            NetworkMode::Bridge
+        };
+        let observed_endpoints = endpoints
+            .iter()
+            .map(
+                |(address, host_port, container_port)| ObservedPublishedEndpoint {
+                    instance_id: "web-instance".into(),
+                    host: HostBinding {
+                        address: Some(address.parse().unwrap()),
+                        port: *host_port,
+                    },
+                    container_port: *container_port,
+                    container_addresses: if network_mode == NetworkMode::Host {
+                        Vec::new()
+                    } else {
+                        vec![ContainerAddress {
+                            network: "bridge".into(),
+                            address: "172.20.0.2".parse().unwrap(),
+                            provenance: FieldProvenance::DockerInspection,
+                        }]
+                    },
+                    protocol: TransportProtocol::Tcp,
+                    family: IpFamily::Ipv4,
+                    network_mode: network_mode.clone(),
+                    mechanism: if network_mode == NetworkMode::Host {
+                        PublicationMechanism::Direct
+                    } else {
+                        PublicationMechanism::Nat
+                    },
+                    provenance: FieldProvenance::PortBinding,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let mut docker = docker::DockerDiscoveryResult {
+            collected_at: docker::CollectionInterval {
+                started_at: 10,
+                finished_at: 20,
+            },
+            outcome: docker::CollectionOutcome::Complete,
+            completeness: docker::Completeness::Complete,
+            containers: vec![ContainerObservation {
+                logical_identity: Some(LogicalIdentity {
+                    value: "docker:demo/web".into(),
+                    source: IdentitySource::ComposeLabels,
+                }),
+                instance: ContainerInstance {
+                    id: "web-instance".into(),
+                    replica_key: "demo/web".into(),
+                },
+                lifecycle: LifecycleState::Running,
+                operational_status: OperationalStatus::Running,
+                network_mode: network_mode.clone(),
+                configured_publications: Vec::new(),
+                observed_endpoints,
+            }],
+            diagnostics: Vec::new(),
+            provenance: docker::Provenance {
+                source: "fixture".into(),
+                operation: "read-only snapshot".into(),
+            },
+            limitations: Vec::new(),
+        };
+
+        let mut listeners = Vec::new();
+        let mut interfaces = Vec::new();
+        let mut addresses = Vec::new();
+        if name.starts_with("host-network") {
+            interfaces.push(NetworkInterface {
+                index: 2,
+                name: "eth0".into(),
+                administrative_state: InterfaceState::Up,
+                operational_state: InterfaceState::Up,
+            });
+            addresses.push(InterfaceAddress {
+                interface_index: Some(2),
+                interface_name: Some("eth0".into()),
+                address: "203.0.113.10".parse().unwrap(),
+                prefix_length: Some(24),
+                scope: AddressScope::Global,
+            });
+            listeners.push(SocketListener {
+                protocol: crate::host::TransportProtocol::Tcp,
+                family: crate::host::IpFamily::Ipv4,
+                address: "0.0.0.0".parse().unwrap(),
+                wildcard: true,
+                port: 8080,
+                interface_index: None,
+                interface_name: None,
+                owner: SocketOwner::Unknown,
+            });
+        }
+        let host = crate::host::HostNetworkObservation {
+            namespace: crate::host::NamespaceScope {
+                kind: crate::host::NamespaceKind::CurrentNetworkNamespace,
+                description: "fixture namespace".into(),
+            },
+            collected_at: crate::host::CollectionInterval {
+                started_at: 10,
+                finished_at: 20,
+            },
+            interfaces: golden_dimension(interfaces),
+            addresses: golden_dimension(addresses),
+            listeners: golden_dimension(listeners),
+            routes: golden_dimension(Vec::<crate::host::NetworkRoute>::new()),
+            tailscale: golden_dimension(Vec::<crate::host::TailscaleObservation>::new()),
+            diagnostics: Vec::new(),
+        };
+        // Keep fixture construction explicit: the host-network listener cannot
+        // be attributed to Docker without process-level ownership evidence.
+        if name == "host-network" {
+            docker.containers[0].observed_endpoints.clear();
+        }
+
+        let source = "cidr:203.0.113.0/24";
+        let mut policy_text = format!(
+            "version = 1\ndefault_action = \"deny\"\n\n[[rules]]\nid = \"allow-web\"\nsource = \"{source}\"\ndestination = \"docker:demo/web\"\nports = [8080, 9443]\nprotocol = \"tcp\"\naction = \"allow\"\npriority = 50\n"
+        );
+        if name == "conflicting-policies" {
+            policy_text.push_str(
+                "\n[[rules]]\nid = \"deny-web\"\nsource = \"cidr:203.0.113.0/24\"\ndestination = \"docker:demo/web\"\nports = [8080]\nprotocol = \"tcp\"\naction = \"deny\"\npriority = 100\n",
+            );
+        }
+        let policy = crate::parse_and_normalize(&policy_text)
+            .expect("fixture policy is structurally valid")
+            .policy;
+        (policy, snapshot::ObservationSnapshot::compose(docker, host))
+    }
+
+    fn golden_dimension<T>(records: Vec<T>) -> crate::host::DimensionObservation<T> {
+        crate::host::DimensionObservation {
+            records,
+            alternative_records: Vec::new(),
+            completeness: crate::host::Completeness::Complete,
+            outcome: crate::host::CollectionOutcome::Complete,
+            interval: crate::host::CollectionInterval {
+                started_at: 10,
+                finished_at: 20,
+            },
+            provenance: vec![crate::host::Provenance {
+                source: "fixture".into(),
+                operation: "read-only".into(),
+            }],
+            alternative_provenance: Vec::new(),
+            limitations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nat_host_network_multiple_mapping_and_conflicting_policy_goldens() {
+        for name in [
+            "nat",
+            "host-network",
+            "multiple-mappings",
+            "conflicting-policies",
+        ] {
+            let (policy, snapshot) = explain_golden_scenario(name);
+            let explanation = explain(&policy, &snapshot, "web").unwrap();
+            explain_golden(name, &policy, &snapshot);
+            match name {
+                "nat" => {
+                    assert_eq!(explanation.paths.len(), 1);
+                    assert!(
+                        explanation.paths[0]
+                            .steps
+                            .iter()
+                            .any(|step| step.kind == PathStepKind::NatProxy)
+                    );
+                }
+                "host-network" => {
+                    assert!(explanation.paths.is_empty());
+                    assert!(explanation.unknowns.iter().any(|unknown| {
+                        unknown.contains("host networking without Docker publication mappings")
+                            && unknown.contains("process ownership correlation is unavailable")
+                    }));
+                    assert_eq!(explanation.runtime.status, RuntimeStatus::Unknown);
+                }
+                "multiple-mappings" => {
+                    let mut host_ports = explanation
+                        .paths
+                        .iter()
+                        .map(|path| path.host_port)
+                        .collect::<Vec<_>>();
+                    host_ports.sort_unstable();
+                    assert_eq!(host_ports, vec![8443, 9443]);
+                }
+                "conflicting-policies" => {
+                    let policy = &explanation.paths[0].policy;
+                    assert_eq!(policy.matching_rule_count, 2);
+                    assert_eq!(policy.declared_action, "allow");
+                    assert_eq!(policy.precedence, vec![50, 100]);
+                    assert_eq!(policy.runtime_enforcement, "unverified");
+                }
+                _ => unreachable!("the scenario list is exhaustive"),
+            }
+        }
+        let (policy, snapshot) = explain_golden_scenario("host-network-with-endpoint");
+        let explanation = explain(&policy, &snapshot, "web").unwrap();
+        assert_eq!(explanation.paths.len(), 1);
+        assert_eq!(explanation.paths[0].conclusion, PathConclusion::Unknown);
+        assert!(
+            explanation.paths[0]
+                .steps
+                .iter()
+                .all(|step| step.kind != PathStepKind::HostListener)
+        );
+    }
+
+    #[test]
+    fn identity_resolution_rejects_ambiguous_short_selector_and_groups_replicas() {
+        let ambiguous = explain(
+            &empty_policy(),
+            &snapshot_for_identities(&["docker:team-a/api", "docker:team-b/api"]),
+            "api",
+        )
+        .unwrap();
+        assert_eq!(
+            ambiguous.identity,
+            IdentityResolution::AmbiguousIdentity {
+                candidates: vec!["docker:team-a/api".into(), "docker:team-b/api".into()]
+            }
+        );
+        assert!(ambiguous.paths.is_empty());
+        assert_eq!(ambiguous.runtime.status, RuntimeStatus::Unknown);
+
+        let resolved = explain(
+            &empty_policy(),
+            &snapshot_for_identities(&["docker:team-a/api", "docker:team-a/api"]),
+            "api",
+        )
+        .unwrap();
+        let IdentityResolution::Resolved { replicas, .. } = resolved.identity else {
+            panic!("unique logical identity should resolve")
+        };
+        assert_eq!(replicas.len(), 2);
+        assert_ne!(replicas[0].instance_id, replicas[1].instance_id);
+    }
+
     fn explanation_fixture() -> Explanation {
         Explanation {
             version: EXPLANATION_VERSION,
@@ -1111,7 +1505,10 @@ mod tests {
                     limitations: vec!["static policy".into()],
                 },
             ],
-            unknowns: vec!["service identity could not be uniquely resolved".into()],
+            unknowns: vec![
+                "service identity could not be uniquely resolved".into(),
+                "host firewall state and external reachability are unknown: upstream NAT, cloud security groups, host proxies, and effective firewall enforcement were not inspected".into(),
+            ],
             limitations: Vec::new(),
         }
     }
@@ -1303,6 +1700,15 @@ mod tests {
         assert_eq!(json_value["paths"][0]["policy"]["declared_action"], "allow");
         assert!(human.contains("interval=not timestamped"));
         assert!(human.contains("unknowns:"));
+        for unknown in [
+            "host firewall state",
+            "upstream NAT",
+            "cloud security groups",
+            "host proxies",
+        ] {
+            assert!(human.contains(unknown));
+            assert!(json.contains(unknown));
+        }
 
         let mut broken = explanation;
         broken.evidence.clear();

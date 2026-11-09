@@ -303,6 +303,11 @@ fn correlate_endpoint(
     source: CorrelationNode,
 ) -> Vec<CorrelationEdge> {
     let mut edges = Vec::new();
+    // Host-network containers share the host namespace. A matching socket
+    // tuple alone does not attribute a host listener to this container.
+    if endpoint.network_mode == docker::NetworkMode::Host {
+        return edges;
+    }
     let addresses_uncertain = dimension_uncertain(&host.addresses)
         || !dimension_intersects(&host.addresses, docker_interval);
     let routes_uncertain =
@@ -779,6 +784,98 @@ mod tests {
         );
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.to_ascii_lowercase().contains("reachable"));
+    }
+
+    #[test]
+    fn host_network_endpoint_tuple_does_not_attribute_a_host_listener() {
+        let mut endpoint = endpoint(
+            Some("203.0.113.10"),
+            docker::IpFamily::Ipv4,
+            docker::TransportProtocol::Tcp,
+        );
+        endpoint.network_mode = docker::NetworkMode::Host;
+        let snapshot = ObservationSnapshot::compose(
+            docker_result(endpoint),
+            host_result(
+                vec![listener(
+                    "203.0.113.10".parse().unwrap(),
+                    host::IpFamily::Ipv4,
+                    host::TransportProtocol::Tcp,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        assert!(snapshot.correlations.edges.iter().all(|edge| {
+            edge.target.is_none() && edge.status != CorrelationEdgeStatus::Confirmed
+        }));
+    }
+
+    #[test]
+    fn loopback_bind_is_correlated_as_a_local_fact_only() {
+        let snapshot = ObservationSnapshot::compose(
+            docker_result(endpoint(
+                Some("127.0.0.1"),
+                docker::IpFamily::Ipv4,
+                docker::TransportProtocol::Tcp,
+            )),
+            host_result(
+                vec![listener(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    host::IpFamily::Ipv4,
+                    host::TransportProtocol::Tcp,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        assert!(
+            snapshot
+                .correlations
+                .edges
+                .iter()
+                .any(|edge| edge.status == CorrelationEdgeStatus::Confirmed)
+        );
+        assert!(
+            snapshot
+                .limitations
+                .contains(&SnapshotLimitation::NoReachabilityProbe)
+        );
+    }
+
+    #[test]
+    fn dual_stack_publication_records_keep_family_and_protocol_separate() {
+        let mut docker = docker_result(endpoint(
+            Some("0.0.0.0"),
+            docker::IpFamily::Ipv4,
+            docker::TransportProtocol::Tcp,
+        ));
+        docker.containers[0].observed_endpoints.push(endpoint(
+            Some("::"),
+            docker::IpFamily::Ipv6,
+            docker::TransportProtocol::Udp,
+        ));
+        let snapshot =
+            ObservationSnapshot::compose(docker, host_result(Vec::new(), Vec::new(), Vec::new()));
+        let endpoints = snapshot
+            .correlations
+            .edges
+            .iter()
+            .filter_map(|edge| match &edge.source {
+                CorrelationNode::DockerEndpoint {
+                    family, protocol, ..
+                } => Some((*family, *protocol)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(endpoints.len(), 2);
+        assert!(endpoints.contains(&(docker::IpFamily::Ipv4, docker::TransportProtocol::Tcp)));
+        assert!(endpoints.contains(&(docker::IpFamily::Ipv6, docker::TransportProtocol::Udp)));
+        assert!(
+            snapshot
+                .limitations
+                .contains(&SnapshotLimitation::NoReachabilityProbe)
+        );
     }
 
     #[test]

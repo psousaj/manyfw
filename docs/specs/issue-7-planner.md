@@ -47,11 +47,27 @@ the kernel.
   emulate native nftables as a textual iptables translation.
 - Use `DOCKER-USER` only if its existence, ownership, hook placement, and
   applicability are verified.
+- Observing Docker-owned `DOCKER-USER` does not grant ManyFW write ownership.
+  With the current typed resource contract, Docker-iptables plans remain
+  diagnostic-only/blocked when that foreign chain is in the relevant path;
+  the planner must not invent a separate insertion point or claim applicability
+  without an independently observed ManyFW-owned path and verified ordering.
 - Never flush global tables or modify foreign chains. A ManyFW-named resource
   is not automatically owned by ManyFW.
 - Record deterministic precondition fingerprints without implementing
   cryptographic fingerprinting in this issue. Revalidate critical conditions
   immediately before any future application.
+- Represent the configured default action only within explicit ManyFW-owned
+  path/family scopes; never set a global host INPUT/FORWARD policy.
+  For an empty rule set, scope the default only to observed ManyFW-owned
+  resources; if none exist, block rather than omit the configured action.
+- Preserve each rule's typed source-interface selectors and family-matched
+  source subnets in its operation so a plan cannot lose zone match semantics.
+- Resolve Docker rules against observed, running-container publication records.
+  Preserve host bind address, host/container ports, and family-specific target
+  addresses; NAT uses FORWARD with original-destination/conntrack requirements,
+  while observed userland-proxy publication uses host INPUT. Unsupported,
+  cross-family NAT, or unobserved paths block.
 - Preserve unknowns and evidence in plan output; unknown capabilities needed for
   safety block applicability.
 - Keep plan generation read-only and independent of root privileges.
@@ -68,6 +84,17 @@ the kernel.
 - Verify no plan operation mutates fixtures or executes a command.
 - T2/T3 isolated integration tests compare expected packet verdict semantics in
   disposable namespaces/VMs; they never use the development host firewall.
+- For the current versioned planner goldens, isolated packet evidence exercises
+  each executable operation class: host INPUT selectors/verdicts in both
+  families, explicit rule-priority ordering, and native Docker NAT/FORWARD
+  original-destination/conntrack semantics. Plans blocked by foreign ownership,
+  unknown capability, or conflicting priorities are checked as diagnostics and
+  are never translated into firewall changes. The test-only packet adapter is
+  confined to the disposable guest; it is not production backend code.
+- Re-run plan generation before and after applicable/blocked cases and compare
+  the observed namespace rulesets; reverse normalized rule declaration order
+  and require an identical plan artifact. Retain candidate/source and binary
+  digests plus verified disposable-guest teardown.
 
 ## Out of Scope
 

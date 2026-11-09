@@ -6,7 +6,9 @@ This file defines how a coding agent should implement ManyFW safely and incremen
 
 ManyFW is a Rust workspace producing **one CLI executable**, with independently testable library components. Its purpose is to coordinate and explain Linux/container/private-network firewall policy while respecting ownership of rules managed by Docker, UFW, firewalld and other software.
 
-**Current code is a read-only prototype. Never claim it protects a host.**
+**v0.3.0 is a read-only release. This checkout also contains opt-in experimental
+enforcement restricted to verified disposable KVM guests; it is not authorized
+for production or development-host operation. Never claim it protects a host.**
 
 ## Source of truth
 
@@ -38,6 +40,33 @@ These are **documented release milestones**, not currently GitHub native milesto
 7. Update the relevant docs and CLI examples together with the code.
 8. Open a PR referencing `Closes #N` with evidence, test logs, limitations, safety assessment and rollback implications.
 9. Do not merge a privileged backend PR without reviewed integration evidence.
+
+## Architecture/security approval governance
+
+The project owner is the approval authority for project architecture and
+experimental operational scope. For implementations developed and verified
+exclusively inside disposable, isolated QEMU/KVM guests, the project owner has
+authorized the Goal agent to perform the required architecture/security review
+as a dedicated phase separate from implementation. This is an explicit
+project-specific governance policy, not a claim of independent review.
+
+The Goal agent must document evidence, findings, remediation, and a clean
+post-remediation review before recording an experimental ADR as Accepted. The
+review must cover ownership/trust boundaries, privileges, failure/recovery,
+concurrency, interoperability, unsupported cases, and real isolated test
+evidence appropriate to the change. Material architecture changes require a
+new review before the changed behavior is enabled.
+
+This policy applies only to the explicitly approved experimental implementation
+and its verified disposable test environments. It does not authorize mutation
+of the development/WSL host, production deployment, unrestricted operations,
+or omission of security tests. Production deployment or privileged operation
+outside the explicitly authorized isolated scope requires separate project
+owner operational authorization and independent architecture/security
+approval. Test-only recovery does not satisfy production-code recovery gates.
+Approval is invalidated by material changes to the reviewed operation subset,
+resource ownership, privilege model, supervisor contract, or execution
+environment; reassess before use.
 
 ## Definition of done
 
