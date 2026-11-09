@@ -106,12 +106,17 @@ vm_ssh sudo test ! -e /etc/systemd/system/manyfw-recovery.service || die 'fresh 
 vm_ssh sudo test ! -e "$guest_dir" || die 'guest evidence directory already exists'
 vm_ssh sudo install -d -m 0700 "$guest_dir"
 vm_scp_to "$binary" /tmp/issue24-linux-manyfw
+vm_scp_to "$REPO_ROOT/packaging/systemd/manyfw-recovery.service" /tmp/issue24-linux-manyfw-recovery.service
 vm_scp_to "$SCRIPT_DIR/issue24-linux-packet-guest.py" /tmp/issue24-linux-packet-guest.py
 vm_scp_to "$evidence/seed.json" /tmp/issue24-linux-seed.json
 for family in v4 v6; do
     vm_scp_to "$evidence/host-binding-$family.json" "/tmp/issue24-host-binding-$family.json"
 done
 vm_ssh sudo install -m 0755 /tmp/issue24-linux-manyfw /usr/bin/manyfw
+vm_ssh sudo install -m 0644 /tmp/issue24-linux-manyfw-recovery.service /etc/systemd/system/manyfw-recovery.service
+vm_ssh sudo systemctl daemon-reload
+vm_ssh sudo systemctl enable --now manyfw-recovery.service
+vm_ssh sudo systemctl is-active --quiet manyfw-recovery.service
 expected_sha=$(sha256sum "$binary" | awk '{print $1}')
 installed_sha=$(vm_ssh sudo sha256sum /usr/bin/manyfw | awk '{print $1}')
 [[ "$expected_sha" == "$installed_sha" ]] || die 'installed binary hash mismatch'

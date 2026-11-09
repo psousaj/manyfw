@@ -255,10 +255,16 @@ class Suite:
         self.ns('m24peer', 'ip', 'route', 'add', '198.51.100.0/24', 'via', '192.0.2.1')
         self.ns('m24target', 'sysctl', '-w', 'net.ipv4.ip_forward=1')
         self.nft('add table ip m24nat\nadd chain ip m24nat post { type nat hook postrouting priority srcnat; policy accept; }\nadd rule ip m24nat post ip saddr 192.0.2.0/24 ip daddr 198.51.100.0/24 counter masquerade\n')
-        # Worker is a systemd child, independent of applying CLI and SSH session.
-        command('systemd-run', '--unit=manyfw-recovery', '--property=Restart=always',
-                '--property=NetworkNamespacePath=/run/netns/m24target',
-                '/usr/bin/manyfw', 'recover', '--watch')
+        # Move the installed, enabled production supervisor into the isolated
+        # target namespace so its recovery commands operate on the same kernel
+        # firewall state as Apply. This is a real systemd service, independent
+        # of the applying CLI and SSH session.
+        unit_dropin = Path('/etc/systemd/system/manyfw-recovery.service.d/packet-namespace.conf')
+        unit_dropin.parent.mkdir(parents=True, exist_ok=True)
+        unit_dropin.write_text('[Service]\nNetworkNamespacePath=/run/netns/m24target\n')
+        unit_dropin.chmod(0o644)
+        command('systemctl', 'daemon-reload')
+        command('systemctl', 'restart', 'manyfw-recovery.service')
         self.worker_started = True
         command('systemctl', 'is-active', '--quiet', 'manyfw-recovery.service')
         log = open(self.directory/'listeners.log', 'w')
@@ -665,9 +671,9 @@ class Suite:
         data['policy']['rules'][0]['destination'] = {'Cidr': '192.0.2.1/32'}
         self.refuse('arbitrary-destination-cidr-refusal', data, ('unsupported typed operation', 'destination', 'unsupported'))
         self.refuse('opt-in-bypass-refusal', self.bundle(), ('--experimental',), opt_in=False)
-        # Exercise the same fail-closed path as a non-systemd host by running
-        # the real CLI with a restricted executable PATH that contains the real
-        # nft binary but no systemctl. No production tool is stubbed or replaced.
+        # Exercise the fail-closed readiness check with a restricted executable
+        # PATH that contains the real nft binary but no systemctl. No production
+        # tool is stubbed or replaced.
         no_systemctl = Path('/run')/('mfw-no-systemctl-'+self.run_id)
         no_systemctl.mkdir(mode=0o700)
         for executable in ('nft', 'systemd-detect-virt'):
@@ -676,7 +682,7 @@ class Suite:
             os.symlink(binary, no_systemctl/executable)
         try:
             evidence = self.refuse('non-systemd-refusal', self.bundle(),
-                                   ('manyfw-recovery.service is not active',),
+                                   ('enabled and active manyfw recovery supervisor is required',),
                                    no_systemctl_path=no_systemctl)
             evidence['environment'] = 'test-only child PATH omits systemctl; real CLI and nft binary'
             self.save()
