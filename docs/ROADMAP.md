@@ -45,13 +45,14 @@ reachability or complete behavior for every firewall manager and packet path.
 
 ## v0.4.0 — Guarded enforcement, experimental (not release-ready)
 
-The unchecked release/parent-enforcement items below remain open beyond the
-bounded #24 generic acceptance; that acceptance validates the named
-experimental INPUT subset only and does not complete the broader v0.4/#8 gates.
+The unchecked items below are broader v0.4 production/release gates and do not
+indicate unfinished bounded Issue #8 acceptance. The completed #8/#24 work
+validates only the named experimental INPUT subset; it does not make v0.4
+release-ready or authorize production enforcement.
 
 - [ ] Owned-chain isolation and reconciliation with Docker
 - [x] Durable transaction state machine, checkpoint model, and confirmation-token primitives (fixture-tested)
-- [ ] Independent rollback supervisor outside the applying CLI process
+- [x] Independent rollback supervisor outside the applying CLI process for the supported, explicitly installed systemd and OpenRC integrations; unknown service managers remain unsupported
 - [ ] Require confirmation for real remote firewall changes
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
 - [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
@@ -59,7 +60,7 @@ experimental INPUT subset only and does not complete the broader v0.4/#8 gates.
 - [x] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration ([final evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
 - [x] Complete and review the bounded generic #24 Linux packet/recovery contract: exact INPUT selectors and verdict composition, corrupt checkpoint, ownership divergence, Docker modes, UFW/firewalld, manager concurrency, no-global-flush verification, and flowtable refusal ([contract](specs/issue-24-linux-enforcement.md), [evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
 - [ ] Separately complete the local Tailscale compatibility contract before claiming Tailscale support; external tailnet access is not a generic acceptance prerequisite
-- [ ] Issue #8 parent guarded-apply acceptance; systemd packet/recovery/Docker IP-change evidence and OpenRC recovery evidence are recorded in [ADR-0005](adr/0005-scoped-experimental-nftables-apply.md#parent-8-portable-supervisor-follow-up-2026-11-09) and the [test matrix](TEST-MATRIX.md#parent-8-openrc-supervisor-acceptance-2026-11-09). Verified systemd and OpenRC are supported experimental integrations; unknown service managers refuse Apply. Remaining issue #8 gates and release restrictions still apply.
+- [x] Issue #8 bounded generic Linux guarded-apply acceptance; systemd packet/recovery/Docker IP-change evidence and OpenRC recovery evidence are recorded in [ADR-0005](adr/0005-scoped-experimental-nftables-apply.md#parent-8-openrc-supervisor-follow-up-2026-11-09) and the [test matrix](TEST-MATRIX.md#parent-8-openrc-supervisor-acceptance-2026-11-09). Verified systemd and OpenRC are supported experimental integrations; unknown service managers refuse Apply. This does not authorize production or expand support to unknown supervisors.
 
 Final generic #24 evidence (2026-11-08) uses candidate HEAD
 `a002a08fa512fe7248c6913e123d97b478974c07` and CLI SHA-256
@@ -74,22 +75,22 @@ separately pending and is not claimed supported; production remains
 unauthorized. Evidence paths and scope limits are in the [test matrix](TEST-MATRIX.md#issue-24-final-generic-linux-evidence).
 
 Issue #7's M2 planner acceptance is complete and closed after actual disposable
-KVM packet-verdict evidence and clean review. #8 has current-candidate evidence
-for bounded systemd behavior, Docker IP change, and OpenRC recovery. The separately
-installed OpenRC integration demonstrates the required independent recovery on
-a non-systemd environment; this does not imply architecture-level support for
-unknown managers or universal init-system portability. It does not complete
-every #8 gate. The bounded #24 generic acceptance
-likewise does not by itself complete #8 or authorize production or
-development-host firewall mutation.
+KVM packet-verdict evidence and clean review. #8 bounded generic guarded-apply
+acceptance is complete with current-candidate evidence for systemd behavior,
+Docker IP change, and OpenRC recovery. The separately installed OpenRC
+integration demonstrates independent recovery in a non-systemd environment;
+this does not imply support for unknown managers or universal init-system
+portability, or authorize production or development-host firewall mutation.
 
 The generic #24 acceptance and its required review are complete for the bounded
 experimental scope; the specialized Tailscale contract remains pending and no
 production authorization is granted. Issue #24 is closed in GitHub. Issue #7 is
 closed with the isolated planner acceptance recorded in the test matrix. Issue
-#8 is active after its #7 dependency. Verified systemd and OpenRC are supported
-experimental integrations; unknown supervisors remain unsupported. Preserve
-the remaining #8 acceptance and release gates.
+#8 is closed for its bounded generic Linux acceptance after isolated systemd and
+OpenRC validation; its formal completion is recorded in GitHub and the test
+matrix. Verified systemd and OpenRC are supported experimental integrations;
+unknown supervisors remain unsupported. Tailscale remains separate in #42, and
+production authorization remains false.
 Keep Apply experimental and opt-in; no global host-firewall mutation is
 authorized.
 
