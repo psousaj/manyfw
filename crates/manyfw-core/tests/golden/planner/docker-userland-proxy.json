@@ -49,7 +49,7 @@
     }
   ],
   "preconditions": {
-    "input_fingerprint": "fnv1a64:66d4704703886584",
+    "input_fingerprint": "fnv1a64:9f7d4cbc7d91a89f",
     "observation_generation": 7,
     "backend_identity": "nftables",
     "backend_version": "1",
@@ -81,6 +81,7 @@
   "explanations": [
     "plan generation is read-only and produces typed diagnostic operations",
     "native nftables mode is evaluated independently and does not require DOCKER-USER",
+    "Docker destination web: Docker firewall mode is native nftables; published userland-proxy traffic traverses INPUT, not DNAT/FORWARD; DOCKER-USER is absent in native nftables mode",
     "nft runtime: nf_tables=Supported, nft_binary=Supported, nft_version=nftables v1.1.3 (stable), kernel_version=6.8.0",
     "managed INPUT default-deny exceptions: established/related return traffic, loopback ingress, and ICMPv6 neighbor discovery/router advertisements",
     "foreign manager resources are preserved and global atomicity is not assumed"

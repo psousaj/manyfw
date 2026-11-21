@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         collected_at: interval,
         outcome: DockerOutcome::Complete,
         completeness: Completeness::Complete,
+        firewall_mode: manyfw_core::docker::DockerFirewallMode::Unknown,
         containers: Vec::new(),
         diagnostics: Vec::new(),
         provenance: Provenance {
@@ -153,7 +154,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capabilities = BackendCapabilities {
         backend: BackendKind::Nftables,
         mode: BackendMode::NativeNftables,
-        docker_mode: state,
         ipv4: state,
         ipv6: state,
         input_hook: state,

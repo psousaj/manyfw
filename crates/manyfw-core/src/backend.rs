@@ -259,7 +259,6 @@ pub struct BackendObservationSet {
 pub struct BackendCapabilities {
     pub backend: BackendKind,
     pub mode: BackendMode,
-    pub docker_mode: CapabilityState,
     pub ipv4: CapabilityState,
     pub ipv6: CapabilityState,
     pub input_hook: CapabilityState,
@@ -388,7 +387,6 @@ impl BackendObservationSet {
                     capabilities: BackendCapabilities {
                         backend: observation.backend,
                         mode: observation.mode,
-                        docker_mode: CapabilityState::Unknown,
                         ipv4: family_state(AddressFamily::Ipv4),
                         ipv6: family_state(AddressFamily::Ipv6),
                         input_hook: hook_state(Hook::Input),
@@ -737,14 +735,6 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     }
     for rule in &input.policy.rules {
         policy_priorities.insert(rule.priority);
-        if matches!(rule.destination, Selector::Docker(_)) {
-            require_capability(
-                &mut reasons,
-                &mut unknowns,
-                "docker_mode",
-                backend.capabilities.docker_mode,
-            );
-        }
         let paths = match &rule.destination {
             Selector::Host(selector) if selector.starts_with("local-address:") => {
                 let address = selector
@@ -1186,6 +1176,31 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
         }
         _ => "backend mode is evaluated without an implicit manager fallback".into(),
     });
+    let docker_paths = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            PlanOperation::EnsureRule {
+                destination: Selector::Docker(destination),
+                publication:
+                    Some(
+                        mechanism @ (docker::PublicationMechanism::Nat
+                        | docker::PublicationMechanism::UserlandProxy),
+                    ),
+                ..
+            } => Some((destination.clone(), mechanism.clone())),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for (destination, mechanism) in docker_paths {
+        explanations.push(format!(
+            "Docker destination {destination}: {}",
+            docker::firewall_path_explanation(
+                docker_snapshot.firewall_mode,
+                &mechanism,
+                docker_user_path_status(backend),
+            )
+        ));
+    }
     if backend.observation.backend == BackendKind::Nftables {
         explanations.push(
             backend
@@ -1730,6 +1745,27 @@ fn resource_supports_operation(
                 && resource.ownership == Ownership::Docker))
 }
 
+fn docker_user_path_status(backend: &BackendCapabilityObservation) -> &'static str {
+    if backend.observation.resources.iter().any(|resource| {
+        resource.name.eq_ignore_ascii_case("DOCKER-USER") && resource.path == PacketPath::Forward
+    }) {
+        "present in the firewall observation; ownership is not inferred from its name"
+    } else if backend.observation.backend == BackendKind::Iptables
+        && backend.capabilities.ipv4 == CapabilityState::Supported
+        && backend.capabilities.ipv6 == CapabilityState::Supported
+        && !backend
+            .family_limitations
+            .contains_key(&AddressFamily::Ipv4)
+        && !backend
+            .family_limitations
+            .contains_key(&AddressFamily::Ipv6)
+    {
+        "absent from complete IPv4 and IPv6 iptables observations"
+    } else {
+        "unknown because the relevant firewall chains were not completely observed"
+    }
+}
+
 fn operation_scope(operation: &PlanOperation) -> Option<(PacketPath, AddressFamily)> {
     match operation {
         PlanOperation::SetManagedDefault { path, family, .. }
@@ -1863,6 +1899,7 @@ mod tests {
             collected_at: interval,
             outcome: docker::CollectionOutcome::Complete,
             completeness: docker::Completeness::Complete,
+            firewall_mode: docker::DockerFirewallMode::Unknown,
             containers: Vec::new(),
             diagnostics: Vec::new(),
             provenance: docker::Provenance {
@@ -1957,7 +1994,6 @@ mod tests {
         let capabilities = BackendCapabilities {
             backend: BackendKind::Nftables,
             mode: BackendMode::NativeNftables,
-            docker_mode: capability,
             ipv4: capability,
             ipv6: capability,
             input_hook: capability,
@@ -2396,11 +2432,21 @@ mod tests {
             "docker-iptables"
             | "docker-iptables-without-docker-user"
             | "docker-native-nftables"
+            | "docker-unknown-firewall-mode"
             | "docker-userland-proxy" => {
                 let iptables = name.starts_with("docker-iptables");
                 let userland_proxy = name == "docker-userland-proxy";
                 input.policy.rules[0].destination = Selector::Docker("web".into());
                 let mut docker_observation = input.observation.docker();
+                docker_observation.firewall_mode = match name {
+                    "docker-iptables" | "docker-iptables-without-docker-user" => {
+                        docker::DockerFirewallMode::Iptables
+                    }
+                    "docker-native-nftables" | "docker-userland-proxy" => {
+                        docker::DockerFirewallMode::NativeNftables
+                    }
+                    _ => docker::DockerFirewallMode::Unknown,
+                };
                 docker_observation
                     .containers
                     .push(docker::ContainerObservation {
@@ -3042,16 +3088,42 @@ mod tests {
     }
 
     #[test]
-    fn unknown_docker_firewall_mode_blocks_docker_plan() {
-        let mut input = input(CapabilityState::Supported);
-        input.policy.rules[0].destination = Selector::Docker("web".into());
-        input.backend.capabilities.docker_mode = CapabilityState::Unknown;
+    fn unknown_docker_firewall_mode_is_reported_without_blocking_on_mode_alone() {
+        let input = planner_golden_input("docker-unknown-firewall-mode");
         let plan = Planner::plan(&input);
-        assert!(matches!(
-            plan.applicability,
-            PlanApplicability::Blocked { ref reasons }
-                if reasons.iter().any(|reason| matches!(reason, BlockReason::Capability { name, state: CapabilityState::Unknown } if name == "docker_mode"))
-        ));
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
+        assert!(plan.explanations.iter().any(|explanation| {
+            explanation.contains("Docker firewall mode is unknown")
+                && explanation.contains("DOCKER-USER availability are not inferred")
+        }));
+    }
+
+    #[test]
+    fn planner_explains_each_distinct_docker_publication_path() {
+        let mut input = planner_golden_input("docker-native-nftables");
+        let mut docker = input.observation.docker();
+        docker.containers[0]
+            .observed_endpoints
+            .push(planner_endpoint(
+                docker::IpFamily::Ipv4,
+                docker::PublicationMechanism::UserlandProxy,
+                "192.0.2.20",
+                18081,
+                8081,
+                "172.18.0.20",
+            ));
+        input.observation =
+            snapshot::ObservationSnapshot::compose(docker, input.observation.host());
+
+        let plan = Planner::plan(&input);
+        assert!(plan.explanations.iter().any(|line| {
+            line.contains("Docker destination web")
+                && line.contains("published NAT path is DNAT then FORWARD")
+        }));
+        assert!(plan.explanations.iter().any(|line| {
+            line.contains("Docker destination web")
+                && line.contains("userland-proxy traffic traverses INPUT")
+        }));
     }
 
     #[test]
@@ -3160,6 +3232,7 @@ mod tests {
             "docker-iptables",
             "docker-iptables-without-docker-user",
             "docker-native-nftables",
+            "docker-unknown-firewall-mode",
             "docker-userland-proxy",
             "mixed-managers",
             "conflicting-hook-priorities",
@@ -3175,6 +3248,7 @@ mod tests {
             match name {
                 "host-only"
                 | "docker-native-nftables"
+                | "docker-unknown-firewall-mode"
                 | "docker-userland-proxy"
                 | "foreign-drop-redundant" => {
                     assert_eq!(plan.applicability, PlanApplicability::Applicable);
@@ -3247,6 +3321,24 @@ mod tests {
                     } if host_address.as_ref().is_some_and(|address| address.to_string() == "192.0.2.20")
                 )));
             }
+            if name == "docker-iptables" {
+                assert!(plan.explanations.iter().any(|line| {
+                    line.contains("iptables")
+                        && line.contains("DNAT then FORWARD")
+                        && line.contains("DOCKER-USER")
+                }));
+            } else if name == "docker-native-nftables" {
+                assert!(plan.explanations.iter().any(|line| {
+                    line.contains("native nftables")
+                        && line.contains("DNAT then FORWARD")
+                        && line.contains("DOCKER-USER is absent")
+                }));
+            } else if name == "docker-unknown-firewall-mode" {
+                assert!(plan.explanations.iter().any(|line| {
+                    line.contains("Docker firewall mode is unknown")
+                        && line.contains("DOCKER-USER availability are not inferred")
+                }));
+            }
             let actual = serde_json::to_string_pretty(&plan).unwrap() + "\n";
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/golden/planner")
@@ -3272,6 +3364,9 @@ mod tests {
                 }
                 "docker-native-nftables" => {
                     include_str!("../tests/golden/planner/docker-native-nftables.json")
+                }
+                "docker-unknown-firewall-mode" => {
+                    include_str!("../tests/golden/planner/docker-unknown-firewall-mode.json")
                 }
                 "docker-userland-proxy" => {
                     include_str!("../tests/golden/planner/docker-userland-proxy.json")

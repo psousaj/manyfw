@@ -90,6 +90,7 @@ fn planner_input() -> PlannerInput {
         },
         outcome: docker::CollectionOutcome::Complete,
         completeness: docker::Completeness::Complete,
+        firewall_mode: docker::DockerFirewallMode::Unknown,
         containers: Vec::new(),
         diagnostics: Vec::new(),
         provenance: docker::Provenance {
@@ -148,7 +149,6 @@ fn planner_input() -> PlannerInput {
         dnat_original_destination: CapabilityState::Unsupported,
         conntrack: CapabilityState::Unsupported,
         docker_user: CapabilityState::Unsupported,
-        docker_mode: CapabilityState::Unsupported,
         ownership_boundary: CapabilityState::Supported,
     };
     PlannerInput {
@@ -225,9 +225,9 @@ fn docker_native_nat_input() -> PlannerInput {
             provenance: docker::FieldProvenance::PortBinding,
         }],
     });
+    docker.firewall_mode = docker::DockerFirewallMode::NativeNftables;
     input.observation = snapshot::ObservationSnapshot::compose(docker, input.observation.host());
     input.backend.observation.mode = BackendMode::NativeNftables;
-    input.backend.capabilities.docker_mode = CapabilityState::Supported;
     input.backend.observation.hooks = vec![
         HookObservation {
             hook: Hook::Forward,

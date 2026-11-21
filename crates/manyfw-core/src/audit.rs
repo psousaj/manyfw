@@ -982,6 +982,7 @@ mod tests {
             } else {
                 docker::Completeness::Unavailable
             },
+            firewall_mode: docker::DockerFirewallMode::Unknown,
             containers: Vec::new(),
             diagnostics: Vec::new(),
             provenance: docker::Provenance {

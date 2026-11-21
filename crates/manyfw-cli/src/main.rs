@@ -716,8 +716,9 @@ fn render_discovery_human(
         interval.finished_at.saturating_sub(interval.started_at)
     ));
     out.push_str(&format!(
-        "Docker: {} — {} container(s), {} observed endpoint(s)\n",
+        "Docker: {} — firewall mode: {} — {} container(s), {} observed endpoint(s)\n",
         status_color(docker.outcome.into(), docker.completeness.into(), color,),
+        docker_firewall_mode_label(docker.firewall_mode),
         docker.containers.len(),
         docker
             .containers
@@ -1214,6 +1215,14 @@ fn network_mode_label(mode: &manyfw_core::docker::NetworkMode) -> String {
     }
 }
 
+fn docker_firewall_mode_label(mode: manyfw_core::docker::DockerFirewallMode) -> &'static str {
+    match mode {
+        manyfw_core::docker::DockerFirewallMode::Iptables => "iptables",
+        manyfw_core::docker::DockerFirewallMode::NativeNftables => "native nftables",
+        manyfw_core::docker::DockerFirewallMode::Unknown => "unknown",
+    }
+}
+
 fn transport_label(protocol: manyfw_core::docker::TransportProtocol) -> &'static str {
     match protocol {
         manyfw_core::docker::TransportProtocol::Tcp => "TCP",
@@ -1606,6 +1615,7 @@ mod tests {
 
         let summary = render_discovery_human(&snapshot, false, false);
         assert!(summary.contains("1 container(s), 1 observed endpoint(s)"));
+        assert!(summary.contains("firewall mode: unknown"));
         assert!(!summary.contains("docker:fixture/web"));
         assert!(!summary.contains("fixture0"));
         assert!(!summary.contains("192.0.2.0/24"));

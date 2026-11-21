@@ -737,6 +737,10 @@ version = "0.4.0"
 dependencies = [
  "bollard",
  "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "hyperlocal",
  "ipnet",
  "libc",
  "manyfw-core",

@@ -110,7 +110,7 @@
     }
   ],
   "preconditions": {
-    "input_fingerprint": "fnv1a64:edb8d215c9cb66d9",
+    "input_fingerprint": "fnv1a64:0ead71eee6e96677",
     "observation_generation": 7,
     "backend_identity": "nftables",
     "backend_version": "1",
@@ -151,6 +151,7 @@
   "explanations": [
     "plan generation is read-only and produces typed diagnostic operations",
     "Docker iptables mode is evaluated through observed FORWARD/DOCKER-USER boundaries",
+    "Docker destination web: Docker firewall mode is iptables; the published NAT path is DNAT then FORWARD; DOCKER-USER is absent from complete IPv4 and IPv6 iptables observations",
     "DOCKER-USER remains Docker-owned; it is observed as a path boundary, never a ManyFW write target",
     "Docker iptables applicability is blocked unless an independent ManyFW-owned insertion point and ordering are verified",
     "applicability is blocked; proposed operations are not executable",

@@ -639,6 +639,7 @@ mod tests {
             },
             outcome: docker::CollectionOutcome::Complete,
             completeness: docker::Completeness::Complete,
+            firewall_mode: docker::DockerFirewallMode::Unknown,
             containers: vec![docker::ContainerObservation {
                 logical_identity: Some(docker::LogicalIdentity {
                     value: "docker:demo/api".into(),

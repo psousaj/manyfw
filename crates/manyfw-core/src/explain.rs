@@ -4,7 +4,7 @@ use crate::{Action, NormalizedPolicy, docker, snapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const EXPLANATION_VERSION: u32 = 3;
+pub const EXPLANATION_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Explanation {
@@ -79,6 +79,7 @@ pub struct PathStep {
 #[serde(rename_all = "snake_case")]
 pub enum PathStepKind {
     DockerPublication,
+    DockerFirewallPath,
     HostListener,
     NatProxy,
     Interface,
@@ -374,6 +375,23 @@ pub fn explain(
                         evidence: vec![id],
                     });
                 }
+                if matches!(
+                    endpoint.mechanism,
+                    docker::PublicationMechanism::Nat | docker::PublicationMechanism::UserlandProxy
+                ) {
+                    steps.push(PathStep {
+                        kind: PathStepKind::DockerFirewallPath,
+                        status: match docker.firewall_mode {
+                            docker::DockerFirewallMode::Unknown => StepStatus::Unknown,
+                            _ => StepStatus::Observed,
+                        },
+                        detail: docker_firewall_path_detail(
+                            docker.firewall_mode,
+                            endpoint.mechanism.clone(),
+                        ),
+                        evidence: vec![docker_id.clone()],
+                    });
+                }
                 for edge in &edges {
                     let (kind, detail) = match &edge.target {
                         Some(snapshot::CorrelationNode::HostListener { address, port, .. }) => (
@@ -661,6 +679,17 @@ fn endpoint_key(endpoint: &docker::ObservedPublishedEndpoint) -> String {
         endpoint.family,
         endpoint.mechanism,
         endpoint.container_addresses
+    )
+}
+
+fn docker_firewall_path_detail(
+    mode: docker::DockerFirewallMode,
+    mechanism: docker::PublicationMechanism,
+) -> String {
+    docker::firewall_path_explanation(
+        mode,
+        &mechanism,
+        "unknown because this snapshot contains no firewall-chain observation",
     )
 }
 
@@ -1054,13 +1083,14 @@ fn container_is_running(container: &docker::ContainerObservation) -> bool {
 
 fn path_conclusion(steps: &[PathStep], container: &docker::ContainerObservation) -> PathConclusion {
     if !container_is_running(container)
-        || steps.iter().any(|step| step.status == StepStatus::Unknown)
+        || steps.iter().any(|step| {
+            step.kind != PathStepKind::DockerFirewallPath && step.status == StepStatus::Unknown
+        })
     {
         PathConclusion::Unknown
-    } else if steps
-        .iter()
-        .any(|step| step.status == StepStatus::Potential)
-    {
+    } else if steps.iter().any(|step| {
+        step.kind != PathStepKind::DockerFirewallPath && step.status == StepStatus::Potential
+    }) {
         PathConclusion::PotentialPath
     } else {
         PathConclusion::ObservedPath
@@ -1079,6 +1109,7 @@ mod tests {
             },
             outcome: docker::CollectionOutcome::Complete,
             completeness: docker::Completeness::Complete,
+            firewall_mode: docker::DockerFirewallMode::Unknown,
             containers: identities
                 .iter()
                 .enumerate()
@@ -1239,6 +1270,7 @@ mod tests {
             },
             outcome: docker::CollectionOutcome::Complete,
             completeness: docker::Completeness::Complete,
+            firewall_mode: docker::DockerFirewallMode::Unknown,
             containers: vec![ContainerObservation {
                 logical_identity: Some(LogicalIdentity {
                     value: "docker:demo/web".into(),
@@ -1404,6 +1436,58 @@ mod tests {
                 .iter()
                 .all(|step| step.kind != PathStepKind::HostListener)
         );
+    }
+
+    #[test]
+    fn published_nat_explanation_reports_docker_firewall_mode_and_path() {
+        let mut baseline_conclusion = None;
+        for (mode, expected) in [
+            (
+                docker::DockerFirewallMode::Iptables,
+                "iptables; the published NAT path is DNAT then FORWARD",
+            ),
+            (
+                docker::DockerFirewallMode::NativeNftables,
+                "native nftables; the published NAT path is DNAT then FORWARD",
+            ),
+            (
+                docker::DockerFirewallMode::Unknown,
+                "Docker firewall mode is unknown",
+            ),
+        ] {
+            let (policy, snapshot) = explain_golden_scenario("nat");
+            let mut docker = snapshot.docker();
+            docker.firewall_mode = mode;
+            let snapshot = snapshot::ObservationSnapshot::compose(docker, snapshot.host());
+            let explanation = explain(&policy, &snapshot, "web").unwrap();
+            let step = explanation.paths[0]
+                .steps
+                .iter()
+                .find(|step| step.kind == PathStepKind::DockerFirewallPath)
+                .unwrap();
+            assert!(step.detail.contains(expected), "{}", step.detail);
+            assert!(
+                step.detail.contains("DOCKER-USER"),
+                "mode explanation omits DOCKER-USER status: {}",
+                step.detail
+            );
+            assert_eq!(
+                step.status,
+                if mode == docker::DockerFirewallMode::Unknown {
+                    StepStatus::Unknown
+                } else {
+                    StepStatus::Observed
+                }
+            );
+            if let Some(conclusion) = baseline_conclusion {
+                assert_eq!(
+                    explanation.paths[0].conclusion, conclusion,
+                    "firewall-mode knowledge is explanatory and must not alter path conclusions"
+                );
+            } else {
+                baseline_conclusion = Some(explanation.paths[0].conclusion);
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "snapshot_version": 1,
   "subject": {
     "selector": "[redacted]"
@@ -66,6 +66,14 @@
           ]
         },
         {
+          "kind": "docker_firewall_path",
+          "status": "unknown",
+          "detail": "Docker firewall mode is unknown; the published NAT path and DOCKER-USER availability are not inferred",
+          "evidence": [
+            "evidence-8"
+          ]
+        },
+        {
           "kind": "unknown_mechanism",
           "status": "unknown",
           "detail": "correlation target unavailable",
@@ -78,6 +86,7 @@
         "evidence-8",
         "evidence-9",
         "evidence-10",
+        "evidence-8",
         "evidence-11"
       ],
       "policy": {
@@ -140,6 +149,14 @@
           ]
         },
         {
+          "kind": "docker_firewall_path",
+          "status": "unknown",
+          "detail": "Docker firewall mode is unknown; the published NAT path and DOCKER-USER availability are not inferred",
+          "evidence": [
+            "evidence-2"
+          ]
+        },
+        {
           "kind": "unknown_mechanism",
           "status": "unknown",
           "detail": "correlation target unavailable",
@@ -152,6 +169,7 @@
         "evidence-2",
         "evidence-3",
         "evidence-4",
+        "evidence-2",
         "evidence-5"
       ],
       "policy": {
@@ -190,10 +208,12 @@
       "evidence-8",
       "evidence-9",
       "evidence-10",
+      "evidence-8",
       "evidence-11",
       "evidence-2",
       "evidence-3",
       "evidence-4",
+      "evidence-2",
       "evidence-5"
     ]
   },

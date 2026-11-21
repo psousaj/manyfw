@@ -8,6 +8,10 @@ rust-version.workspace = true
 [dependencies]
 bollard = "0.18.1"
 clap = { version = "4", features = ["derive"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyperlocal = "0.9.1"
 ipnet = { version = "2", features = ["serde"] }
 libc = "0.2"
 manyfw-core = { path = "../manyfw-core" }

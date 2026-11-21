@@ -134,7 +134,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dnat_original_destination: CapabilityState::Unsupported,
                 conntrack: CapabilityState::Unsupported,
                 docker_user: CapabilityState::Unsupported,
-                docker_mode: CapabilityState::Unsupported,
                 ownership_boundary: CapabilityState::Supported,
             },
         },
@@ -216,6 +215,7 @@ fn complete_empty_sources() -> (
         collected_at: docker_interval,
         outcome: manyfw_core::docker::CollectionOutcome::Complete,
         completeness: manyfw_core::docker::Completeness::Complete,
+        firewall_mode: manyfw_core::docker::DockerFirewallMode::Unknown,
         containers: Vec::new(),
         diagnostics: Vec::new(),
         provenance: manyfw_core::docker::Provenance {
