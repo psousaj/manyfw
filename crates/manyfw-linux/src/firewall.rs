@@ -28,6 +28,7 @@ trait ReadOnlyRunner {
         program: &'static str,
         args: &[&str],
     ) -> Result<Vec<u8>, FirewallObservationError>;
+    fn kernel_release(&self) -> Result<String, FirewallObservationError>;
 }
 
 struct ProcessRunner;
@@ -46,6 +47,14 @@ impl ReadOnlyRunner for ProcessRunner {
             }
         })?;
         checked_output(program, output)
+    }
+
+    fn kernel_release(&self) -> Result<String, FirewallObservationError> {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|release| release.trim().to_string())
+            .map_err(|_| FirewallObservationError::Unavailable {
+                program: "/proc/sys/kernel/osrelease",
+            })
     }
 }
 
@@ -80,23 +89,17 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
     let nft = runner.run("nft", &["-j", "list", "ruleset"]);
     let ip4 = runner.run("iptables-save", &["-c"]);
     let ip6 = runner.run("ip6tables-save", &["-c"]);
-    let nft_version = runner
-        .run("nft", &["--version"])
+    let nft_version_result = runner.run("nft", &["--version"]);
+    let nft_version = nft_version_result
+        .as_ref()
         .ok()
-        .and_then(|value| parse_version(&value));
-    let nft_binary = if nft_version.is_some() {
-        CapabilityState::Supported
-    } else if matches!(
-        runner.run("nft", &["--version"]),
-        Err(FirewallObservationError::Unavailable { .. })
-    ) {
-        CapabilityState::Unsupported
-    } else {
-        CapabilityState::Unknown
+        .and_then(|value| parse_version(value));
+    let nft_binary = match nft_version_result {
+        Ok(_) if nft_version.is_some() => CapabilityState::Supported,
+        Err(FirewallObservationError::Unavailable { .. }) => CapabilityState::Unsupported,
+        _ => CapabilityState::Unknown,
     };
-    let kernel_version = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .ok()
-        .map(|value| value.trim().to_string());
+    let kernel_version = runner.kernel_release().ok();
     let nft_runtime = Some(NftRuntimeCapability {
         nf_tables: if nft.is_ok() {
             CapabilityState::Supported
@@ -440,6 +443,18 @@ mod tests {
                 .cloned()
                 .unwrap_or(Err(FirewallObservationError::Unavailable { program }))
         }
+
+        fn kernel_release(&self) -> Result<String, FirewallObservationError> {
+            self.0
+                .get("/proc/sys/kernel/osrelease")
+                .cloned()
+                .unwrap_or({
+                    Err(FirewallObservationError::Unavailable {
+                        program: "/proc/sys/kernel/osrelease",
+                    })
+                })
+                .map(|release| String::from_utf8_lossy(&release).trim().to_string())
+        }
     }
 
     struct VersionRunner {
@@ -463,6 +478,10 @@ mod tests {
                 _ => return Err(FirewallObservationError::Unavailable { program }),
             };
             Ok(output)
+        }
+
+        fn kernel_release(&self) -> Result<String, FirewallObservationError> {
+            Ok("6.8.0-test".into())
         }
     }
 

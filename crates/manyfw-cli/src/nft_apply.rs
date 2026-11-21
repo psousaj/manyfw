@@ -1365,13 +1365,19 @@ fn nft_runtime_ready() -> Result<(), String> {
     let ruleset = Command::new("nft")
         .args(["-j", "list", "ruleset"])
         .output()
-        .map_err(|_| "kernel nf_tables support could not be queried".to_string())?;
-    if !ruleset.status.success()
-        || serde_json::from_slice::<serde_json::Value>(&ruleset.stdout).is_err()
-    {
-        return Err(
-            "kernel nf_tables support is unavailable or nft JSON listing is unsupported".into(),
-        );
+        .map_err(|_| "nf_tables kernel capability could not be queried".to_string())?;
+    if !ruleset.status.success() {
+        let stderr = String::from_utf8_lossy(&ruleset.stderr).to_ascii_lowercase();
+        if stderr.contains("operation not supported")
+            || stderr.contains("not supported")
+            || stderr.contains("unknown family")
+        {
+            return Err("nf_tables kernel support is unavailable".into());
+        }
+        return Err("nf_tables kernel support could not be verified".into());
+    }
+    if serde_json::from_slice::<serde_json::Value>(&ruleset.stdout).is_err() {
+        return Err("nft JSON ruleset listing is unsupported or malformed".into());
     }
     Ok(())
 }

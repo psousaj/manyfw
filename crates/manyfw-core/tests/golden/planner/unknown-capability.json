@@ -174,6 +174,7 @@
   "explanations": [
     "plan generation is read-only and produces typed diagnostic operations",
     "native nftables mode is evaluated independently and does not require DOCKER-USER",
+    "nft runtime: nf_tables=Supported, nft_binary=Supported, nft_version=nftables v1.1.3 (stable), kernel_version=6.8.0",
     "applicability is blocked; proposed operations are not executable",
     "foreign manager resources are preserved and global atomicity is not assumed"
   ]

@@ -24,6 +24,16 @@ pub struct NftRuntimeCapability {
 }
 
 impl NftRuntimeCapability {
+    pub fn summary(&self) -> String {
+        format!(
+            "nft runtime: nf_tables={:?}, nft_binary={:?}, nft_version={}, kernel_version={}",
+            self.nf_tables,
+            self.nft_binary,
+            self.nft_version.as_deref().unwrap_or("unknown"),
+            self.kernel_version.as_deref().unwrap_or("unknown")
+        )
+    }
+
     pub fn blocking_diagnostics(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.nf_tables != CapabilityState::Supported {
@@ -1110,6 +1120,15 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
         }
         _ => "backend mode is evaluated without an implicit manager fallback".into(),
     });
+    if backend.observation.backend == BackendKind::Nftables {
+        explanations.push(
+            backend
+                .nft_runtime
+                .as_ref()
+                .map(NftRuntimeCapability::summary)
+                .unwrap_or_else(|| "nft runtime: capability observation unavailable".into()),
+        );
+    }
     if backend.observation.mode == BackendMode::IptablesDocker {
         explanations.push(
             "DOCKER-USER remains Docker-owned; it is observed as a path boundary, never a ManyFW write target"
@@ -1745,6 +1764,12 @@ mod tests {
         let mut fixture = input(CapabilityState::Supported);
         let healthy = fixture.backend.nft_runtime.clone().unwrap();
         assert!(healthy.blocking_diagnostics().is_empty());
+        let healthy_plan = Planner::plan(&fixture);
+        assert!(healthy_plan.explanations.iter().any(|line| {
+            line.contains("nft_version=nftables v1.1.3")
+                && line.contains("kernel_version=6.8.0")
+                && line.contains("nf_tables=Supported")
+        }));
         assert!(
             NftRuntimeCapability {
                 nft_version: Some("nftables v1.0.9-rc1".into()),
