@@ -39,7 +39,7 @@ try:
     results = json.loads((p/'evidence.json').read_text())
 except (OSError, ValueError):
     results = {'complete': False}
-gate = {'contract_version': 'issue24-linux-packets-v2', 'suite': 'linux-input-packets',
+gate = {'contract_version': 'issue24-linux-packets-v3', 'suite': 'linux-input-packets',
         'packet_eligible': sys.argv[2] == '0' and sys.argv[3] == 'yes' and sys.argv[4] == 'destroyed' and results.get('complete', False),
         'release_eligible': False, 'teardown': sys.argv[4],
         'recovery_matrix': 'separate recovery_eligible evidence required', 'results': results}
@@ -94,11 +94,17 @@ for name in sorted(set(filter(None, names))):
         entries.append({'path': relative, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
     else:
         entries.append({'path': relative, 'deleted': True})
-pathlib.Path(sys.argv[2]).write_text(json.dumps({'contract_version': 'issue24-linux-packets-v2', 'sources': entries}, indent=2)+'\n')
+pathlib.Path(sys.argv[2]).write_text(json.dumps({'contract_version': 'issue24-linux-packets-v3', 'sources': entries}, indent=2)+'\n')
 PY
 TMPDIR="$VM_ROOT/tmp" cargo run --quiet -p manyfw --example issue23_bundle >"$evidence/seed.json"
+test_nft_version=$(vm_ssh nft --version)
+test_kernel_version=$(vm_ssh uname -r)
+vm_ssh sudo nft -j list ruleset >/dev/null
 for family in v4 v6; do
-    cargo run --quiet -p manyfw --example issue23_bundle -- "host-binding-$family" >"$evidence/host-binding-$family.json"
+    MANYFW_TEST_NFT_VERSION="$test_nft_version" \
+    MANYFW_TEST_KERNEL_VERSION="$test_kernel_version" \
+        cargo run --quiet -p manyfw --example issue23_bundle -- "host-binding-$family" \
+        >"$evidence/host-binding-$family.json"
 done
 vm_ssh sudo test ! -e /var/lib/manyfw || die 'fresh guest required (no existing transaction store)'
 vm_ssh sudo test ! -e /usr/bin/manyfw || die 'fresh guest required (no existing ManyFW binary)'

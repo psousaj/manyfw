@@ -1,7 +1,7 @@
 use manyfw_core::backend::{
     AddressFamily, BackendCapabilities, BackendCapabilityObservation, BackendKind, BackendMode,
-    BackendObservation, CapabilityState, Hook, HookObservation, Ownership, PacketPath, Planner,
-    PlannerInput, ResourceObservation,
+    BackendObservation, CapabilityState, Hook, HookObservation, NftRuntimeCapability, Ownership,
+    PacketPath, Planner, PlannerInput, ResourceObservation,
 };
 use manyfw_core::{
     Action, InterfaceSelector, NormalizedPolicy, PortRange, PortScope, Protocol, Rule, Selector,
@@ -30,6 +30,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "host-binding-v4" => Some("192.0.2.1".parse()?),
         "host-binding-v6" => Some("fd24:0::1".parse()?),
         _ => None,
+    };
+    let nft_runtime = if host_binding.is_some() {
+        Some(NftRuntimeCapability {
+            nf_tables: CapabilityState::Supported,
+            nft_binary: CapabilityState::Supported,
+            nft_version: Some(std::env::var("MANYFW_TEST_NFT_VERSION")?),
+            kernel_version: Some(std::env::var("MANYFW_TEST_KERNEL_VERSION")?),
+        })
+    } else {
+        None
     };
     if let Some(address) = host_binding {
         host.addresses
@@ -79,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         observation: snapshot,
         backend: BackendCapabilityObservation {
-            nft_runtime: None,
+            nft_runtime,
             observation: BackendObservation {
                 backend: BackendKind::Nftables,
                 mode: BackendMode::NativeNftables,

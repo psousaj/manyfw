@@ -17,6 +17,14 @@ def command(*args, input=None, check=True):
     return subprocess.run(args, input=input, text=True, capture_output=True, check=check)
 
 
+def ipv6_equal(address, expected):
+    try:
+        return (socket.inet_pton(socket.AF_INET6, address) ==
+                socket.inet_pton(socket.AF_INET6, expected))
+    except (OSError, TypeError):
+        return False
+
+
 def endpoint():
     # Threads preserve accepted TCP sockets, so the same connection is probed
     # before and after apply (not a misleading second new connection).
@@ -41,7 +49,8 @@ def endpoint():
     addresses = {socket.AF_INET: [], socket.AF_INET6: []}
     for link in json.loads(command('ip', '-j', 'address', 'show').stdout):
         for address in link['addr_info']:
-            if address.get('scope') != 'global':
+            if address.get('scope') != 'global' and not (
+                    address.get('scope') == 'host' and address['family'] == 'inet'):
                 continue
             family = socket.AF_INET if address['family'] == 'inet' else socket.AF_INET6
             addresses[family].append(address['local'])
@@ -127,6 +136,17 @@ def probe(protocol, address, port, source):
                 continue
             payload = packet[offset:]
             kind = None
+            if (ethertype == 0x86dd and transport == 58 and len(payload) >= 24
+                    and payload[0] in (135, 136)):
+                target = socket.inet_ntop(socket.AF_INET6, payload[8:24])
+                events.append({
+                    'kind': 'icmpv6-neighbor-solicit' if payload[0] == 135
+                    else 'icmpv6-neighbor-advert',
+                    'source': sender, 'destination': receiver,
+                    'target': target, 'icmp_type': payload[0], 'icmp_code': payload[1],
+                    'frame_hex': frame.hex(),
+                })
+                continue
             if transport == 17:
                 kind = 'udp-frame'
             elif sender != address or receiver != source:
@@ -164,10 +184,20 @@ class Suite:
         self.run_id = run_id
         self.directory = Path(directory)
         self.seed = json.loads(Path('/tmp/issue24-linux-seed.json').read_text())['input']
+        nft_version = command('nft', '--version').stdout.strip()
+        kernel_version = command('uname', '-r').stdout.strip()
+        command('nft', '-j', 'list', 'ruleset')
+        self.seed['backend']['nft_runtime'] = {
+            'nf_tables': 'supported',
+            'nft_binary': 'supported',
+            'nft_version': nft_version,
+            'kernel_version': kernel_version,
+        }
         self.results = {
             'complete': False,
             'cases': {},
             'scope': 'INPUT only; no production protection claim',
+            'runtime': self.seed['backend']['nft_runtime'],
             'limitations': {
                 'packet_offload': 'unsupported and not disabled or exhaustively observed by this suite',
                 'unobservable_or_bypass_paths': 'unknown/unsupported; no control claim',
@@ -178,7 +208,7 @@ class Suite:
         self.namespaces = []
         self.passed = set()
         self.expected = self.expected_cases()
-        self.results.update(contract_version='issue24-linux-packets-v2', expected_cases=sorted(self.expected))
+        self.results.update(contract_version='issue24-linux-packets-v3', expected_cases=sorted(self.expected))
         self.results['missing_coverage'] = sorted(self.expected)
         self.results['passed_cases'] = []
         self.worker_started = False
@@ -188,7 +218,9 @@ class Suite:
         names = {'source-cidr-match', 'source-cidr-mismatch', 'port-range-low', 'port-range-high',
                  'source-mismatch', 'port-mismatch', 'local-host-address-alias', 'interface-match',
                  'interface-mismatch', 'default-Allow', 'default-Deny', 'interface-timeout',
-                 'established-stream', 'routed-nat-preserved', 'output-only-backend-refusal',
+                 'established-stream', 'outbound-return-default-deny',
+                 'loopback-default-deny', 'icmpv6-neighbor-discovery-default-deny',
+                 'routed-nat-preserved', 'output-only-backend-refusal',
                  'forward-only-backend-refusal', 'default-Reject', 'unresolved-source-refusal',
                  'unknown-capability-refusal', 'arbitrary-destination-cidr-refusal',
                  'opt-in-bypass-refusal', 'non-systemd-refusal', 'incompatible-foreign-input-refusal',
@@ -228,6 +260,18 @@ class Suite:
         self.ns('m24target', 'nft', '-f', '-', input=text)
 
     def setup(self):
+        self.nft_wrapper_dir = self.directory/'nft-command-capture'
+        self.nft_wrapper_dir.mkdir(mode=0o700)
+        wrapper = self.nft_wrapper_dir/'nft'
+        wrapper.write_text(
+            '#!/bin/sh\n'
+            'if [ "$#" -eq 3 ] && [ "$1" = "--json" ] && [ "$2" = "--file" ] && [ "$3" = "-" ] && [ ! -e "$MANYFW_NFT_CAPTURE_PATH" ]; then\n'
+            '  cat > "$MANYFW_NFT_CAPTURE_PATH" || exit\n'
+            '  exec /usr/sbin/nft "$@" < "$MANYFW_NFT_CAPTURE_PATH"\n'
+            'fi\n'
+            'exec /usr/sbin/nft "$@"\n'
+        )
+        wrapper.chmod(0o755)
         for name in ('m24target', 'm24peer', 'm24remote'):
             # Never adopt an existing namespace.
             command('ip', 'netns', 'add', name)
@@ -306,10 +350,66 @@ class Suite:
         bundle = self.directory/(name+'.bundle.json')
         bundle.write_text(json.dumps(generated))
         before = self.state()
-        executable = (('env', 'PATH='+str(no_systemctl_path), '/usr/bin/manyfw')
-                      if no_systemctl_path else ('manyfw',))
+        captured_document = self.directory/f'{name}.submitted.nft.json'
+        captured_document.unlink(missing_ok=True)
+        executable = (
+            ('env', 'PATH='+str(no_systemctl_path), '/usr/bin/manyfw')
+            if no_systemctl_path else
+            ('env',
+             'PATH='+str(self.nft_wrapper_dir)+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+             'MANYFW_NFT_CAPTURE_PATH='+str(captured_document),
+             'manyfw')
+        )
         result = self.ns('m24target', *executable, 'apply', *(['--experimental'] if opt_in else []), '--timeout', str(timeout),
                          '--file', str(bundle), check=False)
+        if result.returncode != 0 and not refusal:
+            records = sorted(
+                (path for path in Path('/var/lib/manyfw/transactions').glob('*.json')
+                 if not path.name.endswith('.artifact.json')),
+                key=lambda path: path.stat().st_mtime_ns,
+            )
+            record_trace = {}
+            if records:
+                record = json.loads(records[-1].read_text())
+                plan_record = record.get('plan') or {}
+                checkpoint_record = record.get('checkpoint') or {}
+                transaction_id = plan_record.get('transaction_id')
+                record_trace = {
+                    'state': record.get('state'),
+                    'diagnostics': record.get('diagnostics', []),
+                    'progress': record.get('progress', []),
+                    'transaction_id': transaction_id,
+                    'plan_ownership_fingerprint': plan_record.get('ownership_fingerprint'),
+                    'checkpoint_owner_fingerprint': checkpoint_record.get('owner_fingerprint'),
+                    'post_apply_fingerprint': record.get('post_apply_fingerprint'),
+                }
+            if captured_document.is_file():
+                record_trace['submitted_document'] = captured_document.read_text()
+            self.results['cases'][name + '-unexpected-apply-failure'] = {
+                'stage': 'apply',
+                'returncode': result.returncode,
+                'error': result.stderr,
+                'plan_applicability': generated['plan']['applicability'],
+                'transaction_record': record_trace,
+                'before': before,
+                'after': self.state(),
+                'ruleset': self.ns('m24target', 'nft', '-j', 'list', 'ruleset').stdout,
+            }
+            if record_trace.get('submitted_document') and self.ns(
+                    'm24target', 'nft', '-j', 'list', 'table', 'inet', 'manyfw',
+                    check=False).returncode != 0:
+                direct_apply = self.ns(
+                    'm24target', 'nft', '--json', '--file', '-',
+                    input=record_trace['submitted_document'], check=False)
+                record_trace['direct_artifact_check'] = {
+                    'returncode': direct_apply.returncode,
+                    'stderr': direct_apply.stderr,
+                }
+                if direct_apply.returncode == 0:
+                    record_trace['direct_applied_table'] = self.ns(
+                        'm24target', 'nft', '-j', 'list', 'table', 'inet', 'manyfw').stdout
+                    self.ns('m24target', 'nft', 'delete', 'table', 'inet', 'manyfw')
+            self.save()
         if refusal or (optional_refusal and result.returncode != 0):
             assert result.returncode != 0, 'unsupported path unexpectedly applied'
             assert before == self.state(), 'refusal mutated firewall state'
@@ -319,6 +419,9 @@ class Suite:
             self.results['cases'][name] = evidence
             return evidence
         assert result.returncode == 0, result.stderr
+        if captured_document.is_file():
+            self.results['cases'][name+'-submitted-json'] = captured_document.name
+            self.save()
         applied = json.loads(result.stdout)
         applied.pop('confirmation_token', None)
         self.results['cases'][name+'-apply'] = applied
@@ -528,8 +631,15 @@ class Suite:
             time.sleep(1)
         else:
             raise AssertionError('independent recovery did not restore ingress')
-        records = [json.loads(p.read_text()) for p in Path('/var/lib/manyfw/transactions').glob('*.json')]
-        record = next(r for r in records if r['plan']['transaction_id'] == transaction)
+        records = [
+            json.loads(path.read_text())
+            for path in Path('/var/lib/manyfw/transactions').glob('*.json')
+            if not path.name.endswith('.artifact.json')
+        ]
+        record = next(
+            record for record in records
+            if record.get('plan', {}).get('transaction_id') == transaction
+        )
         assert record['state'] == 'rolled_back', record['state']
         assert self.state() == checkpoint, 'interface checkpoint differs after independent recovery'
         self.results['cases']['interface-timeout'] = 'Passed'
@@ -553,6 +663,79 @@ class Suite:
         stream.wait(timeout=3)
         self.processes.remove(stream)
         self.passed_case('established-stream')
+        # A new outbound TCP flow must receive its replies through the managed
+        # default-deny INPUT chain. The peer service is independent of ManyFW.
+        peer_server = subprocess.Popen(
+            ['ip', 'netns', 'exec', 'm24peer', sys.executable, __file__, 'echo-server'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.processes.append(peer_server)
+        assert peer_server.stdout.readline().strip() == 'ready'
+        checkpoint = self.state()
+        data = self.bundle(default='Deny')
+        data['policy']['rules'] = []
+        transaction = self.apply(data, 'outbound-return-default-deny')
+        self.ruleset_evidence('outbound-return-default-deny', 'applied')
+        outbound = self.ns('m24target', sys.executable, __file__, 'outbound-client', check=False)
+        assert outbound.returncode == 0, outbound.stderr
+        exchange = json.loads(outbound.stdout)
+        self.results['cases']['outbound-return-default-deny'] = {
+            'outcome': 'allow', 'exchange': exchange,
+        }
+        self.rollback(transaction)
+        assert self.state() == checkpoint, 'outbound default-deny checkpoint differs'
+        self.ruleset_evidence('outbound-return-default-deny', 'restored')
+        self.passed_case('outbound-return-default-deny')
+        # Localhost ingress remains reachable without an explicit policy rule.
+        checkpoint = self.state()
+        transaction = self.apply(data, 'loopback-default-deny')
+        self.ruleset_evidence('loopback-default-deny', 'applied')
+        loopback = self.ns(
+            'm24target', sys.executable, '-c',
+            "import json,socket; s=socket.create_connection(('127.0.0.1',65434),timeout=1); sent=b'lo'; s.sendall(sent); received=s.recv(2); assert received==sent; print(json.dumps({'sent':sent.decode(),'received':received.decode()}))",
+            check=False)
+        assert loopback.returncode == 0, loopback.stderr
+        self.results['cases']['loopback-default-deny'] = {
+            'outcome': 'allow', 'exchange': json.loads(loopback.stdout),
+        }
+        self.rollback(transaction)
+        assert self.state() == checkpoint, 'loopback default-deny checkpoint differs'
+        self.ruleset_evidence('loopback-default-deny', 'restored')
+        self.passed_case('loopback-default-deny')
+        # Force real IPv6 neighbor discovery after applying default deny. The
+        # echo request itself is intentionally denied; a learned neighbor proves
+        # the incoming solicitation was accepted before the family drop.
+        checkpoint = self.state()
+        transaction = self.apply(data, 'icmpv6-neighbor-discovery-default-deny')
+        self.ruleset_evidence('icmpv6-neighbor-discovery-default-deny', 'applied')
+        self.ns('m24peer', 'ip', '-6', 'neigh', 'flush', 'dev', 'm24out0')
+        self.ns('m24target', 'ip', '-6', 'neigh', 'flush', 'dev', 'm24in0')
+        nd_probe = self.packet(protocol='Icmpv6', address='fd24:0::1', source='fd24:0::2')
+        assert nd_probe['outcome'] == 'drop', nd_probe
+        neighbor = json.loads(self.ns(
+            'm24peer', 'ip', '-6', '-j', 'neigh', 'show', 'to', 'fd24:0::1', 'dev', 'm24out0').stdout)
+        assert neighbor and neighbor[0].get('lladdr') and 'FAILED' not in neighbor[0].get('state', []), neighbor
+        nd_events = nd_probe.get('wire_events', [])
+        assert any(
+            event['kind'] == 'icmpv6-neighbor-solicit' and
+            ipv6_equal(event.get('source'), 'fd24:0::2') and
+            ipv6_equal(event.get('target'), 'fd24:0::1') and
+            ipv6_equal(event.get('destination'), 'ff02::1:ff00:1')
+            for event in nd_events
+        ), nd_events
+        assert any(
+            event['kind'] == 'icmpv6-neighbor-advert' and
+            ipv6_equal(event.get('source'), 'fd24:0::1') and
+            ipv6_equal(event.get('target'), 'fd24:0::1') and
+            ipv6_equal(event.get('destination'), 'fd24:0::2')
+            for event in nd_events
+        ), nd_events
+        self.results['cases']['icmpv6-neighbor-discovery-default-deny'] = {
+            'outcome': 'allow', 'echo_outcome': nd_probe['outcome'],
+            'wire_events': nd_events, 'neighbor': neighbor[0]}
+        self.rollback(transaction)
+        assert self.state() == checkpoint, 'neighbor-discovery default-deny checkpoint differs'
+        self.ruleset_evidence('icmpv6-neighbor-discovery-default-deny', 'restored')
+        self.passed_case('icmpv6-neighbor-discovery-default-deny')
         # Real routed flow and source NAT remain outside INPUT, including while
         # ManyFW's INPUT default is deny. Preserve the foreign NAT checkpoint.
         for protocol in ('Tcp', 'Udp', 'Icmp'):
@@ -756,6 +939,23 @@ if __name__ == '__main__':
             except TimeoutError:
                 result = {'outcome': 'drop', 'error': 'established echo timed out'}
             print(json.dumps(result), flush=True)
+    elif sys.argv[1] == 'echo-server':
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(('192.0.2.2', 65437))
+            listener.listen()
+            print('ready', flush=True)
+            connection, _ = listener.accept()
+            with connection:
+                data = connection.recv(128)
+                connection.sendall(data)
+    elif sys.argv[1] == 'outbound-client':
+        with socket.create_connection(('192.0.2.2', 65437), timeout=1.5) as connection:
+            sent = b'outbound-return'
+            connection.sendall(sent)
+            received = connection.recv(128)
+            assert received == sent
+            print(json.dumps({'sent': sent.decode(), 'received': received.decode()}))
     elif sys.argv[1] == 'run':
         suite = Suite(sys.argv[2], sys.argv[3])
         try:

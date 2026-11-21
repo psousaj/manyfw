@@ -82,6 +82,7 @@ fn plan_prints_normalized_rules_in_priority_order() {
     assert!(stdout.contains("priority=100"));
     assert!(stdout.contains("ports=5432"));
     assert!(stdout.contains("action=allow"));
+    assert!(stdout.contains("managed INPUT default-deny exceptions:"));
     assert!(!stdout.contains("Zone("));
 }
 

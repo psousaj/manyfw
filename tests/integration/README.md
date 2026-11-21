@@ -55,10 +55,13 @@ The planner's privileged contract test runs only inside a separate KVM guest.
 It builds a host-only typed plan, creates two temporary network namespaces in
 the guest, and translates that plan's explicit allow and scoped default-deny
 operations into a test-only nftables verdict fixture. Allowed and unmatched TCP
-probes must match those operations. It snapshots the guest namespace's nftables
-JSON ruleset immediately before and after planning and requires identical
-parsed state. It never touches the development host firewall or the pre-existing
-Docker test guest.
+probes must match those operations; the fixture also verifies established/
+related replies, loopback ingress, and IPv6 neighbor discovery are accepted
+before default drops. The production `issue24-linux-packet-vm-test.sh` suite
+separately exercises those three behaviors through the actual Apply adapter
+with default deny enabled. Both suites snapshot state within their isolated
+scope and never touch the development host firewall or the pre-existing Docker
+test guest.
 
 ```sh
 MANYFW_VM_ROOT=/tmp/manyfw-planner-issue7 \

@@ -326,6 +326,8 @@ fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> Tx
         "policy":"accept"
     }}}));
 
+    let default_denied_families = managed_input_default_denied_families(plan);
+    let mut defaults = Vec::new();
     for operation in &plan.operations {
         let Some(typed) = operation.planned_operation.as_ref() else {
             return Err(backend_error("missing typed planner operation"));
@@ -364,7 +366,7 @@ fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> Tx
                         "manyfw-default-v1-{}",
                         fingerprint(&serde_json::to_string(typed).unwrap_or_default())
                     );
-                    commands.push(json!({"add":{"rule":{
+                    defaults.push(json!({"add":{"rule":{
                         "family":"inet",
                         "table":TABLE,
                         "chain":"input",
@@ -378,6 +380,20 @@ fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> Tx
             }
         }
     }
+    if !default_denied_families.is_empty() {
+        for (comment, expression) in
+            default_deny_exception_rules(default_denied_families.contains(&AddressFamily::Ipv6))
+        {
+            commands.push(json!({"add":{"rule":{
+                "family":"inet",
+                "table":TABLE,
+                "chain":"input",
+                "expr":expression,
+                "comment":comment
+            }}}));
+        }
+    }
+    commands.extend(defaults);
 
     serde_json::to_string(&json!({"nftables":commands}))
         .map_err(|error| backend_error(&format!("cannot serialize nftables JSON: {error}")))
@@ -390,6 +406,61 @@ fn default_rule(family: AddressFamily, action: Action) -> TxResult<Option<&'stat
         (AddressFamily::Ipv6, Action::Deny) => Ok(Some("meta nfproto ipv6 drop")),
         (_, Action::Reject) => Err(backend_error("reject is not a valid input default")),
     }
+}
+
+fn default_deny_exception_rules(
+    include_ipv6_control: bool,
+) -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+
+    let mut rules = vec![
+        (
+            "manyfw-exception-v1-established-related",
+            json!([
+                {"match":{
+                    "op":"in",
+                    "left":{"ct":{"key":"state"}},
+                    "right":{"set":["established","related"]}
+                }},
+                {"accept":null}
+            ]),
+        ),
+        (
+            "manyfw-exception-v1-loopback",
+            json!([
+                {"match":{
+                    "op":"==",
+                    "left":{"meta":{"key":"iifname"}},
+                    "right":"lo"
+                }},
+                {"accept":null}
+            ]),
+        ),
+    ];
+    if include_ipv6_control {
+        rules.push((
+            "manyfw-exception-v1-icmpv6-control",
+            json!([
+                {"match":{
+                    "op":"==",
+                    "left":{"meta":{"key":"l4proto"}},
+                    "right":"ipv6-icmp"
+                }},
+                {"match":{
+                    "op":"in",
+                    "left":{"payload":{"protocol":"icmpv6","field":"type"}},
+                    "right":{"set":[
+                        "nd-neighbor-solicit",
+                        "nd-neighbor-advert",
+                        "nd-router-solicit",
+                        "nd-router-advert"
+                    ]}
+                }},
+                {"accept":null}
+            ]),
+        ));
+    }
+    rules
 }
 
 impl TransactionBackend for NftBackend {
@@ -670,6 +741,7 @@ impl NftBackend {
         verify_owned_table_json(state)?;
         let mut expected = Vec::new();
         let mut defaults = Vec::new();
+        let default_denied_families = managed_input_default_denied_families(plan);
         for operation in &plan.operations {
             match operation.planned_operation.as_ref() {
                 Some(PlanOperation::SetManagedDefault {
@@ -745,6 +817,15 @@ impl NftBackend {
                 _ => return Err(TransactionError::PostApplyFingerprintUnavailable),
             }
         }
+        if !default_denied_families.is_empty() {
+            expected.extend(
+                default_deny_exception_rules(
+                    default_denied_families.contains(&AddressFamily::Ipv6),
+                )
+                .into_iter()
+                .map(|(comment, expression)| (comment.to_owned(), expression)),
+            );
+        }
         expected.extend(defaults);
         let mut actual = Vec::new();
         let mut comments = BTreeSet::new();
@@ -760,11 +841,77 @@ impl NftBackend {
             }
             actual.push((comment.to_owned(), rule["expr"].clone()));
         }
-        if actual != expected {
+        if actual.len() != expected.len()
+            || actual.iter().zip(&expected).any(
+                |((actual_comment, actual_expr), (expected_comment, expected_expr))| {
+                    actual_comment != expected_comment
+                        || if actual_comment == "manyfw-exception-v1-icmpv6-control" {
+                            !verified_icmpv6_control_expression(actual_expr)
+                        } else if actual_comment == "manyfw-exception-v1-established-related" {
+                            !verified_established_related_expression(actual_expr)
+                        } else {
+                            actual_expr != expected_expr
+                        }
+                },
+            )
+        {
             return Err(TransactionError::OwnershipChanged);
         }
         Ok(())
     }
+}
+
+fn verified_icmpv6_control_expression(expression: &serde_json::Value) -> bool {
+    let Some(expressions) = expression.as_array() else {
+        return false;
+    };
+    if expressions.len() != 2 || expressions[1] != serde_json::json!({"accept":null}) {
+        return false;
+    }
+    let predicate = &expressions[0]["match"];
+    predicate["op"] == "=="
+        && predicate["left"] == serde_json::json!({"payload":{"protocol":"icmpv6","field":"type"}})
+        && predicate["right"]["set"].as_array().is_some_and(|types| {
+            let actual = types
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<BTreeSet<_>>();
+            let expected = [
+                "nd-neighbor-solicit",
+                "nd-neighbor-advert",
+                "nd-router-solicit",
+                "nd-router-advert",
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+            actual.len() == types.len() && actual == expected
+        })
+}
+
+fn verified_established_related_expression(expression: &serde_json::Value) -> bool {
+    let Some(expressions) = expression.as_array() else {
+        return false;
+    };
+    if expressions.len() != 2 || expressions[1] != serde_json::json!({"accept":null}) {
+        return false;
+    }
+    let predicate = &expressions[0]["match"];
+    if predicate["left"] != serde_json::json!({"ct":{"key":"state"}})
+        || !matches!(predicate["op"].as_str(), Some("in" | "=="))
+    {
+        return false;
+    }
+    let Some(states) = predicate["right"]["set"].as_array() else {
+        return false;
+    };
+    let actual = states
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = ["established", "related"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    actual.len() == states.len() && actual == expected
 }
 
 fn expected_rule_expression(operation: &PlanOperation) -> TxResult<serde_json::Value> {
@@ -1076,7 +1223,8 @@ fn verify_owned_table_json(value: &serde_json::Value) -> TxResult<()> {
                     &["family", "table", "chain", "comment", "expr", "handle"],
                 )
                 || !(comment.starts_with("manyfw-rule-v1-")
-                    || comment.starts_with("manyfw-default-v1-"))
+                    || comment.starts_with("manyfw-default-v1-")
+                    || comment.starts_with("manyfw-exception-v1-"))
             {
                 return Err(TransactionError::OwnershipChanged);
             }
@@ -1120,7 +1268,8 @@ fn verify_change_artifact_binding(
 }
 
 fn expected_owned_comments(plan: &TransactionPlan) -> BTreeSet<String> {
-    plan.operations
+    let mut comments = plan
+        .operations
         .iter()
         .filter_map(|operation| {
             let typed = operation.planned_operation.as_ref()?;
@@ -1135,6 +1284,30 @@ fn expected_owned_comments(plan: &TransactionPlan) -> BTreeSet<String> {
             };
             let encoded = serde_json::to_string(typed).unwrap_or_default();
             Some(format!("{prefix}{}", fingerprint(&encoded)))
+        })
+        .collect::<BTreeSet<_>>();
+    let default_denied_families = managed_input_default_denied_families(plan);
+    if !default_denied_families.is_empty() {
+        comments.extend(
+            default_deny_exception_rules(default_denied_families.contains(&AddressFamily::Ipv6))
+                .into_iter()
+                .map(|(comment, _)| comment.to_owned()),
+        );
+    }
+    comments
+}
+
+fn managed_input_default_denied_families(plan: &TransactionPlan) -> BTreeSet<AddressFamily> {
+    plan.operations
+        .iter()
+        .filter_map(|operation| match operation.planned_operation.as_ref() {
+            Some(PlanOperation::SetManagedDefault {
+                action: Action::Deny,
+                path: manyfw_core::backend::PacketPath::Input,
+                family,
+                ..
+            }) => Some(*family),
+            _ => None,
         })
         .collect()
 }
@@ -1199,7 +1372,9 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
     let value: Value = serde_json::from_str(saved).map_err(|_| invalid())?;
     verify_owned_table_json(&value).map_err(|_| invalid())?;
     let objects = value["nftables"].as_array().ok_or_else(invalid)?;
-    for object in objects {
+    let mut exception_positions = Vec::new();
+    let mut default_positions = Vec::new();
+    for (position, object) in objects.iter().enumerate() {
         if let Some(chain) = object.get("chain") {
             if chain["prio"].as_i64() != Some(i64::from(CHAIN_PRIORITY)) {
                 return Err(invalid());
@@ -1209,6 +1384,28 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
             continue;
         };
         let comment = rule["comment"].as_str().ok_or_else(invalid)?;
+        if comment.starts_with("manyfw-exception-v1-") {
+            exception_positions.push(position);
+            let expected = default_deny_exception_rules(true)
+                .into_iter()
+                .find_map(|(expected_comment, expression)| {
+                    (expected_comment == comment).then_some(expression)
+                })
+                .ok_or_else(invalid)?;
+            let valid = match comment {
+                "manyfw-exception-v1-icmpv6-control" => {
+                    verified_icmpv6_control_expression(&rule["expr"])
+                }
+                "manyfw-exception-v1-established-related" => {
+                    verified_established_related_expression(&rule["expr"])
+                }
+                _ => rule["expr"] == expected,
+            };
+            if !valid {
+                return Err(invalid());
+            }
+            continue;
+        }
         let digest = comment
             .strip_prefix("manyfw-rule-v1-")
             .or_else(|| comment.strip_prefix("manyfw-default-v1-"))
@@ -1223,6 +1420,7 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
         let verdict = expressions.last().ok_or_else(invalid)?;
         let action = validate_checkpoint_verdict(verdict)?;
         if comment.starts_with("manyfw-default-v1-") {
+            default_positions.push(position);
             if expressions.len() != 2
                 || validate_checkpoint_match(&expressions[0])? != CheckpointMatch::Family4
                     && validate_checkpoint_match(&expressions[0])? != CheckpointMatch::Family6
@@ -1253,6 +1451,12 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
                 return Err(invalid());
             }
         }
+    }
+    if !exception_positions.is_empty()
+        && !default_positions.is_empty()
+        && exception_positions.iter().max() >= default_positions.iter().min()
+    {
+        return Err(invalid());
     }
     Ok(value)
 }
@@ -1829,6 +2033,154 @@ mod tests {
     }
 
     #[test]
+    fn managed_default_deny_exceptions_precede_family_drops_and_are_verified() {
+        let (mut plan, _, _) = interrupted_fixture();
+        let default = plan
+            .operations
+            .iter_mut()
+            .find_map(|operation| operation.planned_operation.as_mut())
+            .unwrap();
+        let PlanOperation::SetManagedDefault { action, .. } = default else {
+            panic!("fixture starts with managed default");
+        };
+        *action = Action::Deny;
+        plan.operations.push(manyfw_core::transaction::Operation {
+            resource: "owned".into(),
+            description: "IPv6 default".into(),
+            planned_operation: Some(PlanOperation::SetManagedDefault {
+                action: Action::Deny,
+                path: manyfw_core::backend::PacketPath::Input,
+                family: AddressFamily::Ipv6,
+                managed_resource: Some("owned".into()),
+            }),
+        });
+
+        let value: serde_json::Value =
+            serde_json::from_str(&build_apply_document(&plan, false).unwrap()).unwrap();
+        let rules = value["nftables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|command| command["add"].get("rule"))
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 6);
+        assert!(
+            rules[0]["comment"]
+                .as_str()
+                .unwrap()
+                .starts_with("manyfw-rule-v1-")
+        );
+        assert_eq!(
+            rules[1]["comment"],
+            "manyfw-exception-v1-established-related"
+        );
+        assert_eq!(rules[1]["expr"][0]["match"]["left"]["ct"]["key"], "state");
+        assert_eq!(
+            rules[1]["expr"][0]["match"]["right"]["set"][0],
+            "established"
+        );
+        assert_eq!(rules[1]["expr"][0]["match"]["right"]["set"][1], "related");
+        assert_eq!(rules[1]["expr"][1]["accept"], serde_json::Value::Null);
+        assert_eq!(rules[2]["comment"], "manyfw-exception-v1-loopback");
+        assert_eq!(rules[2]["expr"][0]["match"]["right"], "lo");
+        assert_eq!(rules[2]["expr"][1]["accept"], serde_json::Value::Null);
+        assert_eq!(rules[3]["comment"], "manyfw-exception-v1-icmpv6-control");
+        assert_eq!(
+            rules[3]["expr"][1]["match"]["right"]["set"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        assert!(rules[3]["expr"][2]["accept"].is_null());
+        assert!(
+            rules[4]["comment"]
+                .as_str()
+                .unwrap()
+                .starts_with("manyfw-default-v1-")
+        );
+        assert!(
+            rules[5]["comment"]
+                .as_str()
+                .unwrap()
+                .starts_with("manyfw-default-v1-")
+        );
+
+        let expected = expected_owned_comments(&plan);
+        assert!(expected.contains("manyfw-exception-v1-established-related"));
+        assert!(expected.contains("manyfw-exception-v1-loopback"));
+        assert!(expected.contains("manyfw-exception-v1-icmpv6-control"));
+        assert_eq!(expected.len(), 6);
+        let mut listed_state = serde_json::json!({"nftables":[
+            {"table":{"family":"inet","name":TABLE,"comment":TABLE_MARKER}},
+            {"chain":{"family":"inet","table":TABLE,"name":"input","type":"filter","hook":"input","prio":CHAIN_PRIORITY,"policy":"accept"}}
+        ]});
+        listed_state["nftables"].as_array_mut().unwrap().extend(
+            rules
+                .iter()
+                .map(|rule| serde_json::json!({"rule":(*rule).clone()})),
+        );
+        let observed_established = serde_json::json!([
+            {"match":{
+                "op":"==",
+                "left":{"ct":{"key":"state"}},
+                "right":{"set":["established","related"]}
+            }},
+            {"accept":null}
+        ]);
+        assert!(verified_established_related_expression(
+            &observed_established
+        ));
+        let mut weakened_established = observed_established.clone();
+        weakened_established[0]["match"]["right"]["set"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(!verified_established_related_expression(
+            &weakened_established
+        ));
+        listed_state["nftables"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["rule"]["comment"] == "manyfw-exception-v1-established-related")
+            .unwrap()["rule"]["expr"] = observed_established;
+        let observed_icmpv6 = serde_json::json!([
+            {"match":{
+                "op":"==",
+                "left":{"payload":{"protocol":"icmpv6","field":"type"}},
+                "right":{"set":[
+                    "nd-router-solicit",
+                    "nd-router-advert",
+                    "nd-neighbor-solicit",
+                    "nd-neighbor-advert"
+                ]}
+            }},
+            {"accept":null}
+        ]);
+        assert!(verified_icmpv6_control_expression(&observed_icmpv6));
+        listed_state["nftables"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["rule"]["comment"] == "manyfw-exception-v1-icmpv6-control")
+            .unwrap()["rule"]["expr"] = observed_icmpv6.clone();
+        NftBackend::verify_interrupted_plan(&plan, &listed_state).unwrap();
+        let mut weakened = observed_icmpv6;
+        weakened[0]["match"]["right"]["set"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(!verified_icmpv6_control_expression(&weakened));
+        let mut altered = listed_state;
+        altered["nftables"][4]["rule"]["expr"][1] = serde_json::json!({"drop":null});
+        assert_eq!(
+            NftBackend::verify_interrupted_plan(&plan, &altered),
+            Err(TransactionError::OwnershipChanged)
+        );
+    }
+
+    #[test]
     fn checkpoint_integrity_binds_the_exact_change_artifact() {
         let (plan, _, _) = interrupted_fixture();
         let artifact = ChangeArtifact {
@@ -1944,6 +2296,97 @@ mod tests {
         assert_eq!(restore["nftables"].as_array().unwrap().len(), 2);
         assert!(restore["nftables"][0].get("create").is_some());
         assert!(restore["nftables"][1].get("add").is_some());
+    }
+
+    #[test]
+    fn reboot_checkpoint_accepts_only_exact_default_deny_exception_rules() {
+        let mut saved: serde_json::Value = serde_json::from_str(&saved_table(
+            default_deny_exception_rules(true)[0]
+                .1
+                .as_array()
+                .unwrap()
+                .clone(),
+        ))
+        .unwrap();
+        saved["nftables"][3]["rule"]["comment"] = "manyfw-exception-v1-established-related".into();
+        assert!(validate_reboot_checkpoint_json(&saved.to_string()).is_ok());
+
+        saved["nftables"][3]["rule"]["expr"] = serde_json::json!([
+            {"match":{
+                "op":"==",
+                "left":{"ct":{"key":"state"}},
+                "right":{"set":["established","related"]}
+            }},
+            {"accept":null}
+        ]);
+        assert!(validate_reboot_checkpoint_json(&saved.to_string()).is_ok());
+        saved["nftables"][3]["rule"]["expr"][0]["match"]["right"]["set"][0] = "invalid".into();
+        assert_eq!(
+            validate_reboot_checkpoint_json(&saved.to_string()),
+            Err(TransactionError::CorruptCheckpoint)
+        );
+        saved["nftables"][3]["rule"]["comment"] = "manyfw-exception-v1-unknown".into();
+        assert_eq!(
+            validate_reboot_checkpoint_json(&saved.to_string()),
+            Err(TransactionError::CorruptCheckpoint)
+        );
+    }
+
+    #[test]
+    fn reboot_checkpoint_accepts_nft_normalized_icmpv6_exception_and_rejects_broadening() {
+        let expression = vec![
+            serde_json::json!({"match":{
+                "op":"==",
+                "left":{"payload":{"protocol":"icmpv6","field":"type"}},
+                "right":{"set":[
+                    "nd-router-solicit",
+                    "nd-router-advert",
+                    "nd-neighbor-solicit",
+                    "nd-neighbor-advert"
+                ]}
+            }}),
+            serde_json::json!({"accept":null}),
+        ];
+        let mut saved: serde_json::Value = serde_json::from_str(&saved_table(expression)).unwrap();
+        saved["nftables"][3]["rule"]["comment"] = "manyfw-exception-v1-icmpv6-control".into();
+        assert!(validate_reboot_checkpoint_json(&saved.to_string()).is_ok());
+        saved["nftables"][3]["rule"]["expr"][0]["match"]["right"]["set"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert_eq!(
+            validate_reboot_checkpoint_json(&saved.to_string()),
+            Err(TransactionError::CorruptCheckpoint)
+        );
+    }
+
+    #[test]
+    fn reboot_checkpoint_rejects_default_drop_before_exceptions() {
+        let expression = vec![
+            serde_json::json!({"match":{
+                "op":"==",
+                "left":{"meta":{"key":"iifname"}},
+                "right":"lo"
+            }}),
+            serde_json::json!({"accept":null}),
+        ];
+        let mut saved: serde_json::Value = serde_json::from_str(&saved_table(expression)).unwrap();
+        saved["nftables"][3]["rule"]["comment"] = "manyfw-exception-v1-loopback".into();
+        let default = serde_json::json!({"rule":{
+            "family":"inet",
+            "table":TABLE,
+            "chain":"input",
+            "comment":format!("manyfw-default-v1-{}", "a".repeat(64)),
+            "expr":[
+                {"match":{"op":"==","left":{"meta":{"key":"nfproto"}},"right":"ipv4"}},
+                {"drop":null}
+            ]
+        }});
+        saved["nftables"].as_array_mut().unwrap().insert(3, default);
+        assert_eq!(
+            validate_reboot_checkpoint_json(&saved.to_string()),
+            Err(TransactionError::CorruptCheckpoint)
+        );
     }
 
     #[test]

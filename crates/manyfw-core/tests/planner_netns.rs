@@ -539,54 +539,8 @@ fn typed_plan_matches_isolated_packet_verdicts_and_does_not_mutate_rules() {
         ],
     );
 
-    // Neighbor discovery is link control rather than a planned policy packet;
-    // static lab neighbors keep its ICMPv6 traffic out of default-deny counters.
-    let mac = |namespace: &str, interface: &str| {
-        run("ip", &["-n", namespace, "-o", "link", "show", interface])
-            .split("link/ether ")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .expect("veth has an Ethernet address")
-            .to_owned()
-    };
-    let source_mac = mac(&namespaces.source, &left);
-    let target_mac = mac(&namespaces.target, target_interface);
-    run(
-        "ip",
-        &[
-            "-n",
-            &namespaces.source,
-            "-6",
-            "neigh",
-            "add",
-            "2001:db8::2",
-            "lladdr",
-            &target_mac,
-            "nud",
-            "permanent",
-            "dev",
-            &left,
-        ],
-    );
-    run(
-        "ip",
-        &[
-            "-n",
-            &namespaces.target,
-            "-6",
-            "neigh",
-            "add",
-            "2001:db8::1",
-            "lladdr",
-            &source_mac,
-            "nud",
-            "permanent",
-            "dev",
-            target_interface,
-        ],
-    );
-
     let mut rule_lines = Vec::new();
+    let mut default_lines = Vec::new();
     for operation in &plan.operations {
         match operation {
             PlanOperation::EnsureRule {
@@ -659,7 +613,7 @@ fn typed_plan_matches_isolated_packet_verdicts_and_does_not_mutate_rules() {
                 path: PacketPath::Input,
                 family,
                 managed_resource: Some(_),
-            } => rule_lines.push(format!(
+            } => default_lines.push(format!(
                 "meta nfproto {} counter drop",
                 match family {
                     AddressFamily::Ipv4 => "ipv4",
@@ -671,6 +625,23 @@ fn typed_plan_matches_isolated_packet_verdicts_and_does_not_mutate_rules() {
             _ => panic!("unexpected operation in isolated INPUT test"),
         }
     }
+    if plan.operations.iter().any(|operation| {
+        matches!(
+            operation,
+            PlanOperation::SetManagedDefault {
+                action: Action::Deny,
+                path: PacketPath::Input,
+                ..
+            }
+        )
+    }) {
+        rule_lines.extend([
+            "ct state { established, related } counter accept comment \"test-exception-established-related\"".to_owned(),
+            "iifname lo counter accept comment \"test-exception-loopback\"".to_owned(),
+            "meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } counter accept comment \"test-exception-icmpv6-control\"".to_owned(),
+        ]);
+    }
+    rule_lines.extend(default_lines);
     let nft_rules = format!(
         "table inet manyfw_plan_test {{\n\
          chain input {{\n\
@@ -691,11 +662,35 @@ fn typed_plan_matches_isolated_packet_verdicts_and_does_not_mutate_rules() {
         .write_all(nft_rules.as_bytes())
         .expect("write isolated nft rules");
     assert!(nft.wait().expect("wait for nft").success());
+    run(
+        "ip",
+        &[
+            "-n",
+            &namespaces.source,
+            "-6",
+            "neigh",
+            "flush",
+            "dev",
+            &left,
+        ],
+    );
+    run(
+        "ip",
+        &[
+            "-n",
+            &namespaces.target,
+            "-6",
+            "neigh",
+            "flush",
+            "dev",
+            target_interface,
+        ],
+    );
 
     let server_script = r#"import selectors, socket
 s=selectors.DefaultSelector()
-for family, address in ((socket.AF_INET, '198.18.1.2'), (socket.AF_INET6, '::')):
-    for port in (8080, 8081, 8082):
+for family, address, ports in ((socket.AF_INET, '198.18.1.2', (8080, 8081, 8082)), (socket.AF_INET6, '::', (8080, 8081, 8082)), (socket.AF_INET, '127.0.0.1', (8084,)), (socket.AF_INET6, '::1', (8084,))):
+    for port in ports:
         listener=socket.socket(family); listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if family == socket.AF_INET6: listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         listener.bind((address, port)); listener.listen(); s.register(listener, selectors.EVENT_READ)
@@ -798,6 +793,66 @@ sys.exit(0 if allowed is {expected_python_bool} else 1)
         probe(address, Some(out_of_zone_source), 8080, false);
     }
 
+    let loopback_probe = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            &namespaces.target,
+            "python3",
+            "-c",
+            "import socket; s=socket.create_connection(('127.0.0.1',8084), timeout=1); assert s.recv(2)==b'ok'",
+        ])
+        .status()
+        .expect("run loopback service probe");
+    assert!(loopback_probe.success(), "loopback service was blocked");
+
+    let outbound_script = r#"import socket
+s=socket.create_connection(('198.18.1.1',8083), timeout=1)
+assert s.recv(2)==b'ok'
+"#;
+    let mut outbound_server = Server(
+        Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &namespaces.source,
+                "python3",
+                "-u",
+                "-c",
+                "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('198.18.1.1',8083)); s.listen(); print('ready',flush=True); c,_=s.accept(); c.sendall(b'ok'); c.close()",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start outbound reply service"),
+    );
+    let mut outbound_ready = String::new();
+    BufReader::new(
+        outbound_server
+            .0
+            .stdout
+            .take()
+            .expect("outbound server stdout"),
+    )
+    .read_line(&mut outbound_ready)
+    .expect("read outbound service readiness");
+    assert_eq!(outbound_ready.trim(), "ready");
+    let outbound_probe = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            &namespaces.target,
+            "python3",
+            "-c",
+            outbound_script,
+        ])
+        .status()
+        .expect("run outbound reply probe");
+    assert!(
+        outbound_probe.success(),
+        "established outbound reply was blocked"
+    );
+
     let rules_before_blocked_plan = nft_json(&namespaces.target);
     let mut conflicting = input.clone();
     conflicting.backend.observation.hooks.push(HookObservation {
@@ -832,13 +887,33 @@ sys.exit(0 if allowed is {expected_python_bool} else 1)
     find_counter_packets(&counters, &mut packet_counters);
     assert_eq!(
         packet_counters.len(),
-        10,
+        13,
         "all v4/v6 planner rules and scoped defaults must be present"
     );
     assert_eq!(
         packet_counters.iter().filter(|count| **count > 0).count(),
-        6,
-        "matching allow, priority deny, and default deny should each count in both families: {packet_counters:?}"
+        7,
+        "matching allow, priority deny, default deny, and neighbor discovery should count: {packet_counters:?}"
+    );
+    let neighbor_discovery_packets = counters["nftables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|object| {
+            let rule = object.get("rule")?;
+            (rule["comment"] == "test-exception-icmpv6-control")
+                .then(|| {
+                    rule["expr"]
+                        .as_array()?
+                        .iter()
+                        .find_map(|expression| expression["counter"]["packets"].as_u64())
+                })
+                .flatten()
+        })
+        .expect("neighbor discovery exception counter");
+    assert!(
+        neighbor_discovery_packets > 0,
+        "IPv6 neighbor discovery was not observed by its accepted exception"
     );
     println!(
         "isolated dual-stack packet verdict matrix complete; rule packet counters={packet_counters:?}"

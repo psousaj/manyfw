@@ -207,6 +207,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )
             );
             print_diagnostics(&diagnostics, use_color);
+            if policy.default_action == manyfw_core::Action::Deny {
+                println!(
+                    "  {}",
+                    manyfw_core::backend::MANAGED_DEFAULT_DENY_EXPLANATION
+                );
+            }
             for rule in policy.rules {
                 println!(
                     "  rule {:<28} priority={:<5} {} -> {} {} ports={} action={}",

@@ -6,6 +6,7 @@ SHA-256 receipts detect corruption; they do not authenticate evidence producers.
 """
 import argparse
 import hashlib
+import ipaddress
 import io
 import json
 import pathlib
@@ -13,7 +14,9 @@ import re
 import subprocess
 import tarfile
 
-CONTRACT = 'issue24-linux-packets-v2'
+PACKET_CONTRACT = 'issue24-linux-packets-v3'
+RECOVERY_CONTRACT = 'issue24-linux-packets-v2'
+CONTRACT = PACKET_CONTRACT
 RECOVERY = set('''partial_apply ambiguous_apply_commit_recovered cli_kill_after_batch
 ssh_loss_and_recovery successful_confirmation rollback_failure_and_retry
 ambiguous_rollback_commit_retry corrupt_checkpoint_refusal_and_retry
@@ -31,7 +34,9 @@ concurrent_external_manager_divergence no_global_or_table_flush'''.split())
 def packet_cases():
     names = set('''source-cidr-match source-cidr-mismatch port-range-low port-range-high
 source-mismatch port-mismatch local-host-address-alias interface-match interface-mismatch
-default-Allow default-Deny interface-timeout established-stream routed-nat-preserved
+default-Allow default-Deny interface-timeout established-stream
+outbound-return-default-deny loopback-default-deny
+icmpv6-neighbor-discovery-default-deny routed-nat-preserved
 output-only-backend-refusal forward-only-backend-refusal default-Reject
 unresolved-source-refusal unknown-capability-refusal arbitrary-destination-cidr-refusal
 opt-in-bypass-refusal non-systemd-refusal incompatible-foreign-input-refusal
@@ -56,6 +61,113 @@ nft-flowtable-offload-refusal'''.split())
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def validate_default_deny_exceptions(document, submitted):
+    entries = []
+    for item in document.get('nftables', []):
+        rule = item.get('add', {}).get('rule') if submitted else item.get('rule')
+        if isinstance(rule, dict):
+            entries.append((rule.get('comment', ''), rule.get('expr')))
+    comments = [comment for comment, _ in entries]
+    exception_names = (
+        'manyfw-exception-v1-established-related',
+        'manyfw-exception-v1-loopback',
+        'manyfw-exception-v1-icmpv6-control',
+    )
+    require(all(comments.count(name) == 1 for name in exception_names),
+            'missing or duplicate default-deny exception rules')
+    expected_types = {
+        'nd-neighbor-solicit', 'nd-neighbor-advert',
+        'nd-router-solicit', 'nd-router-advert',
+    }
+
+    def exact_set(value, values):
+        return (isinstance(value, dict) and set(value) == {'set'} and
+                isinstance(value.get('set'), list) and
+                all(isinstance(item, str) for item in value['set']) and
+                len(value['set']) == len(set(value['set'])) and set(value['set']) == values)
+
+    def exact_match(expression):
+        if not isinstance(expression, dict) or set(expression) != {'match'}:
+            return None
+        predicate = expression['match']
+        if not isinstance(predicate, dict) or set(predicate) != {'left', 'op', 'right'}:
+            return None
+        return predicate
+
+    def valid(comment, expression):
+        if not isinstance(expression, list) or not expression or expression[-1] != {'accept': None}:
+            return False
+        predicates = expression[:-1]
+        if comment == 'manyfw-exception-v1-established-related':
+            if len(predicates) != 1:
+                return False
+            predicate = exact_match(predicates[0])
+            if predicate is None:
+                return False
+            return (predicate.get('left') == {'ct': {'key': 'state'}} and
+                    predicate.get('op') in ('in', '==') and
+                    exact_set(predicate.get('right'), {'established', 'related'}))
+        if comment == 'manyfw-exception-v1-loopback':
+            if len(predicates) != 1:
+                return False
+            predicate = exact_match(predicates[0])
+            if predicate is None:
+                return False
+            return (predicate.get('left') == {'meta': {'key': 'iifname'}} and
+                    predicate.get('op') == '==' and predicate.get('right') == 'lo')
+        if comment != 'manyfw-exception-v1-icmpv6-control':
+            return False
+        payload_type = {'payload': {'protocol': 'icmpv6', 'field': 'type'}}
+        if len(predicates) == 2:
+            protocol = exact_match(predicates[0])
+            types = exact_match(predicates[1])
+            if protocol is None or types is None:
+                return False
+            return (protocol.get('left') == {'meta': {'key': 'l4proto'}} and
+                    protocol.get('op') == '==' and protocol.get('right') == 'ipv6-icmp' and
+                    types.get('left') == payload_type and types.get('op') == 'in' and
+                    exact_set(types.get('right'), expected_types))
+        if len(predicates) == 1:
+            predicate = exact_match(predicates[0])
+            if predicate is None:
+                return False
+            return (predicate.get('left') == payload_type and predicate.get('op') == '==' and
+                    exact_set(predicate.get('right'), expected_types))
+        return False
+
+    for comment, expression in entries:
+        if comment in exception_names:
+            require(valid(comment, expression),
+                    'invalid default-deny exception expression: ' + comment)
+        elif comment.startswith('manyfw-exception-v1-'):
+            require(False, 'unexpected default-deny exception rule: ' + comment)
+    positions = [comments.index(name) for name in exception_names]
+    defaults = [(index, comment, expression)
+                for index, (comment, expression) in enumerate(entries)
+                if comment.startswith('manyfw-default-v1-')]
+    require(len({comment for _, comment, _ in defaults}) == len(defaults),
+            'duplicate managed default-deny rule')
+    for _, _, expression in defaults:
+        predicate = exact_match(expression[0]) if isinstance(expression, list) and expression else None
+        require(
+            isinstance(expression, list) and len(expression) == 2 and predicate is not None and
+            predicate.get('op') == '==' and
+            predicate.get('left') == {'meta': {'key': 'nfproto'}} and
+            predicate.get('right') in ('ipv4', 'ipv6') and
+            expression[1] == {'drop': None},
+            'invalid managed default-deny expression',
+        )
+    require(defaults and max(positions) < min(index for index, _, _ in defaults),
+            'default-deny exceptions are not ordered before family drops')
+
+
+def ipv6_equal(address, expected):
+    try:
+        return ipaddress.IPv6Address(address) == ipaddress.IPv6Address(expected)
+    except (ipaddress.AddressValueError, TypeError):
+        return False
 
 
 def pairs(rows):
@@ -98,6 +210,12 @@ def safe_relative(name):
 
 
 def expected_outcome(name):
+    if name in {
+        'outbound-return-default-deny',
+        'loopback-default-deny',
+        'icmpv6-neighbor-discovery-default-deny',
+    }:
+        return 'allow'
     if name.startswith('composition-'):
         return 'drop'
     if name.startswith('iptables-nft-'):
@@ -136,6 +254,11 @@ def archive_evidence(data, results):
         if name.endswith('-nft'):
             require(isinstance(json.loads(value).get('nftables'), list), 'invalid effective rules: ' + name)
             rules += 1
+        if name.endswith('-submitted-json'):
+            path = str(safe_relative(value))
+            require(isinstance(json.loads(files[path]).get('nftables'), list),
+                    'invalid submitted nftables JSON: ' + name)
+            rules += 1
         if name.endswith('-rulesets'):
             require(isinstance(value, dict) and bool(value), 'empty ruleset references')
             for reference in value.values():
@@ -152,8 +275,14 @@ def archive_evidence(data, results):
             wire += 1
     # Each ordinary case captures effective rules and its observed packet. Refusal,
     # timeout, NAT and established-stream cases have separate producer contracts.
+    exception_cases = {
+        'outbound-return-default-deny',
+        'loopback-default-deny',
+        'icmpv6-neighbor-discovery-default-deny',
+    }
     ordinary = {name for name in packet_cases() if name not in {
         'interface-timeout', 'established-stream', 'routed-nat-preserved', 'default-Reject'}
+        and name not in exception_cases
         and not name.endswith('-refusal')}
     for name in ordinary:
         value = cases[name]
@@ -170,6 +299,56 @@ def archive_evidence(data, results):
                 'missing case effective rules: ' + name)
         if name + '-rulesets' in cases:
             require('applied' in cases[name + '-rulesets'], 'missing applied ruleset: ' + name)
+    for name in ('outbound-return-default-deny', 'loopback-default-deny'):
+        value = cases[name]
+        exchange = value.get('exchange', {})
+        require(value.get('outcome') == 'allow' and
+                exchange.get('sent') == exchange.get('received') and
+                isinstance(exchange.get('sent'), str) and bool(exchange['sent']),
+                'missing successful payload round-trip: ' + name)
+        references = cases.get(name + '-rulesets', {})
+        require('applied' in references and 'restored' in references,
+                'missing applied/restored ruleset evidence: ' + name)
+        submitted_path = cases.get(name + '-submitted-json')
+        require(isinstance(submitted_path, str),
+                'missing exact submitted JSON artifact: ' + name)
+        submitted = json.loads(files[str(safe_relative(submitted_path))])
+        validate_default_deny_exceptions(submitted, submitted=True)
+        applied = json.loads(files[str(safe_relative(references['applied']))])
+        validate_default_deny_exceptions(applied, submitted=False)
+    nd = cases['icmpv6-neighbor-discovery-default-deny']
+    nd_events = nd.get('wire_events', [])
+    solicit = any(
+        event.get('kind') == 'icmpv6-neighbor-solicit' and
+        ipv6_equal(event.get('source'), 'fd24:0::2') and
+        ipv6_equal(event.get('target'), 'fd24:0::1') and
+        ipv6_equal(event.get('destination'), 'ff02::1:ff00:1')
+        for event in nd_events
+    )
+    advert = any(
+        event.get('kind') == 'icmpv6-neighbor-advert' and
+        ipv6_equal(event.get('source'), 'fd24:0::1') and
+        ipv6_equal(event.get('target'), 'fd24:0::1') and
+        ipv6_equal(event.get('destination'), 'fd24:0::2')
+        for event in nd_events
+    )
+    require(
+        nd.get('outcome') == 'allow' and nd.get('echo_outcome') == 'drop' and
+        solicit and advert and
+        nd.get('neighbor', {}).get('lladdr') and
+        'FAILED' not in nd.get('neighbor', {}).get('state', []),
+        'missing IPv6 neighbor-discovery packet proof',
+    )
+    nd_references = cases.get('icmpv6-neighbor-discovery-default-deny-rulesets', {})
+    require('applied' in nd_references and 'restored' in nd_references,
+            'missing applied/restored neighbor-discovery ruleset evidence')
+    nd_submitted_path = cases.get('icmpv6-neighbor-discovery-default-deny-submitted-json')
+    require(isinstance(nd_submitted_path, str),
+            'missing exact submitted JSON for neighbor discovery')
+    nd_submitted = json.loads(files[str(safe_relative(nd_submitted_path))])
+    validate_default_deny_exceptions(nd_submitted, submitted=True)
+    nd_applied = json.loads(files[str(safe_relative(nd_references['applied']))])
+    validate_default_deny_exceptions(nd_applied, submitted=False)
     default_reject = cases['default-Reject']
     if default_reject.get('stage') == 'apply':
         error = default_reject.get('error', '').lower()
@@ -219,9 +398,10 @@ def aggregate(recovery, packet):
     def document(root, name):
         return json.loads(read(root, name), object_pairs_hook=lambda rows: pairs(rows))
 
-    def manifest(root):
+    def manifest(root, expected_contract):
         value = document(root, 'source-manifest.json')
-        require(value['contract_version'] == CONTRACT, 'source manifest contract mismatch')
+        require(value['contract_version'] == expected_contract,
+                'source manifest contract mismatch: ' + str(root))
         sources = pairs((e['path'], e) for e in value['sources'])
         require({name for name in sources if production_path(name)} == inventory,
                 'production manifest inventory mismatch')
@@ -245,8 +425,11 @@ def aggregate(recovery, packet):
         require(tailscale.get('status') == 'NotApplicable' and
                 tailscale.get('deferred_contract') == 'docs/specs/issue-24-linux-enforcement.md',
                 'separate Tailscale compatibility contract is not retained')
-        for root, gate in ((recovery, rg), (packet, pg)):
-            require(gate['contract_version'] == CONTRACT, 'gate contract mismatch')
+        for root, gate, expected_contract in (
+            (recovery, rg, RECOVERY_CONTRACT),
+            (packet, pg, PACKET_CONTRACT),
+        ):
+            require(gate['contract_version'] == expected_contract, 'gate contract mismatch')
             require(gate['teardown'] == 'destroyed', 'guest not destroyed: ' + str(root))
             require('Stopped and removed disposable guest state.' in read(root, 'vm-down.log'),
                     'missing successful teardown log')
@@ -264,7 +447,7 @@ def aggregate(recovery, packet):
                 'packet suite cannot authorize production release')
         results = document(packet, 'evidence.json')
         require(pg['results'] == results, 'packet embedded evidence mismatch')
-        require(results['contract_version'] == CONTRACT and results['complete'] is True,
+        require(results['contract_version'] == PACKET_CONTRACT and results['complete'] is True,
                 'packet incomplete or wrong contract')
         limitations = results.get('limitations', {})
         require(limitations.get('packet_offload') ==
@@ -282,7 +465,8 @@ def aggregate(recovery, packet):
         commit = read(packet, 'commit.txt').strip()
         require(re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', commit) and
                 metadata['candidate_commit'] == commit, 'candidate HEAD mismatch')
-        require(manifest(recovery) == manifest(packet), 'production source manifest mismatch')
+        require(manifest(recovery, RECOVERY_CONTRACT) ==
+                manifest(packet, PACKET_CONTRACT), 'production source manifest mismatch')
         binary = sha(metadata['binary_sha256'])
         for root in (recovery, packet):
             require(hashes(read(root, 'installed-binary.sha256')).get('/usr/bin/manyfw') == binary,

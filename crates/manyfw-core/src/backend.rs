@@ -14,6 +14,7 @@ use std::net::IpAddr;
 pub const PLAN_VERSION: u32 = 1;
 pub const MINIMUM_NFT_VERSION: (u32, u32, u32) = (1, 0, 9);
 pub const MINIMUM_KERNEL_VERSION: (u32, u32, u32) = (5, 10, 0);
+pub const MANAGED_DEFAULT_DENY_EXPLANATION: &str = "managed INPUT default-deny exceptions: established/related return traffic, loopback ingress, and ICMPv6 neighbor discovery/router advertisements";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NftRuntimeCapability {
@@ -1128,6 +1129,18 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                 .map(NftRuntimeCapability::summary)
                 .unwrap_or_else(|| "nft runtime: capability observation unavailable".into()),
         );
+    }
+    if operations.iter().any(|operation| {
+        matches!(
+            operation,
+            PlanOperation::SetManagedDefault {
+                action: Action::Deny,
+                path: PacketPath::Input,
+                ..
+            }
+        )
+    }) {
+        explanations.push(MANAGED_DEFAULT_DENY_EXPLANATION.into());
     }
     if backend.observation.mode == BackendMode::IptablesDocker {
         explanations.push(
@@ -2420,6 +2433,14 @@ mod tests {
                 ..
             }
         )));
+        let explanation = plan
+            .explanations
+            .iter()
+            .find(|explanation| explanation.starts_with("managed INPUT default-deny exceptions:"))
+            .expect("plan explicitly lists managed default-deny exceptions");
+        assert!(explanation.contains("established/related"));
+        assert!(explanation.contains("loopback ingress"));
+        assert!(explanation.contains("ICMPv6 neighbor discovery/router advertisements"));
 
         input.backend.observation.resources.clear();
         let plan = Planner::plan(&input);

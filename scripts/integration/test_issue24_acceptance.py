@@ -30,13 +30,15 @@ class AcceptanceTests(unittest.TestCase):
         for root in (self.recovery, self.packet):
             root.mkdir()
             (root / 'vm-down.log').write_text('Stopped and removed disposable guest state.\n')
-            self.write(root, 'source-manifest.json', {'contract_version': acceptance.CONTRACT,
+            contract = (acceptance.RECOVERY_CONTRACT if root == self.recovery
+                        else acceptance.PACKET_CONTRACT)
+            self.write(root, 'source-manifest.json', {'contract_version': contract,
                        'sources': [{'path': p, 'sha256': 'a' * 64}
                                    for p in sorted(self.inventory)]})
             (root / 'installed-binary.sha256').write_text('b' * 64 + '  /usr/bin/manyfw\n')
         statuses = {name: 'Passed' for name in acceptance.RECOVERY}
         (self.recovery / 'status.tsv').write_text(''.join(f'{n}\t{s}\n' for n, s in statuses.items()))
-        self.rg = {'contract_version': acceptance.CONTRACT, 'suite_type': 'production_recovery',
+        self.rg = {'contract_version': acceptance.RECOVERY_CONTRACT, 'suite_type': 'production_recovery',
                    'teardown': 'destroyed', 'critical_scenarios': dict(statuses, harness_completion='Passed'),
                    'recovery_eligible': True, 'release_eligible': False, 'compatibility_scenarios': {
                        'tailscale_interoperability': {
@@ -47,21 +49,53 @@ class AcceptanceTests(unittest.TestCase):
         (self.packet / 'commit.txt').write_text('c' * 40 + '\n')
         (self.packet / 'installed-binary.sha256').write_text('b' * 64 + '  /usr/bin/manyfw\n' + 'd' * 64 + '  /tmp/issue24-linux-packet-guest.py\n')
         (self.packet / 'artifacts.sha256').write_text('b' * 64 + '  /build/manyfw\n' + 'd' * 64 + '  /repo/issue24-linux-packet-guest.py\n')
-        self.results = {'contract_version': acceptance.CONTRACT, 'complete': True,
+        self.results = {'contract_version': acceptance.PACKET_CONTRACT, 'complete': True,
                         'expected_cases': sorted(acceptance.packet_cases()),
                         'passed_cases': sorted(acceptance.packet_cases()), 'missing_coverage': [],
                         'limitations': {
                             'packet_offload': 'unsupported and not disabled or exhaustively observed by this suite',
                             'unobservable_or_bypass_paths': 'unknown/unsupported; no control claim',
                             'other_hooks': 'OUTPUT and FORWARD unsupported',
-                        },
-                        'cases': {}}
+                         },
+                         'cases': {}}
+        self.ruleset_files = {}
         for name in acceptance.packet_cases():
             ipv6 = 'ipv6' in name or name.startswith('Icmpv6')
             self.results['cases'][name] = {'outcome': acceptance.expected_outcome(name),
                 'wire_events': [{'kind': 'icmpv6-unreachable' if ipv6 else 'icmp-unreachable',
                                  'icmp_type': 1 if ipv6 else 3, 'icmp_code': 4 if ipv6 else 3}]}
             self.results['cases'][name + '-nft'] = json.dumps({'nftables': [{'rule': {'comment': 'test only'}}]})
+        for name, payload in (
+            ('outbound-return-default-deny', 'outbound-return'),
+            ('loopback-default-deny', 'lo'),
+        ):
+            self.results['cases'][name] = {
+                'outcome': 'allow',
+                'exchange': {'sent': payload, 'received': payload},
+            }
+            self.add_ruleset_evidence(
+                name, ['manyfw-exception-v1-established-related',
+                       'manyfw-exception-v1-loopback',
+                       'manyfw-exception-v1-icmpv6-control',
+                       'manyfw-default-v1-v4'],
+            )
+        name = 'icmpv6-neighbor-discovery-default-deny'
+        self.results['cases'][name] = {
+            'outcome': 'allow',
+            'echo_outcome': 'drop',
+            'wire_events': [
+                {'kind': 'icmpv6-neighbor-solicit', 'source': 'fd24:0::2',
+                 'destination': 'ff02::1:ff00:1', 'target': 'fd24:0::1'},
+                {'kind': 'icmpv6-neighbor-advert', 'source': 'fd24:0::1',
+                 'destination': 'fd24:0::2', 'target': 'fd24:0::1'},
+            ],
+            'neighbor': {'lladdr': '02:00:00:00:00:02', 'state': ['REACHABLE']},
+        }
+        self.add_ruleset_evidence(
+            name, ['manyfw-exception-v1-established-related',
+                   'manyfw-exception-v1-loopback',
+                   'manyfw-exception-v1-icmpv6-control', 'manyfw-default-v1-v6'],
+        )
         self.results['cases']['default-Reject'] = {
             'stage': 'apply', 'returncode': 2, 'error': 'default Reject is unsupported',
             'before': {'nftables': []}, 'after': {'nftables': []}}
@@ -74,11 +108,57 @@ class AcceptanceTests(unittest.TestCase):
 
     def sync_packet(self):
         self.write(self.packet, 'evidence.json', self.results)
-        self.write(self.packet, 'gate.json', {'contract_version': acceptance.CONTRACT,
+        self.write(self.packet, 'gate.json', {'contract_version': acceptance.PACKET_CONTRACT,
                    'suite': 'linux-input-packets', 'teardown': 'destroyed',
                    'packet_eligible': True, 'release_eligible': False, 'results': self.results})
-        self.archive()
+        self.archive(self.ruleset_files)
         self.checksums()
+
+    def add_ruleset_evidence(self, name, comments):
+        def expression(comment, applied):
+            if comment == 'manyfw-exception-v1-established-related':
+                return [{'match': {'op': '==' if applied else 'in',
+                                   'left': {'ct': {'key': 'state'}},
+                                   'right': {'set': ['established', 'related']}}},
+                        {'accept': None}]
+            if comment == 'manyfw-exception-v1-loopback':
+                return [{'match': {'op': '==', 'left': {'meta': {'key': 'iifname'}},
+                                   'right': 'lo'}}, {'accept': None}]
+            if comment == 'manyfw-exception-v1-icmpv6-control':
+                names = ['nd-neighbor-solicit', 'nd-neighbor-advert',
+                         'nd-router-solicit', 'nd-router-advert']
+                if applied:
+                    return [{'match': {'op': '==',
+                                       'left': {'payload': {'protocol': 'icmpv6', 'field': 'type'}},
+                                       'right': {'set': list(reversed(names))}}},
+                            {'accept': None}]
+                return [
+                    {'match': {'op': '==', 'left': {'meta': {'key': 'l4proto'}},
+                               'right': 'ipv6-icmp'}},
+                    {'match': {'op': 'in',
+                               'left': {'payload': {'protocol': 'icmpv6', 'field': 'type'}},
+                               'right': {'set': names}}},
+                    {'accept': None},
+                ]
+            return [{'match': {'op': '==', 'left': {'meta': {'key': 'nfproto'}},
+                               'right': 'ipv4'}}, {'drop': None}]
+
+        references = {}
+        for stage in ('applied', 'restored'):
+            path = f'{name}.{stage}.nft.json'
+            references[stage] = path
+            rules = ([{'rule': {'comment': comment, 'expr': expression(comment, True)}}
+                      for comment in comments]
+                     if stage == 'applied' else [])
+            self.ruleset_files[path] = json.dumps({'nftables': rules}).encode()
+        self.results['cases'][name + '-rulesets'] = references
+        submitted_path = f'{name}.submitted.nft.json'
+        commands = [
+            {'add': {'rule': {'comment': comment, 'expr': expression(comment, False)}}}
+            for comment in comments
+        ]
+        self.ruleset_files[submitted_path] = json.dumps({'nftables': commands}).encode()
+        self.results['cases'][name + '-submitted-json'] = submitted_path
 
     def archive(self, extra=None):
         with tarfile.open(self.packet / 'guest-artifacts.tar.gz', 'w:gz') as archive:
@@ -111,7 +191,7 @@ class AcceptanceTests(unittest.TestCase):
                  for priority in (-400, 100) for verdict in ('accept', 'drop')}
         self.assertTrue(cases <= acceptance.packet_cases())
         self.assertEqual(len(cases), 8)
-        self.assertEqual(len(acceptance.packet_cases()), 104)
+        self.assertEqual(len(acceptance.packet_cases()), 107)
         self.assertTrue(all(acceptance.expected_outcome(case) == 'drop' for case in cases))
 
     def test_success_receipt_never_authorizes_production(self):
@@ -133,6 +213,74 @@ class AcceptanceTests(unittest.TestCase):
         result = self.result()
         self.assertFalse(result['generic_linux_accepted'])
         self.assertTrue(any('pre-mutation refusal' in blocker for blocker in result['blockers']))
+
+    def test_exception_expressions_are_verified_in_submitted_and_applied_rulesets(self):
+        name = 'outbound-return-default-deny'
+        submitted_path = self.results['cases'][name + '-submitted-json']
+        original_submitted = self.ruleset_files[submitted_path]
+        submitted = json.loads(self.ruleset_files[submitted_path])
+        icmp_rule = next(command['add']['rule'] for command in submitted['nftables']
+                         if command.get('add', {}).get('rule', {}).get('comment') ==
+                         'manyfw-exception-v1-icmpv6-control')
+        icmp_rule['expr'][1]['match']['right']['set'].pop()
+        self.ruleset_files[submitted_path] = json.dumps(submitted).encode()
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('invalid default-deny exception expression' in blocker
+                            for blocker in result['blockers']))
+
+        self.ruleset_files[submitted_path] = original_submitted
+        applied_path = self.results['cases'][name + '-rulesets']['applied']
+        applied = json.loads(self.ruleset_files[applied_path])
+        icmp_rule = next(item['rule'] for item in applied['nftables']
+                         if item.get('rule', {}).get('comment') ==
+                         'manyfw-exception-v1-icmpv6-control')
+        icmp_rule['expr'][0]['match']['right']['set'].pop()
+        self.ruleset_files[applied_path] = json.dumps(applied).encode()
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('invalid default-deny exception expression' in blocker
+                            for blocker in result['blockers']))
+
+    def test_exception_expression_rejects_unexpected_object_fields(self):
+        name = 'outbound-return-default-deny'
+        submitted_path = self.results['cases'][name + '-submitted-json']
+        submitted = json.loads(self.ruleset_files[submitted_path])
+        loopback = next(command['add']['rule'] for command in submitted['nftables']
+                        if command.get('add', {}).get('rule', {}).get('comment') ==
+                        'manyfw-exception-v1-loopback')
+        loopback['expr'][0]['log'] = {'prefix': 'unexpected'}
+        self.ruleset_files[submitted_path] = json.dumps(submitted).encode()
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('invalid default-deny exception expression' in blocker
+                            for blocker in result['blockers']))
+
+        applied_path = self.results['cases'][name + '-rulesets']['applied']
+        applied = json.loads(self.ruleset_files[applied_path])
+        established = next(item['rule'] for item in applied['nftables']
+                          if item.get('rule', {}).get('comment') ==
+                          'manyfw-exception-v1-established-related')
+        established['expr'][0]['match']['unexpected'] = True
+        self.ruleset_files[applied_path] = json.dumps(applied).encode()
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('invalid default-deny exception expression' in blocker
+                            for blocker in result['blockers']))
+
+    def test_neighbor_proof_requires_the_target_specific_solicited_node_address(self):
+        nd_events = self.results['cases'][
+            'icmpv6-neighbor-discovery-default-deny']['wire_events']
+        nd_events[0]['destination'] = 'ff02::1:ff00:2'
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertFalse(acceptance.ipv6_equal('ff02::1:ff00:2', 'ff02::1:ff00:1'))
+        self.assertTrue(acceptance.ipv6_equal('fd24::2', 'fd24:0::2'))
 
     def test_every_bad_recovery_status_blocks_even_with_eligible_true(self):
         for name in acceptance.RECOVERY:
@@ -358,7 +506,9 @@ class AcceptanceTests(unittest.TestCase):
                         'crates/demo/policy.template'):
             with self.subTest(missing=missing):
                 for root in (self.recovery, self.packet):
-                    self.write(root, 'source-manifest.json', {'contract_version': acceptance.CONTRACT,
+                    contract = (acceptance.RECOVERY_CONTRACT if root == self.recovery
+                                else acceptance.PACKET_CONTRACT)
+                    self.write(root, 'source-manifest.json', {'contract_version': contract,
                                'sources': [{'path': p, 'sha256': 'a' * 64}
                                            for p in self.inventory if p != missing]})
                 self.checksums()
