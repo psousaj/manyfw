@@ -99,6 +99,21 @@ class AcceptanceTests(unittest.TestCase):
         self.results['cases']['default-Reject'] = {
             'stage': 'apply', 'returncode': 2, 'error': 'default Reject is unsupported',
             'before': {'nftables': []}, 'after': {'nftables': []}}
+        legacy_diagnostic = (
+            'backend: allow rule issue24-packet conflicts with foreign rule table '
+            'iptables-legacy/filter chain INPUT hook Input priority unknown handle unknown '
+            'owner unknown; resolve the foreign rule in its owning tool'
+        )
+        self.results['cases']['iptables-legacy-active-refusal'] = {
+            'stage': 'apply',
+            'returncode': 1,
+            'error': json.dumps({'diagnostic': legacy_diagnostic}),
+            'before': {'nftables': []},
+            'after': {'nftables': []},
+            'legacy_tables': 'filter\n',
+            'legacy_dump': '*filter\n[0:0] -A INPUT -p tcp -m tcp --dport 65434 -j DROP\nCOMMIT\n',
+            'legacy_dump_after': '*filter\n[0:0] -A INPUT -p tcp -m tcp --dport 65434 -j DROP\nCOMMIT\n',
+        }
         foreign_state = {'nftables': [
             {'table': {'family': 'inet', 'name': 'm24foreign'}},
             {'chain': {'family': 'inet', 'table': 'm24foreign', 'name': 'input'}},
@@ -240,7 +255,7 @@ class AcceptanceTests(unittest.TestCase):
                  for priority in (-400, 100) for verdict in ('accept', 'drop')}
         self.assertTrue(cases <= acceptance.packet_cases())
         self.assertEqual(len(cases), 8)
-        self.assertEqual(len(acceptance.packet_cases()), 107)
+        self.assertEqual(len(acceptance.packet_cases()), 108)
         self.assertTrue(all(acceptance.expected_outcome(case) == 'drop' for case in cases))
 
     def test_success_receipt_never_authorizes_production(self):
@@ -262,6 +277,52 @@ class AcceptanceTests(unittest.TestCase):
         result = self.result()
         self.assertFalse(result['generic_linux_accepted'])
         self.assertTrue(any('pre-mutation refusal' in blocker for blocker in result['blockers']))
+
+    def test_active_legacy_evidence_requires_refusal_without_mutation(self):
+        self.assertTrue(self.result()['evidence_gates_passed'])
+        self.results['cases']['iptables-legacy-active-refusal']['legacy_dump_after'] = (
+            '*filter\n[1:60] -A INPUT -p tcp -m tcp --dport 65434 -j DROP\nCOMMIT\n'
+        )
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('active iptables-legacy conflict was not refused'
+                            in blocker for blocker in result['blockers']))
+
+    def test_active_legacy_evidence_requires_rule_not_comment_text(self):
+        value = self.results['cases']['iptables-legacy-active-refusal']
+        value['legacy_dump'] = '*filter\n# expected -A INPUT -p tcp -m tcp --dport 65434 -j DROP\nCOMMIT\n'
+        value['legacy_dump_after'] = value['legacy_dump']
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('active iptables-legacy conflict was not refused'
+                            in blocker for blocker in result['blockers']))
+
+    def test_active_legacy_evidence_requires_valid_counters(self):
+        value = self.results['cases']['iptables-legacy-active-refusal']
+        value['legacy_dump'] = (
+            '*filter\n[not-counters] -A INPUT -p tcp -m tcp --dport 65434 -j DROP\nCOMMIT\n'
+        )
+        value['legacy_dump_after'] = value['legacy_dump']
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('active iptables-legacy conflict was not refused'
+                            in blocker for blocker in result['blockers']))
+
+    def test_active_legacy_evidence_requires_filter_table_rule(self):
+        value = self.results['cases']['iptables-legacy-active-refusal']
+        value['legacy_dump'] = (
+            '*nat\n[0:0] -A INPUT -p tcp -m tcp --dport 65434 -j DROP\n'
+            'COMMIT\n*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n'
+        )
+        value['legacy_dump_after'] = value['legacy_dump']
+        self.sync_packet()
+        result = self.result()
+        self.assertFalse(result['evidence_gates_passed'])
+        self.assertTrue(any('active iptables-legacy conflict was not refused'
+                            in blocker for blocker in result['blockers']))
 
     def test_exception_expressions_are_verified_in_submitted_and_applied_rulesets(self):
         name = 'outbound-return-default-deny'

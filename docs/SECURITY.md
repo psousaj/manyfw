@@ -13,8 +13,13 @@ development-host firewall mutation remain unauthorized.
 
 Backend observation is separate from `discover`. Linux firewall listings use
 fixed read-only argument vectors (`nft -j list ruleset`, `iptables-save -c`,
-and `ip6tables-save -c`); no shell is invoked. Missing tools, permission failures,
-partial families, and unrecognized state remain unknown and block applicability.
+`ip6tables-save -c`, and, only when kernel legacy table names are present,
+`iptables-legacy-save -c` / `ip6tables-legacy-save -c`); `/proc/net` legacy
+table-name reads are also read-only. No shell is invoked. Missing tools,
+permission failures, partial families, and unrecognized active state remain
+unknown and block applicability.
+Readable iptables-legacy rules are merged into foreign-rule conflict analysis;
+the adapter never writes through either iptables frontend.
 Chain names and comments alone do not establish ownership or Docker mode.
 Conflict analysis retains malformed nft rule records and rules from unsupported
 address families as unknown candidates, and uses the first terminal verdict in

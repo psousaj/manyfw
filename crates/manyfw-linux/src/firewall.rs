@@ -24,6 +24,19 @@ pub enum FirewallObservationError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LegacyFirewallObservation {
+    pub rules: Vec<ObservedFirewallRule>,
+    pub limitations: Vec<String>,
+}
+
+/// Observe active xtables-legacy state using kernel table names and fixed
+/// read-only save commands. Unknown active state is returned as a limitation.
+pub fn observe_legacy_firewall() -> LegacyFirewallObservation {
+    let (rules, limitations) = collect_iptables_legacy(&ProcessRunner);
+    LegacyFirewallObservation { rules, limitations }
+}
+
 trait ReadOnlyRunner {
     fn run(
         &self,
@@ -31,6 +44,13 @@ trait ReadOnlyRunner {
         args: &[&str],
     ) -> Result<Vec<u8>, FirewallObservationError>;
     fn kernel_release(&self) -> Result<String, FirewallObservationError>;
+    fn legacy_table_names(
+        &self,
+        family: AddressFamily,
+    ) -> Result<Option<Vec<String>>, FirewallObservationError> {
+        let _ = family;
+        Ok(None)
+    }
 }
 
 struct ProcessRunner;
@@ -57,6 +77,31 @@ impl ReadOnlyRunner for ProcessRunner {
             .map_err(|_| FirewallObservationError::Unavailable {
                 program: "/proc/sys/kernel/osrelease",
             })
+    }
+
+    fn legacy_table_names(
+        &self,
+        family: AddressFamily,
+    ) -> Result<Option<Vec<String>>, FirewallObservationError> {
+        let path = match family {
+            AddressFamily::Ipv4 => "/proc/net/ip_tables_names",
+            AddressFamily::Ipv6 => "/proc/net/ip6_tables_names",
+        };
+        match std::fs::read_to_string(path) {
+            Ok(contents) => Ok(Some(
+                contents
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(FirewallObservationError::PermissionDenied)
+            }
+            Err(_) => Err(FirewallObservationError::Unavailable { program: path }),
+        }
     }
 }
 
@@ -120,6 +165,7 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
         .run("ip6tables", &["--version"])
         .ok()
         .and_then(|value| parse_version(&value));
+    let (legacy_rules, mut limitations) = collect_iptables_legacy(runner);
     let mut iptables_material = Vec::new();
     if let Ok(bytes) = &ip4 {
         iptables_material.extend_from_slice(b"ipv4\0");
@@ -130,8 +176,7 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
         iptables_material.extend_from_slice(bytes);
     }
     let mut observations = Vec::new();
-    let mut limitations = Vec::new();
-    let mut collection_complete = true;
+    let mut collection_complete = limitations.is_empty();
     let mut family_completeness = BTreeMap::from([
         (
             (BackendKind::Iptables, AddressFamily::Ipv4),
@@ -147,6 +192,7 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
     match nft {
         Ok(bytes) => match parse_nftables(&bytes) {
             Some(mut value) => {
+                value.rules.extend(legacy_rules);
                 value.version = nft_version.clone();
                 value.generation = ruleset_generation(&bytes);
                 limitations.extend(value.limitations.iter().cloned());
@@ -261,6 +307,323 @@ fn ruleset_generation(bytes: &[u8]) -> u64 {
             .try_into()
             .expect("SHA-256 digest has at least 8 bytes"),
     )
+}
+
+fn collect_iptables_legacy(
+    runner: &dyn ReadOnlyRunner,
+) -> (Vec<ObservedFirewallRule>, Vec<String>) {
+    let mut rules = Vec::new();
+    let mut limitations = Vec::new();
+    for (family, program) in [
+        (AddressFamily::Ipv4, "iptables-legacy-save"),
+        (AddressFamily::Ipv6, "ip6tables-legacy-save"),
+    ] {
+        let table_names = match runner.legacy_table_names(family) {
+            Ok(None) => continue,
+            Ok(Some(names)) if names.is_empty() => continue,
+            Ok(Some(names)) => names,
+            Err(error) => {
+                limitations.push(format!(
+                    "legacy {} table activity is unknown: {}",
+                    family_label(family),
+                    error_label(error)
+                ));
+                continue;
+            }
+        };
+        match runner.run(program, &["-c"]) {
+            Ok(bytes) => match parse_iptables_legacy(&bytes, family, &table_names) {
+                Some(mut observed) => rules.append(&mut observed),
+                None => limitations.push(format!(
+                    "{program} state is active but unreadable or unparseable"
+                )),
+            },
+            Err(error) => limitations.push(format!(
+                "active legacy {} rules could not be read: {}",
+                family_label(family),
+                error_label(error)
+            )),
+        }
+    }
+    (rules, limitations)
+}
+
+fn family_label(family: AddressFamily) -> &'static str {
+    match family {
+        AddressFamily::Ipv4 => "IPv4",
+        AddressFamily::Ipv6 => "IPv6",
+    }
+}
+
+fn parse_iptables_legacy(
+    bytes: &[u8],
+    family: AddressFamily,
+    active_tables: &[String],
+) -> Option<Vec<ObservedFirewallRule>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut current_table: Option<&str> = None;
+    let mut seen_tables = std::collections::BTreeSet::new();
+    let mut committed_tables = std::collections::BTreeSet::new();
+    let mut rules = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(table) = line.strip_prefix('*') {
+            if table.is_empty() || current_table.is_some() {
+                return None;
+            }
+            current_table = Some(table);
+            seen_tables.insert(table.to_owned());
+            continue;
+        }
+        if line == "COMMIT" {
+            let table = current_table.take()?;
+            committed_tables.insert(table.to_owned());
+            continue;
+        }
+        if let Some(chain) = line.strip_prefix(':') {
+            let mut fields = chain.split_whitespace();
+            let name = fields.next()?;
+            let policy = fields.next()?;
+            let table = current_table?;
+            if policy == "DROP" {
+                let hook = legacy_hook(name);
+                rules.push(ObservedFirewallRule {
+                    family,
+                    table: format!("iptables-legacy/{table}"),
+                    chain: name.to_owned(),
+                    hook,
+                    priority: None,
+                    handle: None,
+                    owner: Ownership::Unknown,
+                    verdict: ObservedRuleVerdict::Drop,
+                    source_subnets: Vec::new(),
+                    destination_subnets: Vec::new(),
+                    protocol: None,
+                    destination_ports: Vec::new(),
+                    input_interfaces: Vec::new(),
+                    address_family: Some(family),
+                    analyzable: hook != Hook::Unknown,
+                });
+            } else if !matches!(policy, "ACCEPT" | "-") {
+                return None;
+            }
+            continue;
+        }
+        if line.starts_with('[') || line.starts_with("-A ") || line.starts_with("--append ") {
+            let table = current_table?;
+            let tokens = line
+                .split_whitespace()
+                .filter(|token| {
+                    !(token.starts_with('[') && token.ends_with(']') && token.contains(':'))
+                })
+                .collect::<Vec<_>>();
+            rules.push(parse_iptables_legacy_rule(&tokens, table, family)?);
+            continue;
+        }
+        return None;
+    }
+    if current_table.is_some()
+        || active_tables
+            .iter()
+            .any(|table| !seen_tables.contains(table) || !committed_tables.contains(table))
+    {
+        return None;
+    }
+    Some(rules)
+}
+
+fn parse_iptables_legacy_rule(
+    tokens: &[&str],
+    table: &str,
+    family: AddressFamily,
+) -> Option<ObservedFirewallRule> {
+    let append = tokens
+        .iter()
+        .position(|token| *token == "-A" || *token == "--append")?;
+    let chain = *tokens.get(append + 1)?;
+    let hook = legacy_hook(chain);
+    let mut source_subnets = Vec::new();
+    let mut destination_subnets = Vec::new();
+    let mut protocol = None;
+    let mut destination_ports = Vec::new();
+    let mut input_interfaces = Vec::new();
+    let mut verdict = ObservedRuleVerdict::Unknown;
+    let mut analyzable = hook != Hook::Unknown;
+    let mut saw_target = false;
+    let mut negated = false;
+    let mut comment_match = false;
+    let mut index = append + 2;
+
+    while index < tokens.len() {
+        let token = tokens[index];
+        if token == "!" {
+            negated = true;
+            analyzable = false;
+            index += 1;
+            continue;
+        }
+        let next = tokens.get(index + 1).copied();
+        match token {
+            "-j" | "--jump" => {
+                if saw_target {
+                    return None;
+                }
+                let target = next?;
+                verdict = match target.to_ascii_uppercase().as_str() {
+                    "DROP" => ObservedRuleVerdict::Drop,
+                    "REJECT" => ObservedRuleVerdict::Reject,
+                    "ACCEPT" => ObservedRuleVerdict::Accept,
+                    _ => ObservedRuleVerdict::Unknown,
+                };
+                if verdict == ObservedRuleVerdict::Unknown {
+                    analyzable = false;
+                }
+                saw_target = true;
+                index += 2;
+            }
+            "-s" | "--source" | "-d" | "--destination" => {
+                let value = next?;
+                let network = parse_legacy_network(value);
+                if let Some(network) = network.filter(|network| {
+                    matches!(
+                        (family, network),
+                        (AddressFamily::Ipv4, ipnet::IpNet::V4(_))
+                            | (AddressFamily::Ipv6, ipnet::IpNet::V6(_))
+                    )
+                }) {
+                    if !negated {
+                        if token == "-s" || token == "--source" {
+                            source_subnets.push(network);
+                        } else {
+                            destination_subnets.push(network);
+                        }
+                    }
+                } else {
+                    analyzable = false;
+                }
+                negated = false;
+                index += 2;
+            }
+            "-p" | "--protocol" => {
+                let value = next?;
+                if !negated {
+                    protocol = match value.to_ascii_lowercase().as_str() {
+                        "tcp" | "6" => Some(Protocol::Tcp),
+                        "udp" | "17" => Some(Protocol::Udp),
+                        "icmp" | "1" if family == AddressFamily::Ipv4 => Some(Protocol::Icmp),
+                        "icmpv6" | "ipv6-icmp" | "58" if family == AddressFamily::Ipv6 => {
+                            Some(Protocol::Icmpv6)
+                        }
+                        "all" | "0" => None,
+                        _ => {
+                            analyzable = false;
+                            None
+                        }
+                    };
+                }
+                negated = false;
+                index += 2;
+            }
+            "--dport" | "--destination-port" => {
+                let value = next?;
+                if !negated {
+                    if let Some(range) = parse_legacy_port_range(value) {
+                        destination_ports.push(range);
+                    } else {
+                        analyzable = false;
+                    }
+                }
+                negated = false;
+                index += 2;
+            }
+            "-i" | "--in-interface" => {
+                let value = next?;
+                if !negated && !value.contains(['+', '*']) {
+                    input_interfaces.push(value.to_owned());
+                } else {
+                    analyzable = false;
+                }
+                negated = false;
+                index += 2;
+            }
+            "-m" | "--match" => {
+                let module = next?;
+                comment_match = module == "comment";
+                if !matches!(
+                    (module, protocol),
+                    ("tcp", Some(Protocol::Tcp))
+                        | ("udp", Some(Protocol::Udp))
+                        | ("icmp", Some(Protocol::Icmp))
+                        | ("icmp6", Some(Protocol::Icmpv6))
+                        | ("comment", _)
+                ) {
+                    analyzable = false;
+                }
+                index += 2;
+            }
+            "--comment" if comment_match => {
+                let _ = next?;
+                index += 2;
+            }
+            _ => {
+                // Extensions, inversion, and options outside the proven
+                // predicate subset stay possible conflicts, never exact rules.
+                analyzable = false;
+                index += 1;
+            }
+        }
+    }
+    if !saw_target {
+        return None;
+    }
+    Some(ObservedFirewallRule {
+        family,
+        table: format!("iptables-legacy/{table}"),
+        chain: chain.to_owned(),
+        hook,
+        priority: None,
+        handle: None,
+        owner: Ownership::Unknown,
+        verdict,
+        source_subnets,
+        destination_subnets,
+        protocol,
+        destination_ports,
+        input_interfaces,
+        address_family: Some(family),
+        analyzable,
+    })
+}
+
+fn legacy_hook(chain: &str) -> Hook {
+    match chain {
+        "PREROUTING" => Hook::Prerouting,
+        "INPUT" => Hook::Input,
+        "FORWARD" => Hook::Forward,
+        "POSTROUTING" => Hook::Postrouting,
+        _ => Hook::Unknown,
+    }
+}
+
+fn parse_legacy_network(value: &str) -> Option<ipnet::IpNet> {
+    value
+        .parse()
+        .ok()
+        .or_else(|| value.parse::<IpAddr>().ok().map(ipnet::IpNet::from))
+}
+
+fn parse_legacy_port_range(value: &str) -> Option<PortRange> {
+    let (start, end) = value
+        .split_once(':')
+        .or_else(|| value.split_once('-'))
+        .unwrap_or((value, value));
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    (start <= end).then_some(PortRange { start, end })
 }
 
 fn parse_version(bytes: &[u8]) -> Option<String> {
@@ -914,6 +1277,67 @@ mod tests {
         }
     }
 
+    struct LegacyRunner {
+        legacy_tables: Vec<String>,
+        legacy_ipv6_tables: Vec<String>,
+        legacy_read_fails: bool,
+        legacy_malformed: bool,
+    }
+
+    impl ReadOnlyRunner for LegacyRunner {
+        fn run(
+            &self,
+            program: &'static str,
+            args: &[&str],
+        ) -> Result<Vec<u8>, FirewallObservationError> {
+            match program {
+                "nft" if args == ["-j", "list", "ruleset"] => {
+                    Ok(br#"{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","type":"filter","hook":"input","prio":0}}]}"#.to_vec())
+                }
+                "nft" if args == ["--version"] => Ok(b"nftables v1.1.3".to_vec()),
+                "iptables" | "ip6tables" if args == ["--version"] => {
+                    Ok(b"iptables v1.8.11".to_vec())
+                }
+                "iptables-save" | "ip6tables-save" if args == ["-c"] => {
+                    Ok(b"# generated\n:INPUT ACCEPT [0:0]\nCOMMIT\n".to_vec())
+                }
+                "iptables-legacy-save" | "ip6tables-legacy-save"
+                    if args == ["-c"] && self.legacy_read_fails =>
+                {
+                    Err(FirewallObservationError::PermissionDenied)
+                }
+                "iptables-legacy-save" | "ip6tables-legacy-save"
+                    if args == ["-c"] && self.legacy_malformed =>
+                {
+                    Ok(b"*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -j DROP\n".to_vec())
+                }
+                "iptables-legacy-save" if args == ["-c"] => Ok(
+                    b"# generated\n*filter\n:INPUT ACCEPT [0:0]\n[1:60] -A INPUT -p tcp --dport 443 -j DROP\nCOMMIT\n"
+                        .to_vec(),
+                ),
+                "ip6tables-legacy-save" if args == ["-c"] => Ok(
+                    b"# generated\n*filter\n:INPUT ACCEPT [0:0]\n[1:60] -A INPUT -p tcp -m tcp --dport 443 -j DROP\nCOMMIT\n"
+                        .to_vec(),
+                ),
+                _ => Err(FirewallObservationError::Unavailable { program }),
+            }
+        }
+
+        fn kernel_release(&self) -> Result<String, FirewallObservationError> {
+            Ok("6.8.0-test".into())
+        }
+
+        fn legacy_table_names(
+            &self,
+            family: AddressFamily,
+        ) -> Result<Option<Vec<String>>, FirewallObservationError> {
+            Ok(Some(match family {
+                AddressFamily::Ipv4 => self.legacy_tables.clone(),
+                AddressFamily::Ipv6 => self.legacy_ipv6_tables.clone(),
+            }))
+        }
+    }
+
     #[test]
     fn nftables_observation_keeps_unlabelled_ownership_unknown_and_reads_hook_priority() {
         let data = br#"{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","type":"filter","hook":"input","prio":0,"policy":"accept"}},{"chain":{"family":"inet","table":"filter","name":"forward","type":"filter","hook":"forward","prio":10,"policy":"accept"}}]}"#;
@@ -1246,6 +1670,201 @@ mod tests {
         assert!(parse_iptables(b"# generated\n", AddressFamily::Ipv4).is_none());
         assert!(
             parse_iptables(b"# generated\n:INPUT ACCEPT [0:0]\n", AddressFamily::Ipv4).is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_rules_are_normalized_and_unknown_extensions_remain_possible_conflicts() {
+        let rules = parse_iptables_legacy(
+            b"# generated by iptables-save v1.8.11\n*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:USER - [0:0]\n[4:240] -A INPUT -s 192.0.2.0/24 -d 198.51.100.9 -p tcp -m tcp --dport 443 -i eth0 -j DROP\n[0:0] -A INPUT -p tcp -m conntrack --ctstate NEW -j REJECT\n[0:0] -A FORWARD -p udp --dport 5353 -j ACCEPT\n[0:0] -A USER -j DROP\nCOMMIT\n",
+            AddressFamily::Ipv4,
+            &["filter".into()],
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 4);
+        let drop = &rules[0];
+        assert_eq!(drop.family, AddressFamily::Ipv4);
+        assert_eq!(drop.table, "iptables-legacy/filter");
+        assert_eq!(drop.chain, "INPUT");
+        assert_eq!(drop.hook, Hook::Input);
+        assert_eq!(drop.owner, Ownership::Unknown);
+        assert_eq!(drop.verdict, ObservedRuleVerdict::Drop);
+        assert_eq!(drop.source_subnets, vec!["192.0.2.0/24".parse().unwrap()]);
+        assert_eq!(
+            drop.destination_subnets,
+            vec!["198.51.100.9/32".parse().unwrap()]
+        );
+        assert_eq!(drop.protocol, Some(Protocol::Tcp));
+        assert_eq!(
+            drop.destination_ports,
+            vec![PortRange {
+                start: 443,
+                end: 443
+            }]
+        );
+        assert_eq!(drop.input_interfaces, vec!["eth0"]);
+        assert!(drop.analyzable);
+
+        assert_eq!(rules[1].verdict, ObservedRuleVerdict::Reject);
+        assert!(!rules[1].analyzable);
+        assert_eq!(rules[2].verdict, ObservedRuleVerdict::Accept);
+        assert_eq!(rules[3].hook, Hook::Unknown);
+        assert_eq!(rules[3].verdict, ObservedRuleVerdict::Drop);
+        assert!(!rules[3].analyzable);
+    }
+
+    #[test]
+    fn active_legacy_dump_missing_or_corrupt_state_fails_closed() {
+        assert!(
+            parse_iptables_legacy(
+                b"*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n",
+                AddressFamily::Ipv4,
+                &["filter".into(), "nat".into()],
+            )
+            .is_none()
+        );
+        assert!(
+            parse_iptables_legacy(
+                b"*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -j DROP\n",
+                AddressFamily::Ipv4,
+                &["filter".into()],
+            )
+            .is_none()
+        );
+        assert!(
+            parse_iptables_legacy(
+                b"*filter\n:INPUT ACCEPT [0:0]\n[0:0] -A INPUT -j DROP\nCOMMIT\n",
+                AddressFamily::Ipv6,
+                &["filter".into()],
+            )
+            .unwrap()[0]
+                .family
+                == AddressFamily::Ipv6
+        );
+    }
+
+    #[test]
+    fn legacy_input_and_forward_drop_policies_are_observed_as_unconditional_drops() {
+        let rules = parse_iptables_legacy(
+            b"*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n",
+            AddressFamily::Ipv4,
+            &["filter".into()],
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].hook, Hook::Input);
+        assert_eq!(rules[1].hook, Hook::Forward);
+        assert!(
+            rules
+                .iter()
+                .all(|rule| { rule.verdict == ObservedRuleVerdict::Drop && rule.analyzable })
+        );
+    }
+
+    #[test]
+    fn active_legacy_drop_is_added_to_nft_conflict_observation() {
+        let observed = observe_with(&LegacyRunner {
+            legacy_tables: vec!["filter".into()],
+            legacy_ipv6_tables: vec!["filter".into()],
+            legacy_read_fails: false,
+            legacy_malformed: false,
+        });
+        let nft = observed
+            .observations
+            .iter()
+            .find(|value| value.backend == BackendKind::Nftables)
+            .unwrap();
+        assert_eq!(nft.rules.len(), 2);
+        assert!(nft.rules.iter().all(|rule| {
+            rule.table == "iptables-legacy/filter"
+                && rule.chain == "INPUT"
+                && rule.hook == Hook::Input
+                && rule.verdict == ObservedRuleVerdict::Drop
+                && rule.analyzable
+        }));
+        assert!(
+            nft.rules
+                .iter()
+                .any(|rule| rule.family == AddressFamily::Ipv4)
+        );
+        assert!(
+            nft.rules
+                .iter()
+                .any(|rule| rule.family == AddressFamily::Ipv6)
+        );
+        assert_eq!(observed.complete, CapabilityState::Supported);
+        assert!(
+            !observed
+                .limitations
+                .iter()
+                .any(|value| value.contains("legacy"))
+        );
+    }
+
+    #[test]
+    fn unreadable_active_legacy_state_marks_observation_unknown() {
+        let observed = observe_with(&LegacyRunner {
+            legacy_tables: vec!["filter".into()],
+            legacy_ipv6_tables: Vec::new(),
+            legacy_read_fails: true,
+            legacy_malformed: false,
+        });
+        assert_eq!(observed.complete, CapabilityState::Unknown);
+        assert!(
+            observed
+                .limitations
+                .iter()
+                .any(|value| value.contains("active legacy IPv4 rules could not be read"))
+        );
+        let nft = observed
+            .capability_observations()
+            .into_iter()
+            .find(|value| value.observation.backend == BackendKind::Nftables)
+            .unwrap();
+        assert!(
+            nft.observation
+                .limitations
+                .iter()
+                .any(|value| value.contains("active legacy IPv4 rules could not be read"))
+        );
+    }
+
+    #[test]
+    fn absent_legacy_tables_produce_no_legacy_rules_or_diagnostics() {
+        let observed = observe_with(&LegacyRunner {
+            legacy_tables: Vec::new(),
+            legacy_ipv6_tables: Vec::new(),
+            legacy_read_fails: false,
+            legacy_malformed: false,
+        });
+        assert!(
+            !observed
+                .limitations
+                .iter()
+                .any(|value| value.contains("legacy"))
+        );
+        let nft = observed
+            .observations
+            .iter()
+            .find(|value| value.backend == BackendKind::Nftables)
+            .unwrap();
+        assert!(nft.rules.is_empty());
+    }
+
+    #[test]
+    fn malformed_active_legacy_dump_marks_observation_unknown() {
+        let observed = observe_with(&LegacyRunner {
+            legacy_tables: vec!["filter".into()],
+            legacy_ipv6_tables: Vec::new(),
+            legacy_read_fails: false,
+            legacy_malformed: true,
+        });
+        assert_eq!(observed.complete, CapabilityState::Unknown);
+        assert!(
+            observed
+                .limitations
+                .iter()
+                .any(|value| value.contains("active but unreadable or unparseable"))
         );
     }
 

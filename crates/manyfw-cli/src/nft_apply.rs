@@ -235,22 +235,13 @@ impl NftBackend {
         if defaults.is_empty() {
             return Err(backend_error("plan must define an explicit input default"));
         }
-        let serialized = serde_json::to_vec(&ruleset).map_err(|error| {
-            backend_error(&format!("cannot encode observed nftables state: {error}"))
-        })?;
-        let foreign_rules = manyfw_linux::parse_nft_rule_observations(&serialized)
-            .ok_or_else(|| backend_error("cannot analyze current nftables rule state"))?;
         let planned_operations = plan
             .operations
             .iter()
             .filter_map(|operation| operation.planned_operation.clone())
             .collect::<Vec<_>>();
-        let conflicts =
-            manyfw_core::backend::analyze_foreign_rules(&planned_operations, &foreign_rules);
-        if let Some(conflict) = conflicts.blocking.first() {
-            return Err(backend_error(&conflict.detail));
-        }
-        Ok(())
+        let legacy = manyfw_linux::observe_legacy_firewall();
+        validate_foreign_rules(&ruleset, &planned_operations, &legacy)
     }
 
     pub(crate) fn transaction_fingerprint(&self) -> TxResult<String> {
@@ -320,6 +311,30 @@ impl NftBackend {
             document: build_apply_document(plan, replace_owned_table)?,
         })
     }
+}
+
+fn validate_foreign_rules(
+    ruleset: &serde_json::Value,
+    planned_operations: &[PlanOperation],
+    legacy: &manyfw_linux::LegacyFirewallObservation,
+) -> TxResult<()> {
+    if !legacy.limitations.is_empty() {
+        return Err(backend_error(&format!(
+            "legacy firewall state is unknown: {}",
+            legacy.limitations.join("; ")
+        )));
+    }
+    let serialized = serde_json::to_vec(ruleset).map_err(|error| {
+        backend_error(&format!("cannot encode observed nftables state: {error}"))
+    })?;
+    let mut foreign_rules = manyfw_linux::parse_nft_rule_observations(&serialized)
+        .ok_or_else(|| backend_error("cannot analyze current nftables rule state"))?;
+    foreign_rules.extend(legacy.rules.iter().cloned());
+    let conflicts = manyfw_core::backend::analyze_foreign_rules(planned_operations, &foreign_rules);
+    if let Some(conflict) = conflicts.blocking.first() {
+        return Err(backend_error(&conflict.detail));
+    }
+    Ok(())
 }
 
 fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> TxResult<String> {
@@ -2041,6 +2056,85 @@ mod tests {
 
         let error = reject_forward_allow(&operation).unwrap_err();
         assert!(error.to_string().contains("FORWARD allows are unsupported"));
+    }
+
+    #[test]
+    fn live_preflight_conflicts_with_normalized_legacy_rules() {
+        let (plan, _, _) = interrupted_fixture();
+        let mut operations = plan
+            .operations
+            .iter()
+            .filter_map(|entry| entry.planned_operation.clone())
+            .collect::<Vec<_>>();
+        let operation = operations
+            .iter_mut()
+            .find(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            .unwrap();
+        let PlanOperation::EnsureRule { action, .. } = operation else {
+            unreachable!()
+        };
+        *action = Action::Allow;
+
+        let legacy = manyfw_linux::LegacyFirewallObservation {
+            rules: vec![manyfw_core::backend::ObservedFirewallRule {
+                family: AddressFamily::Ipv4,
+                table: "iptables-legacy/filter".into(),
+                chain: "INPUT".into(),
+                hook: manyfw_core::backend::Hook::Input,
+                priority: None,
+                handle: None,
+                owner: manyfw_core::backend::Ownership::Unknown,
+                verdict: manyfw_core::backend::ObservedRuleVerdict::Drop,
+                source_subnets: vec!["127.0.0.1/32".parse().unwrap()],
+                destination_subnets: Vec::new(),
+                protocol: Some(Protocol::Tcp),
+                destination_ports: vec![manyfw_core::PortRange {
+                    start: 12345,
+                    end: 12345,
+                }],
+                input_interfaces: Vec::new(),
+                address_family: Some(AddressFamily::Ipv4),
+                analyzable: true,
+            }],
+            limitations: Vec::new(),
+        };
+        let error =
+            validate_foreign_rules(&serde_json::json!({"nftables":[]}), &operations, &legacy)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("allow rule deny-loopback conflicts")
+        );
+        assert!(error.to_string().contains("iptables-legacy/filter"));
+        assert!(error.to_string().contains("resolve the foreign rule"));
+    }
+
+    #[test]
+    fn unknown_legacy_state_blocks_live_preflight() {
+        let (plan, _, _) = interrupted_fixture();
+        let operations = plan
+            .operations
+            .iter()
+            .filter_map(|entry| entry.planned_operation.clone())
+            .collect::<Vec<_>>();
+        let legacy = manyfw_linux::LegacyFirewallObservation {
+            rules: Vec::new(),
+            limitations: vec!["active legacy IPv4 rules could not be read".into()],
+        };
+        let error =
+            validate_foreign_rules(&serde_json::json!({"nftables":[]}), &operations, &legacy)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("legacy firewall state is unknown")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("active legacy IPv4 rules could not be read")
+        );
     }
 
     #[test]
