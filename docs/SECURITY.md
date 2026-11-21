@@ -96,6 +96,7 @@ Privileged implementation must only ship after network namespace/VM integration 
 4. Atomic updates within backend guarantees; no promise of global atomicity across managers.
 5. No unapproved opening of new ingress; reject partial backend support.
 6. Tests for remote SSH, Docker legacy and native nftables, IPv6 and concurrent rule modifications, plus the generic packet-verdict contract in [issue #24](specs/issue-24-linux-enforcement.md).
+7. Under [ADR-0006](adr/0006-nftables-only-enforcement-backend.md): coexistence evidence for firewalld (nftables backend), UFW over iptables-nft, hosts with active iptables-legacy rules, and refusal of allows conflicting with foreign drops, before any support claim.
 
 The same contract separately retains real Tailscale change/interoperability
 coverage. External tailnet access is not mandatory for generic Linux acceptance;

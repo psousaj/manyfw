@@ -444,8 +444,9 @@ stable.
 - Runtime expansion of interface globs.
 - ICMP type/code filters.
 - General-purpose nftables or iptables translation. The experimental nftables
-  adapter supports only the bounded operation allowlist documented above; no
-  iptables adapter is implemented.
+  adapter supports only the bounded operation allowlist documented above. Per
+  ADR-0006, nftables is the only enforcement backend; iptables is observed
+  only and will not gain an execution adapter.
 - General-purpose or host-enabled enforcement. The experimental nftables
   `apply`, `confirm`, rollback, and recovery path is limited to the reviewed
   disposable-KVM scope described in the security and architecture documents;

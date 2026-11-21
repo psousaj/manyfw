@@ -8,6 +8,34 @@ disposition are recorded below. This is not independent review, production
 authorization, or authorization to mutate the development/WSL host. ADR-0004
 remains in force.
 
+## Amendment — nftables-only backend and conflict refusal (2026-11-21, proposed)
+
+Owner decisions recorded in [ADR-0006](0006-nftables-only-enforcement-backend.md)
+and the [nftables-by-default spec](../specs/nftables-by-default.md) amend this
+ADR. Until that work has KVM evidence and a clean Goal Architecture/Security
+review, the accepted scope below is unchanged and the items here are not
+enabled.
+
+- **Shared input hook is the target.** Foreign filter base chains on the input
+  hook are compatible; the historical clean-hook-only decision stays
+  superseded. Compatibility now additionally requires conflict analysis.
+- **Allow vs foreign drop refuses.** Allow never overrides foreign drop (as
+  already stated). Instead of only documenting it, plan reports each conflict
+  or possible conflict and Apply refuses the whole plan before mutation.
+- **iptables-legacy** rules are foreign: analysed when readable, otherwise
+  `unknown` and blocking.
+- **Default deny exceptions.** The managed default deny is preceded in the
+  owned chain by established/related, loopback ingress, and ICMPv6 neighbor
+  discovery/router advertisement accepts.
+- **FORWARD drop-only.** A new owned forward-hook chain (accept policy) carries
+  only drop rules for published Docker destinations, after an
+  established/related accept. FORWARD allows and drop policies remain
+  unsupported. Docker firewall mode is detected for explanation only; no
+  DOCKER-USER or Docker-owned table is written. This reverses the
+  "OUTPUT/FORWARD unsupported" limit for FORWARD drops only.
+- **Exclusive creation and JSON.** First Apply creates the table exclusively;
+  apply, checkpoint, and restore move to nftables JSON.
+
 ## Context and constraints
 
 ### Owner reconciliation — expanded target, reviewed

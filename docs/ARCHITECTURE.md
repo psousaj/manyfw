@@ -14,7 +14,7 @@ authorize production or claim protection for a host or unsupported packet path.
 - **CLI**: one executable. `check` validates policy, `discover` collects a snapshot, `audit` and `explain` consume saved snapshots, and `plan` summarizes policy intent.
 - **Docker adapter**: the CLI uses Bollard for read-only `list`/`inspect` operations over a local Unix socket and projects only allowlisted fields.
 - **Linux host adapter**: the separate `manyfw-linux` crate uses Netlink for interfaces, addresses, and routes, and Socket Diagnostics for TCP/UDP sockets. Read-only sysfs/procfs fallbacks are explicitly partial; the core contains only typed source contracts and normalization.
-- **Backends**: typed capability/feasibility planning in the core. The Linux adapter collects nftables and iptables listings using fixed, read-only invocations; collection failures and unverified mode/ownership remain unknown. ADR-0005 accepts a narrowly scoped nftables host-input adapter only for explicitly opted-in experimental use in disposable isolated QEMU/KVM guests; production deployment and development-host mutation remain unauthorized.
+- **Backends**: typed capability/feasibility planning in the core. nftables is the only enforcement backend ([ADR-0006](adr/0006-nftables-only-enforcement-backend.md)); iptables (legacy or nft compatibility) is observed only and never written, with no fallback. The Linux adapter collects nftables and iptables listings using fixed, read-only invocations; collection failures and unverified mode/ownership remain unknown. ADR-0005 accepts a narrowly scoped nftables host-input adapter only for explicitly opted-in experimental use in disposable isolated QEMU/KVM guests; production deployment and development-host mutation remain unauthorized.
 - **Transaction runner**: durable state-machine primitives and an independently supervised recovery worker retain wall-clock metadata and use boot-scoped monotonic deadlines; a boot change expires pending confirmation conservatively. ADR-0005 supplies a narrowly scoped experimental apply command with explicitly installed systemd or OpenRC service integration for disposable isolated QEMU/KVM guests only; neither is approved for production deployment. The owner-accepted v0.4.0 trust boundary treats unrestricted root as trusted and does not require a cryptographic identity per supervisor invocation. A root-authorized manual rollback remains available with the supervisor inactive, subject to all durable state, ownership, integrity, concurrency, and resource-verification guards; it does not replace the active supervisor required before Apply or for unattended recovery.
 
 ## Integration constraints
@@ -22,7 +22,9 @@ authorize production or claim protection for a host or unsupported packet path.
 The owner-approved technology-agnostic Linux target and exact supported-path
 acceptance live in [issue #24's contract](specs/issue-24-linux-enforcement.md).
 Within supported INPUT composition, deny must prevail over external accepts;
-allow cannot override external drops. The expanded packet suite and dedicated
+allow cannot override external drops. Under ADR-0006 a detected or possible
+foreign drop against a planned allow is reported by `plan` and refuses the
+whole Apply; ManyFW never edits foreign rules to resolve it. The expanded packet suite and dedicated
 runtime review are recorded in ADR-0005 for the bounded experimental subset;
 the historical clean-input-hook approval alone did not cover this change.
 OUTPUT/FORWARD remain unsupported. The experimental adapter supports explicitly

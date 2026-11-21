@@ -30,7 +30,7 @@ subsequently published and verified by its
 - [x] Publish `v0.2.0` with four Linux artifacts (x86_64/aarch64, GNU/musl), SHA-256 checksums, and packaged-artifact smoke tests ([release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0))
 
 ## v0.3.0 — Read-only Planner (published; remains read-only)
-- [x] Backend capability interface and nftables/iptables feasibility checks
+- [x] Backend capability interface and firewall backend feasibility checks
 - [x] Deterministic effective-rule plan and policy conflict diagnostics
 - [x] Complete backend observation and applicability contract ([#20](https://github.com/psousaj/manyfw/issues/20), closed)
 - [x] Complete deterministic backend planning contract ([#21](https://github.com/psousaj/manyfw/issues/21), closed)
@@ -57,7 +57,7 @@ dispatch after review and merge.
 - [x] Independent rollback supervisor outside the applying CLI process for the supported, explicitly installed systemd and OpenRC integrations; unknown service managers remain unsupported
 - [ ] Require confirmation for real remote firewall changes
 - [x] Local recovery fixtures cover timeout, restart, partial apply, and rollback failure
-- [x] Test-only QEMU recovery gate: 10 real nftables/iptables mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
+- [x] Test-only QEMU recovery gate: 10 real firewall mutation and recovery scenarios, with candidate-bound evidence ([#24 fixture evidence](validation/issue-24-recovery/mfw-recovery-20261107T152556Z-370956))
 - [x] Implement the scoped experimental nftables Apply from #23, with dedicated architecture/security review and real disposable-KVM confirmation/timeout evidence ([validation](validation/issue-23/issue23-mfw-20261107T174332Z-427044/)); it remains non-production and opt-in. GitHub #23 remains OPEN; this reconciliation does not mutate issue state.
 - [x] Complete issue #24 Milestone B against the production CLI/supervisor from #23: successful apply/confirmation, CLI/supervisor/network interruption, timeout, partial mutation, recovery ownership/concurrency, and deterministic restoration ([final evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
 - [x] Complete and review the bounded generic #24 Linux packet/recovery contract: exact INPUT selectors and verdict composition, corrupt checkpoint, ownership divergence, Docker modes, UFW/firewalld, manager concurrency, no-global-flush verification, and flowtable refusal ([contract](specs/issue-24-linux-enforcement.md), [evidence](TEST-MATRIX.md#issue-24-final-generic-linux-evidence))
@@ -99,6 +99,20 @@ OpenRC validation; its formal completion is recorded in GitHub and the test
 matrix. Verified systemd and OpenRC are supported experimental integrations;
 unknown supervisors remain unsupported. Tailscale remains separate in #42, and
 production authorization remains false.
+
+### nftables-only backend (ADR-0006; proposed)
+
+- [ ] Record minimum `nft`/kernel versions with sources and accept ADR-0006
+- [ ] Mandatory nftables capability detection; install-time "nftables required" warning; no fallback
+- [ ] Allow-vs-foreign-drop conflict analysis in `plan`, whole-plan refusal in `apply`
+- [ ] Legacy (xtables) rule detection: analyse readable rules, otherwise `unknown` and refuse
+- [ ] Managed default-deny exceptions (established/related, loopback, ICMPv6 ND/RA)
+- [ ] Exclusive table creation and nftables JSON apply/checkpoint/restore artifacts
+- [ ] FORWARD drop-only rules for published Docker destinations with Docker firewall-mode explanation
+- [ ] Disposable-KVM coexistence evidence for UFW, firewalld, legacy-active hosts, and both Docker modes
+- [ ] Re-run the full packet suite on the final candidate and complete the Goal Architecture/Security review
+
+Implementation contract: [nftables-by-default spec](specs/nftables-by-default.md).
 Keep Apply experimental and opt-in; no global host-firewall mutation is
 authorized.
 
