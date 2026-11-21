@@ -5,7 +5,8 @@
 //! into these DTOs.  A plan is a review artifact; it is never an apply command.
 
 use crate::{
-    Action, InterfaceSelector, NormalizedPolicy, PortScope, Protocol, Selector, docker, snapshot,
+    Action, InterfaceSelector, NormalizedPolicy, PortRange, PortScope, Protocol, Selector, docker,
+    snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -152,6 +153,7 @@ pub enum Hook {
     Input,
     Forward,
     Prerouting,
+    Postrouting,
     Output,
 }
 
@@ -182,6 +184,45 @@ pub struct ResourceObservation {
     pub hook: Option<Hook>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservedRuleVerdict {
+    Drop,
+    Reject,
+    Accept,
+    Other,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleOverlap {
+    Disjoint,
+    Overlap,
+    Unknown,
+}
+
+/// A conservative, normalized view of a foreign nftables rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedFirewallRule {
+    pub family: AddressFamily,
+    pub table: String,
+    pub chain: String,
+    pub hook: Hook,
+    pub priority: Option<i32>,
+    pub handle: Option<u64>,
+    pub owner: Ownership,
+    pub verdict: ObservedRuleVerdict,
+    pub source_subnets: Vec<ipnet::IpNet>,
+    pub destination_subnets: Vec<ipnet::IpNet>,
+    pub protocol: Option<Protocol>,
+    pub destination_ports: Vec<PortRange>,
+    pub input_interfaces: Vec<String>,
+    pub address_family: Option<AddressFamily>,
+    /// False means an expression could not be proven equivalent to the
+    /// supported predicate subset. Such a drop is a possible conflict.
+    pub analyzable: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendObservation {
     pub backend: BackendKind,
@@ -191,6 +232,8 @@ pub struct BackendObservation {
     pub generation: u64,
     pub hooks: Vec<HookObservation>,
     pub resources: Vec<ResourceObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ObservedFirewallRule>,
     pub limitations: Vec<String>,
 }
 
@@ -483,6 +526,18 @@ pub struct DiagnosticPlan {
     pub ownership: Vec<OwnershipBoundary>,
     pub unknowns: Vec<String>,
     pub explanations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictDiagnostic {
+    pub code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConflictAnalysis {
+    pub blocking: Vec<ConflictDiagnostic>,
+    pub informational: Vec<String>,
 }
 
 impl DiagnosticPlan {
@@ -1070,6 +1125,16 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             }
         }
     }
+    let conflict_analysis = analyze_foreign_rules(&operations, &backend.observation.rules);
+    for diagnostic in conflict_analysis.blocking {
+        operations.push(PlanOperation::Diagnostic {
+            code: diagnostic.code,
+            detail: diagnostic.detail.clone(),
+        });
+        reasons.push(BlockReason::Unknown {
+            detail: diagnostic.detail,
+        });
+    }
     let mut observed_priorities = BTreeSet::new();
     for hook in &backend.observation.hooks {
         if let Some(priority) = hook.priority {
@@ -1163,6 +1228,7 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     }
     explanations
         .push("foreign manager resources are preserved and global atomicity is not assumed".into());
+    explanations.extend(conflict_analysis.informational);
     DiagnosticPlan {
         version: PLAN_VERSION,
         applicability,
@@ -1182,6 +1248,210 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
         unknowns,
         explanations,
     }
+}
+
+pub fn analyze_foreign_rules(
+    operations: &[PlanOperation],
+    foreign_rules: &[ObservedFirewallRule],
+) -> ConflictAnalysis {
+    let mut analysis = ConflictAnalysis::default();
+    for operation in operations {
+        let PlanOperation::EnsureRule {
+            rule_id,
+            source_subnets,
+            source_interfaces,
+            host_address,
+            family,
+            path,
+            action,
+            protocol,
+            ports,
+            ..
+        } = operation
+        else {
+            continue;
+        };
+        for foreign in foreign_rules {
+            if foreign.owner == Ownership::Manyfw
+                || foreign.family != *family
+                || !foreign_hook_relevant(*path, foreign.hook)
+                || !matches!(
+                    foreign.verdict,
+                    ObservedRuleVerdict::Drop
+                        | ObservedRuleVerdict::Reject
+                        | ObservedRuleVerdict::Unknown
+                )
+            {
+                continue;
+            }
+            let mut overlap = foreign_rule_overlap(
+                foreign,
+                *family,
+                source_subnets,
+                source_interfaces,
+                host_address,
+                *protocol,
+                ports,
+            );
+            // A rule in a chain whose base-hook/jump provenance is unknown
+            // cannot be ruled out as part of this packet path.
+            if foreign.hook == Hook::Unknown && overlap == RuleOverlap::Overlap {
+                overlap = RuleOverlap::Unknown;
+            }
+            if overlap == RuleOverlap::Disjoint {
+                continue;
+            }
+            let location = format_foreign_rule(foreign);
+            if *action == Action::Allow {
+                let (code, detail) = if foreign.analyzable
+                    && foreign.verdict != ObservedRuleVerdict::Unknown
+                    && overlap == RuleOverlap::Overlap
+                {
+                    (
+                        "foreign_drop_conflict",
+                        format!(
+                            "allow rule {rule_id} conflicts with {location}; resolve the foreign rule in its owning tool before applying"
+                        ),
+                    )
+                } else {
+                    (
+                        "foreign_drop_possible_conflict",
+                        format!(
+                            "allow rule {rule_id} may conflict with {location}; the foreign rule cannot be fully analyzed, so resolve it in its owning tool before applying"
+                        ),
+                    )
+                };
+                analysis.blocking.push(ConflictDiagnostic {
+                    code: code.into(),
+                    detail,
+                });
+            } else if *action == Action::Deny
+                && foreign.analyzable
+                && foreign.verdict != ObservedRuleVerdict::Unknown
+                && overlap == RuleOverlap::Overlap
+            {
+                analysis.informational.push(format!(
+                    "redundant block rule {rule_id}: {location} already drops matching traffic"
+                ));
+            }
+        }
+    }
+    analysis.blocking.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then(left.detail.cmp(&right.detail))
+    });
+    analysis.blocking.dedup();
+    analysis.informational.sort();
+    analysis.informational.dedup();
+    analysis
+}
+
+fn foreign_hook_relevant(path: PacketPath, hook: Hook) -> bool {
+    hook == Hook::Unknown
+        || hook == Hook::Prerouting
+        || hook == hook_for_path(path)
+        || (path == PacketPath::Forward && hook == Hook::Postrouting)
+}
+
+fn hook_for_path(path: PacketPath) -> Hook {
+    match path {
+        PacketPath::Input => Hook::Input,
+        PacketPath::Forward => Hook::Forward,
+    }
+}
+
+fn foreign_rule_overlap(
+    foreign: &ObservedFirewallRule,
+    family: AddressFamily,
+    source_subnets: &[ipnet::IpNet],
+    source_interfaces: &[InterfaceSelector],
+    host_address: &Option<IpAddr>,
+    protocol: Protocol,
+    ports: &PortScope,
+) -> RuleOverlap {
+    let mut unknown = !foreign.analyzable;
+    if foreign
+        .address_family
+        .is_some_and(|observed| observed != family)
+    {
+        return RuleOverlap::Disjoint;
+    }
+    if foreign
+        .protocol
+        .is_some_and(|observed| observed != protocol)
+    {
+        return RuleOverlap::Disjoint;
+    }
+    if !foreign.source_subnets.is_empty() {
+        if source_subnets.is_empty() {
+            unknown = true;
+        } else if !source_subnets.iter().any(|policy| {
+            foreign.source_subnets.iter().any(|observed| {
+                policy.contains(&observed.network()) || observed.contains(&policy.network())
+            })
+        }) {
+            return RuleOverlap::Disjoint;
+        }
+    }
+    if !foreign.destination_subnets.is_empty() {
+        match host_address {
+            Some(address)
+                if foreign
+                    .destination_subnets
+                    .iter()
+                    .any(|network| network.contains(address)) => {}
+            Some(_) => return RuleOverlap::Disjoint,
+            None => unknown = true,
+        }
+    }
+    if !foreign.input_interfaces.is_empty() {
+        if source_interfaces.is_empty() {
+            unknown = true;
+        } else if !source_interfaces.iter().any(|selector| {
+            matches!(selector, InterfaceSelector::Exact(name)
+                if foreign.input_interfaces.iter().any(|observed| observed == name))
+        }) {
+            return RuleOverlap::Disjoint;
+        }
+    }
+    if !foreign.destination_ports.is_empty() {
+        match ports {
+            PortScope::Any => {}
+            PortScope::Specific(policy_ports) => {
+                if !policy_ports.iter().any(|policy| {
+                    foreign.destination_ports.iter().any(|observed| {
+                        policy.start <= observed.end && observed.start <= policy.end
+                    })
+                }) {
+                    return RuleOverlap::Disjoint;
+                }
+            }
+            PortScope::NotApplicable => return RuleOverlap::Disjoint,
+        }
+    }
+    if unknown {
+        RuleOverlap::Unknown
+    } else {
+        RuleOverlap::Overlap
+    }
+}
+
+fn format_foreign_rule(rule: &ObservedFirewallRule) -> String {
+    let priority = rule
+        .priority
+        .map_or_else(|| "unknown".into(), |value| value.to_string());
+    let handle = rule
+        .handle
+        .map_or_else(|| "unknown".into(), |value| value.to_string());
+    let owner = match rule.owner {
+        Ownership::Unknown => "unknown".into(),
+        value => format!("{value:?}"),
+    };
+    format!(
+        "foreign rule table {} chain {} hook {:?} priority {} handle {} owner {}",
+        rule.table, rule.chain, rule.hook, priority, handle, owner
+    )
 }
 
 fn backend_observation_state(observation: &BackendObservation) -> CapabilityState {
@@ -1681,6 +1951,7 @@ mod tests {
                     hook: Some(Hook::Input),
                 },
             ],
+            rules: Vec::new(),
             limitations: Vec::new(),
         };
         let capabilities = BackendCapabilities {
@@ -1714,6 +1985,237 @@ mod tests {
                 }),
             },
         }
+    }
+
+    fn observed_drop_rule(family: AddressFamily, priority: i32) -> ObservedFirewallRule {
+        ObservedFirewallRule {
+            family,
+            table: "filter".into(),
+            chain: "INPUT".into(),
+            hook: Hook::Input,
+            priority: Some(priority),
+            handle: Some(42),
+            owner: Ownership::Unknown,
+            verdict: ObservedRuleVerdict::Drop,
+            source_subnets: vec!["192.0.2.128/25".parse().unwrap()],
+            destination_subnets: Vec::new(),
+            protocol: Some(Protocol::Tcp),
+            destination_ports: vec![PortRange {
+                start: 65434,
+                end: 65434,
+            }],
+            input_interfaces: vec!["eth0".into()],
+            address_family: None,
+            analyzable: true,
+        }
+    }
+
+    #[test]
+    fn foreign_drop_blocks_allow_at_any_priority_with_actionable_location() {
+        for priority in [-400, 1000] {
+            let mut fixture = input(CapabilityState::Supported);
+            fixture.policy.zones.get_mut("lan").unwrap().subnets =
+                vec!["192.0.2.0/24".parse().unwrap()];
+            fixture.backend.observation.rules =
+                vec![observed_drop_rule(AddressFamily::Ipv4, priority)];
+
+            let plan = Planner::plan(&fixture);
+            assert!(matches!(
+                plan.applicability,
+                PlanApplicability::Blocked { .. }
+            ));
+            let detail = plan
+                .operations
+                .iter()
+                .find_map(|operation| match operation {
+                    PlanOperation::Diagnostic { code, detail }
+                        if code == "foreign_drop_conflict" =>
+                    {
+                        Some(detail)
+                    }
+                    _ => None,
+                })
+                .expect("allow/drop overlap is diagnosed");
+            for expected in [
+                "r1",
+                "table filter",
+                "chain INPUT",
+                "hook Input",
+                &format!("priority {priority}"),
+                "handle 42",
+                "owner unknown",
+                "resolve the foreign rule in its owning tool",
+            ] {
+                assert!(detail.contains(expected), "{detail}");
+            }
+        }
+    }
+
+    #[test]
+    fn unanalyzable_foreign_drop_is_a_blocking_possible_conflict() {
+        let mut fixture = input(CapabilityState::Supported);
+        fixture.policy.zones.get_mut("lan").unwrap().subnets =
+            vec!["192.0.2.0/24".parse().unwrap()];
+        let mut foreign = observed_drop_rule(AddressFamily::Ipv4, 0);
+        foreign.analyzable = false;
+        fixture.backend.observation.rules = vec![foreign];
+
+        let plan = Planner::plan(&fixture);
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::Diagnostic { code, detail }
+                if code == "foreign_drop_possible_conflict"
+                    && detail.contains("cannot be fully analyzed")
+        )));
+    }
+
+    #[test]
+    fn foreign_drop_conflicts_cover_ipv4_and_ipv6_and_refuse_the_whole_plan() {
+        for (family, subnet, foreign_subnet) in [
+            (AddressFamily::Ipv4, "192.0.2.0/24", "192.0.2.128/25"),
+            (AddressFamily::Ipv6, "2001:db8:1::/64", "2001:db8:1::/80"),
+        ] {
+            let mut fixture = input(CapabilityState::Supported);
+            fixture.policy.zones.get_mut("lan").unwrap().subnets = vec![subnet.parse().unwrap()];
+            let mut second_rule = fixture.policy.rules[0].clone();
+            second_rule.id = "r2".into();
+            second_rule.priority = 20;
+            fixture.policy.rules.push(second_rule);
+            let mut foreign = observed_drop_rule(family, 500);
+            foreign.source_subnets = vec![foreign_subnet.parse().unwrap()];
+            fixture.backend.observation.rules = vec![foreign];
+
+            let plan = Planner::plan(&fixture);
+            assert!(matches!(
+                plan.applicability,
+                PlanApplicability::Blocked { .. }
+            ));
+            let planned_rules = plan
+                .operations
+                .iter()
+                .filter(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+                .count();
+            assert_eq!(
+                planned_rules, 2,
+                "conflict must not delete unrelated operations"
+            );
+            assert!(plan.operations.iter().any(|operation| matches!(
+                operation,
+                PlanOperation::Diagnostic { code, .. } if code == "foreign_drop_conflict"
+            )));
+        }
+    }
+
+    #[test]
+    fn unknown_foreign_hook_is_a_possible_conflict_not_a_clean_miss() {
+        let mut fixture = input(CapabilityState::Supported);
+        fixture.policy.zones.get_mut("lan").unwrap().subnets =
+            vec!["192.0.2.0/24".parse().unwrap()];
+        let mut foreign = observed_drop_rule(AddressFamily::Ipv4, 0);
+        foreign.hook = Hook::Unknown;
+        fixture.backend.observation.rules = vec![foreign];
+
+        let plan = Planner::plan(&fixture);
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::Diagnostic { code, detail }
+                if code == "foreign_drop_possible_conflict"
+                    && detail.contains("hook Unknown")
+        )));
+    }
+
+    #[test]
+    fn prerouting_drop_conflicts_with_later_input_allow() {
+        let mut fixture = input(CapabilityState::Supported);
+        fixture.policy.zones.get_mut("lan").unwrap().subnets =
+            vec!["192.0.2.0/24".parse().unwrap()];
+        let mut foreign = observed_drop_rule(AddressFamily::Ipv4, -200);
+        foreign.hook = Hook::Prerouting;
+        fixture.backend.observation.rules = vec![foreign];
+
+        let plan = Planner::plan(&fixture);
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::Diagnostic { code, detail }
+                if code == "foreign_drop_conflict"
+                    && detail.contains("hook Prerouting")
+        )));
+    }
+
+    #[test]
+    fn postrouting_drop_is_relevant_only_after_forward_allows() {
+        let mut fixture = input(CapabilityState::Supported);
+        fixture.policy.zones.get_mut("lan").unwrap().subnets =
+            vec!["192.0.2.0/24".parse().unwrap()];
+        let mut foreign = observed_drop_rule(AddressFamily::Ipv4, 100);
+        foreign.hook = Hook::Postrouting;
+        fixture.backend.observation.rules = vec![foreign.clone()];
+
+        let input_plan = Planner::plan(&fixture);
+        assert_eq!(input_plan.applicability, PlanApplicability::Applicable);
+
+        let mut operations = input_plan.operations;
+        let forward_allow = operations
+            .iter_mut()
+            .find(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            .unwrap();
+        if let PlanOperation::EnsureRule { path, .. } = forward_allow {
+            *path = PacketPath::Forward;
+        }
+        let conflicts = analyze_foreign_rules(&operations, &[foreign]);
+        assert_eq!(conflicts.blocking.len(), 1);
+        assert_eq!(conflicts.blocking[0].code, "foreign_drop_conflict");
+        assert!(conflicts.blocking[0].detail.contains("hook Postrouting"));
+    }
+
+    #[test]
+    fn disjoint_foreign_drop_does_not_block_and_matching_block_is_informational() {
+        let mut fixture = input(CapabilityState::Supported);
+        fixture.policy.zones.get_mut("lan").unwrap().subnets =
+            vec!["192.0.2.0/24".parse().unwrap()];
+        let mut foreign = observed_drop_rule(AddressFamily::Ipv4, 0);
+        foreign.source_subnets = vec!["198.51.100.0/24".parse().unwrap()];
+        fixture.backend.observation.rules = vec![foreign.clone()];
+        assert_eq!(
+            Planner::plan(&fixture).applicability,
+            PlanApplicability::Applicable
+        );
+
+        fixture.policy.rules[0].action = Action::Deny;
+        foreign.source_subnets = vec!["192.0.2.0/24".parse().unwrap()];
+        fixture.backend.observation.rules = vec![foreign];
+        let plan = Planner::plan(&fixture);
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
+        assert!(
+            plan.explanations
+                .iter()
+                .any(|line| line.contains("redundant block rule r1"))
+        );
+    }
+
+    #[test]
+    fn foreign_rules_change_the_planner_fingerprint() {
+        let fixture = input(CapabilityState::Supported);
+        let original = Planner::plan(&fixture);
+        let mut changed = fixture;
+        changed.backend.observation.rules = vec![observed_drop_rule(AddressFamily::Ipv4, 0)];
+        let with_foreign_rule = Planner::plan(&changed);
+        assert_ne!(
+            original.preconditions.input_fingerprint,
+            with_foreign_rule.preconditions.input_fingerprint
+        );
     }
 
     #[test]
@@ -2046,6 +2548,43 @@ mod tests {
                 });
             }
             "unknown-capability" => {}
+            "foreign-drop-v4-before"
+            | "foreign-drop-v4-after"
+            | "foreign-drop-v6"
+            | "foreign-drop-possible"
+            | "foreign-drop-redundant" => {
+                let is_v6 = name == "foreign-drop-v6";
+                let subnet = if is_v6 {
+                    "2001:db8:1::/64"
+                } else {
+                    "192.0.2.0/24"
+                };
+                let foreign_subnet = if is_v6 {
+                    "2001:db8:1::/80"
+                } else {
+                    "192.0.2.128/25"
+                };
+                input.policy.zones.get_mut("lan").unwrap().subnets = vec![subnet.parse().unwrap()];
+                let family = if is_v6 {
+                    AddressFamily::Ipv6
+                } else {
+                    AddressFamily::Ipv4
+                };
+                let priority = if name == "foreign-drop-v4-before" {
+                    -400
+                } else if name == "foreign-drop-v4-after" {
+                    1000
+                } else {
+                    0
+                };
+                let mut foreign = observed_drop_rule(family, priority);
+                foreign.source_subnets = vec![foreign_subnet.parse().unwrap()];
+                foreign.analyzable = name != "foreign-drop-possible";
+                if name == "foreign-drop-redundant" {
+                    input.policy.rules[0].action = Action::Deny;
+                }
+                input.backend.observation.rules = vec![foreign];
+            }
             _ => panic!("unknown planner golden scenario {name}"),
         }
         input
@@ -2188,6 +2727,7 @@ mod tests {
                     family: AddressFamily::Ipv4,
                     hook: Some(Hook::Input),
                 }],
+                rules: Vec::new(),
                 limitations: vec![],
             }],
             complete: CapabilityState::Unknown,
@@ -2280,6 +2820,7 @@ mod tests {
                     family: AddressFamily::Ipv4,
                     hook: Some(Hook::Input),
                 }],
+                rules: Vec::new(),
                 limitations: Vec::new(),
             }],
             complete: CapabilityState::Supported,
@@ -2623,11 +3164,19 @@ mod tests {
             "mixed-managers",
             "conflicting-hook-priorities",
             "unknown-capability",
+            "foreign-drop-v4-before",
+            "foreign-drop-v4-after",
+            "foreign-drop-v6",
+            "foreign-drop-possible",
+            "foreign-drop-redundant",
         ] {
             let input = planner_golden_input(name);
             let plan = Planner::plan(&input);
             match name {
-                "host-only" | "docker-native-nftables" | "docker-userland-proxy" => {
+                "host-only"
+                | "docker-native-nftables"
+                | "docker-userland-proxy"
+                | "foreign-drop-redundant" => {
                     assert_eq!(plan.applicability, PlanApplicability::Applicable);
                 }
                 "docker-iptables"
@@ -2638,6 +3187,15 @@ mod tests {
                 | "nft-runtime-missing-nf-tables"
                 | "nft-runtime-missing-binary"
                 | "nft-runtime-old" => {
+                    assert!(matches!(
+                        plan.applicability,
+                        PlanApplicability::Blocked { .. }
+                    ));
+                }
+                "foreign-drop-v4-before"
+                | "foreign-drop-v4-after"
+                | "foreign-drop-v6"
+                | "foreign-drop-possible" => {
                     assert!(matches!(
                         plan.applicability,
                         PlanApplicability::Blocked { .. }
@@ -2726,6 +3284,21 @@ mod tests {
                 }
                 "unknown-capability" => {
                     include_str!("../tests/golden/planner/unknown-capability.json")
+                }
+                "foreign-drop-v4-before" => {
+                    include_str!("../tests/golden/planner/foreign-drop-v4-before.json")
+                }
+                "foreign-drop-v4-after" => {
+                    include_str!("../tests/golden/planner/foreign-drop-v4-after.json")
+                }
+                "foreign-drop-v6" => {
+                    include_str!("../tests/golden/planner/foreign-drop-v6.json")
+                }
+                "foreign-drop-possible" => {
+                    include_str!("../tests/golden/planner/foreign-drop-possible.json")
+                }
+                "foreign-drop-redundant" => {
+                    include_str!("../tests/golden/planner/foreign-drop-redundant.json")
                 }
                 _ => unreachable!("scenario list is exhaustive"),
             };

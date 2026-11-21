@@ -16,6 +16,12 @@ fixed read-only argument vectors (`nft -j list ruleset`, `iptables-save -c`,
 and `ip6tables-save -c`); no shell is invoked. Missing tools, permission failures,
 partial families, and unrecognized state remain unknown and block applicability.
 Chain names and comments alone do not establish ownership or Docker mode.
+Conflict analysis retains malformed nft rule records and rules from unsupported
+address families as unknown candidates, and uses the first terminal verdict in
+each rule. It considers prerouting drops before INPUT/FORWARD and postrouting
+drops after FORWARD; a known postrouting rule does not falsely block an INPUT
+allow. A FORWARD allow is rejected by pre-mutation validation even when
+presented in a stale or crafted plan.
 
 ## Threat boundaries
 

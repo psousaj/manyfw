@@ -43,11 +43,12 @@ ensure_cloud_localds() {
 check_host_prerequisites() {
     [[ "$(uname -s)" == Linux ]] || die 'this harness requires Linux/WSL2'
     [[ "$(uname -m)" == x86_64 ]] || die "this harness currently supports x86_64 hosts only (got $(uname -m))"
-    for tool in qemu-system-x86_64 qemu-img curl sha256sum python3 ssh scp sg getent ip; do
+    for tool in qemu-system-x86_64 qemu-img curl sha256sum python3 ssh scp getent ip; do
         require_command "$tool"
     done
     [[ -c /dev/kvm ]] || die '/dev/kvm is absent; KVM is required and TCG fallback is disabled'
     if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+        require_command sg
         local user
         user=$(id -un)
         getent group kvm | awk -F: -v user="$user" 'index("," $4 ",", "," user ",") { ok=1 } END { exit !ok }' \

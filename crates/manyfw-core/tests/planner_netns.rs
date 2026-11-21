@@ -132,6 +132,7 @@ fn planner_input() -> PlannerInput {
             family: AddressFamily::Ipv4,
             hook: Some(Hook::Input),
         }],
+        rules: Vec::new(),
         limitations: Vec::new(),
     };
     let capabilities = BackendCapabilities {

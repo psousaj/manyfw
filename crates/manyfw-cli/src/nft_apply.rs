@@ -176,6 +176,7 @@ impl NftBackend {
             if operation.resource.is_empty() {
                 return Err(TransactionError::OwnershipChanged);
             }
+            reject_forward_allow(typed)?;
             match typed {
                 PlanOperation::SetManagedDefault {
                     action,
@@ -233,6 +234,21 @@ impl NftBackend {
         }
         if defaults.is_empty() {
             return Err(backend_error("plan must define an explicit input default"));
+        }
+        let serialized = serde_json::to_vec(&ruleset).map_err(|error| {
+            backend_error(&format!("cannot encode observed nftables state: {error}"))
+        })?;
+        let foreign_rules = manyfw_linux::parse_nft_rule_observations(&serialized)
+            .ok_or_else(|| backend_error("cannot analyze current nftables rule state"))?;
+        let planned_operations = plan
+            .operations
+            .iter()
+            .filter_map(|operation| operation.planned_operation.clone())
+            .collect::<Vec<_>>();
+        let conflicts =
+            manyfw_core::backend::analyze_foreign_rules(&planned_operations, &foreign_rules);
+        if let Some(conflict) = conflicts.blocking.first() {
+            return Err(backend_error(&conflict.detail));
         }
         Ok(())
     }
@@ -1976,6 +1992,20 @@ fn secure_directory_owned_by(path: &std::path::Path, expected_uid: u32) -> TxRes
         .map_err(|error| TransactionError::Store(error.to_string()))
 }
 
+fn reject_forward_allow(operation: &PlanOperation) -> TxResult<()> {
+    if matches!(
+        operation,
+        PlanOperation::EnsureRule {
+            path: manyfw_core::backend::PacketPath::Forward,
+            action: Action::Allow,
+            ..
+        }
+    ) {
+        return Err(backend_error("FORWARD allows are unsupported"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1988,6 +2018,29 @@ mod tests {
             {"rule":{"family":"inet","table":TABLE,"chain":"input","comment":format!("manyfw-rule-v1-{}", "a".repeat(64)),"expr":expr}}
         ]})
         .to_string()
+    }
+
+    #[test]
+    fn crafted_forward_allow_is_rejected_by_apply_preflight_guard() {
+        let (plan, _, _) = interrupted_fixture();
+        let mut operation = plan
+            .operations
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .planned_operation
+                    .clone()
+                    .filter(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            })
+            .unwrap();
+        let PlanOperation::EnsureRule { path, action, .. } = &mut operation else {
+            panic!("fixture contains an explicit rule operation");
+        };
+        *path = manyfw_core::backend::PacketPath::Forward;
+        *action = Action::Allow;
+
+        let error = reject_forward_allow(&operation).unwrap_err();
+        assert!(error.to_string().contains("FORWARD allows are unsupported"));
     }
 
     #[test]

@@ -99,6 +99,55 @@ class AcceptanceTests(unittest.TestCase):
         self.results['cases']['default-Reject'] = {
             'stage': 'apply', 'returncode': 2, 'error': 'default Reject is unsupported',
             'before': {'nftables': []}, 'after': {'nftables': []}}
+        foreign_state = {'nftables': [
+            {'table': {'family': 'inet', 'name': 'm24foreign'}},
+            {'chain': {'family': 'inet', 'table': 'm24foreign', 'name': 'input'}},
+            {'rule': {'family': 'inet', 'table': 'm24foreign', 'chain': 'input',
+                      'handle': 7, 'expr': [{'drop': None}]}},
+        ]}
+        for name in acceptance.packet_cases():
+            if not name.startswith('composition-') or not name.endswith('-drop'):
+                continue
+            try:
+                priority = name.split('-')[-2]
+            except IndexError:
+                priority = 'unknown'
+            diagnostic = (
+                'allow rule issue24-packet conflicts with foreign rule table m24foreign '
+                'chain input hook Input priority ' + priority +
+                ' handle 7 owner unknown; resolve the foreign rule in its owning tool'
+            )
+            self.results['cases'][name] = {
+                'stage': 'apply',
+                'returncode': 1,
+                'error': json.dumps({'diagnostic': 'backend: ' + diagnostic}),
+                'before': foreign_state,
+                'after': foreign_state,
+                'plan_applicability': 'Applicable',
+                'observed_plan_applicability': {'Blocked': {'reasons': []}},
+                'observed_plan_diagnostic': diagnostic,
+                'observed_plan_fingerprint': 'fnv1a64:0123456789abcdef',
+                'outcome': 'drop',
+                'packet_before': 'drop',
+                'packet_after': 'drop',
+            }
+        for family in ('v4', 'v6'):
+            name = f'iptables-nft-{family}-DROP'
+            diagnostic = (
+                'backend: allow rule issue24-packet conflicts with foreign rule table '
+                'filter chain INPUT hook Input priority 0 handle 3 owner unknown; '
+                'resolve the foreign rule in its owning tool before applying'
+            )
+            self.results['cases'][name + '-refusal'] = {
+                'stage': 'apply',
+                'returncode': 1,
+                'error': json.dumps({'diagnostic': diagnostic}),
+                'before': foreign_state,
+                'after': foreign_state,
+                'iptables_before': '-A INPUT -j DROP\n',
+                'iptables_after': '-A INPUT -j DROP\n',
+            }
+            self.results['cases'][name + '-iptables-checkpoint'] = '-A INPUT -j DROP\n'
         (self.packet / 'run.log').write_text('synthetic test run only\n')
         self.sync_packet()
 

@@ -14,7 +14,7 @@ import re
 import subprocess
 import tarfile
 
-PACKET_CONTRACT = 'issue24-linux-packets-v3'
+PACKET_CONTRACT = 'issue24-linux-packets-v4'
 RECOVERY_CONTRACT = 'issue24-linux-packets-v2'
 CONTRACT = PACKET_CONTRACT
 RECOVERY = set('''partial_apply ambiguous_apply_commit_recovered cli_kill_after_batch
@@ -219,8 +219,8 @@ def expected_outcome(name):
     if name.startswith('composition-'):
         return 'drop'
     if name.startswith('iptables-nft-'):
-        # Both variants compose an external ACCEPT with ManyFW Deny, or an
-        # external DROP with ManyFW Allow. Either must be observed as drop.
+        # External ACCEPT composes with a ManyFW deny; external DROP must refuse
+        # the ManyFW allow before mutation. Both packet outcomes remain drops.
         return 'drop'
     if name.endswith(('-Reject',)):
         return 'reject'
@@ -283,6 +283,7 @@ def archive_evidence(data, results):
     ordinary = {name for name in packet_cases() if name not in {
         'interface-timeout', 'established-stream', 'routed-nat-preserved', 'default-Reject'}
         and name not in exception_cases
+        and not (name.startswith('composition-') and name.endswith('-drop'))
         and not name.endswith('-refusal')}
     for name in ordinary:
         value = cases[name]
@@ -299,6 +300,65 @@ def archive_evidence(data, results):
                 'missing case effective rules: ' + name)
         if name + '-rulesets' in cases:
             require('applied' in cases[name + '-rulesets'], 'missing applied ruleset: ' + name)
+    foreign_drop_refusals = {
+        name for name in packet_cases()
+        if name.startswith('composition-') and name.endswith('-drop')
+    }
+    for name in foreign_drop_refusals:
+        value = cases[name]
+        try:
+            error = json.loads(value.get('error', ''))['diagnostic']
+        except (json.JSONDecodeError, KeyError, TypeError):
+            error = ''
+        if error.startswith('backend: '):
+            error = error.removeprefix('backend: ')
+        require(
+            value.get('stage') == 'apply' and value.get('returncode', 0) > 0 and
+            value.get('before') == value.get('after') and
+            value.get('outcome') == 'drop' and value.get('packet_before') == 'drop' and
+            value.get('packet_after') == 'drop' and
+            isinstance(value.get('observed_plan_applicability'), dict) and
+            'Blocked' in value['observed_plan_applicability'] and
+            value.get('observed_plan_diagnostic') == error and
+            isinstance(value.get('observed_plan_fingerprint'), str) and
+            bool(value['observed_plan_fingerprint']) and
+            all(term in error for term in (
+                'allow rule issue24-packet', 'table m24foreign', 'chain input',
+                'hook Input', 'priority ', 'handle ', 'owner unknown',
+                'resolve the foreign rule in its owning tool',
+            )),
+            'foreign-drop allow was not refused before mutation: ' + name,
+        )
+        after = value.get('after', {})
+        require(
+            not any(
+                item.get('table', {}).get('family') == 'inet' and
+                item.get('table', {}).get('name') == 'manyfw'
+                for item in after.get('nftables', [])
+            ),
+            'foreign-drop refusal left a ManyFW table: ' + name,
+        )
+    for family in ('v4', 'v6'):
+        name = f'iptables-nft-{family}-DROP'
+        refusal = cases.get(name + '-refusal', {})
+        try:
+            diagnostic = json.loads(refusal.get('error', ''))['diagnostic']
+        except (json.JSONDecodeError, KeyError, TypeError):
+            diagnostic = ''
+        require(
+            refusal.get('stage') == 'apply' and refusal.get('returncode', 0) > 0 and
+            refusal.get('before') == refusal.get('after') and
+            refusal.get('iptables_before') == refusal.get('iptables_after') and
+            'table filter chain INPUT hook Input' in diagnostic and
+            'resolve the foreign rule in its owning tool' in diagnostic and
+            name + '-nft' in cases and
+            not any(
+                item.get('table', {}).get('family') == 'inet' and
+                item.get('table', {}).get('name') == 'manyfw'
+                for item in refusal.get('after', {}).get('nftables', [])
+            ),
+            'iptables-nft foreign DROP was not refused without mutation: ' + name,
+        )
     for name in ('outbound-return-default-deny', 'loopback-default-deny'):
         value = cases[name]
         exchange = value.get('exchange', {})

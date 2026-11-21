@@ -5,7 +5,7 @@ mod firewall;
 mod netlink;
 mod procfs;
 
-pub use firewall::{FirewallObservationError, observe_firewall};
+pub use firewall::{FirewallObservationError, observe_firewall, parse_nft_rule_observations};
 
 pub(crate) struct SourceDump<T> {
     pub records: Vec<T>,

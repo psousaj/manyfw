@@ -208,7 +208,7 @@ class Suite:
         self.namespaces = []
         self.passed = set()
         self.expected = self.expected_cases()
-        self.results.update(contract_version='issue24-linux-packets-v3', expected_cases=sorted(self.expected))
+        self.results.update(contract_version='issue24-linux-packets-v4', expected_cases=sorted(self.expected))
         self.results['missing_coverage'] = sorted(self.expected)
         self.results['passed_cases'] = []
         self.worker_started = False
@@ -342,11 +342,7 @@ class Suite:
 
     def apply(self, data, name, timeout=60, refusal=False, optional_refusal=False, opt_in=True,
               no_systemctl_path=None):
-        path = self.directory/(name+'.input.json')
-        path.write_text(json.dumps(data))
-        planned = self.ns('m24target', 'manyfw', 'plan', '--diagnostic-input', str(path))
-        generated = json.loads(planned.stdout)
-        assert generated['input'] == data, 'CLI changed diagnostic input'
+        generated = self.diagnostic_plan(data, name)
         bundle = self.directory/(name+'.bundle.json')
         bundle.write_text(json.dumps(generated))
         before = self.state()
@@ -426,6 +422,91 @@ class Suite:
         applied.pop('confirmation_token', None)
         self.results['cases'][name+'-apply'] = applied
         return applied['transaction_id']
+
+    def diagnostic_plan(self, data, name):
+        path = self.directory/(name+'.input.json')
+        path.write_text(json.dumps(data))
+        planned = self.ns('m24target', 'manyfw', 'plan', '--diagnostic-input', str(path))
+        generated = json.loads(planned.stdout)
+        assert generated['input'] == data, 'CLI changed diagnostic input'
+        return generated
+
+    def assert_foreign_drop_refusal(self, data, name, priority, before_state, packet_args=None):
+        packet_args = packet_args or {}
+        observed_input = copy.deepcopy(data)
+        address = packet_args.get('address', '192.0.2.1')
+        family = 'ipv6' if ':' in address else 'ipv4'
+        chain = json.loads(self.ns(
+            'm24target', 'nft', '-j', 'list', 'chain', 'inet', 'm24foreign', 'input'
+        ).stdout)
+        handle = next(
+            entry['rule']['handle']
+            for entry in chain.get('nftables', [])
+            if 'rule' in entry and entry['rule'].get('handle') is not None
+        )
+        protocol = observed_input['policy']['rules'][0]['protocol']
+        observed_input['backend']['observation']['rules'] = [{
+            'family': family,
+            'table': 'm24foreign',
+            'chain': 'input',
+            'hook': 'input',
+            'priority': priority,
+            'handle': handle,
+            'owner': 'unknown',
+            'verdict': 'drop',
+            'source_subnets': [],
+            'destination_subnets': [],
+            'protocol': protocol,
+            'destination_ports': [],
+            'input_interfaces': [],
+            'address_family': None,
+            'analyzable': True,
+        }]
+        observed_plan = self.diagnostic_plan(observed_input, name+'-observed-conflict')
+        plan = observed_plan['plan']
+        applicability = plan['applicability']
+        assert 'Blocked' in applicability, applicability
+        plan_diagnostic = next(
+            value['Diagnostic']
+            for value in plan['operations']
+            if 'Diagnostic' in value
+            and value['Diagnostic'].get('code') in (
+                'foreign_drop_conflict', 'foreign_drop_possible_conflict')
+        )
+        assert plan_diagnostic['code'] == 'foreign_drop_conflict', plan_diagnostic
+
+        evidence = self.apply(data, name, refusal=True)
+        error = json.loads(evidence['error'])['diagnostic']
+        for expected_detail in (
+            'allow rule issue24-packet',
+            'table m24foreign',
+            'chain input',
+            'hook Input',
+            f'priority {priority}',
+            'handle ',
+            'owner unknown',
+            'resolve the foreign rule in its owning tool',
+        ):
+            assert expected_detail in error, (expected_detail, error)
+        assert error.removeprefix('backend: ') == plan_diagnostic['detail'], (
+            error, plan_diagnostic['detail'])
+        assert evidence['before'] == before_state == evidence['after']
+        assert self.ns('m24target', 'nft', '-j', 'list', 'table', 'inet', 'manyfw',
+                       check=False).returncode != 0
+        evidence.update({
+            'outcome': 'drop',
+            'packet_before': 'drop',
+            'packet_after': self.packet(**packet_args)['outcome'],
+            'observed_plan_applicability': applicability,
+            'observed_plan_diagnostic': plan_diagnostic['detail'],
+            'observed_plan_fingerprint': plan['preconditions']['input_fingerprint'],
+        })
+        assert evidence['packet_after'] == 'drop'
+        self.results['cases'][name] = evidence
+        self.save()
+        self.nft('delete table inet m24foreign\n')
+        assert self.packet(**packet_args)['outcome'] == 'allow'
+        self.passed_case(name)
 
     def state(self):
         def clean(value):
@@ -574,6 +655,11 @@ class Suite:
                 before = self.state()
                 name = f'composition-{priority}-{foreign}'
                 self.ruleset_evidence(name, 'foreign-checkpoint')
+                if foreign == 'drop':
+                    self.assert_foreign_drop_refusal(
+                        self.bundle(action=own), name, priority, before
+                    )
+                    continue
                 transaction = self.apply(self.bundle(action=own), name)
                 self.ruleset_evidence(name, 'applied')
                 result = self.packet()
@@ -604,11 +690,17 @@ class Suite:
                     )
                     before = self.packet(**packet)['outcome']
                     assert before == ('allow' if foreign == 'accept' else 'drop'), (family, priority, foreign, before)
+                    before_state = self.state()
                     data = self.bundle(protocol=protocol, action=own)
                     data['policy']['zones']['peer']['subnets'] = [
                         source+('/128' if family == 'v6' else '/32')]
                     name = f'composition-{family}-{protocol}-{priority}-{foreign}'
                     self.ruleset_evidence(name, 'foreign-checkpoint')
+                    if foreign == 'drop':
+                        self.assert_foreign_drop_refusal(
+                            data, name, priority, before_state, packet
+                        )
+                        continue
                     transaction = self.apply(data, name)
                     self.ruleset_evidence(name, 'applied')
                     result = self.packet(**packet)
@@ -887,15 +979,35 @@ class Suite:
                     data = self.bundle(action=own)
                     data['policy']['zones']['peer']['subnets'] = [source+('/32' if family == 'v4' else '/128')]
                     name = f'iptables-nft-{family}-{verdict}'
-                    self.ruleset_evidence(name, 'foreign-checkpoint')
-                    (self.directory/f'{name}.foreign-checkpoint.iptables.txt').write_text(before)
-                    transaction = self.apply(data, name)
-                    self.ruleset_evidence(name, 'applied')
-                    result = self.packet(address=address, source=source)
+                    if verdict == 'DROP':
+                        refusal = self.apply(data, name+'-refusal', refusal=True)
+                        diagnostic = json.loads(refusal['error'])['diagnostic']
+                        assert 'table filter chain INPUT hook Input' in diagnostic, diagnostic
+                        assert 'resolve the foreign rule in its owning tool' in diagnostic, diagnostic
+                        after = self.ns('m24target', tool, '-S').stdout
+                        assert after == before
+                        refusal['iptables_before'] = before
+                        refusal['iptables_after'] = after
+                        ruleset = self.ns('m24target', 'nft', '-j', 'list', 'ruleset').stdout
+                        assert not any(
+                            table.get('family') == 'inet' and table.get('name') == 'manyfw'
+                            for entry in json.loads(ruleset)['nftables']
+                            for table in [entry.get('table', {})]
+                        ), 'foreign-drop refusal left a ManyFW table'
+                        self.results['cases'][name+'-nft'] = ruleset
+                        self.results['cases'][name+'-iptables-checkpoint'] = before
+                        result = self.packet(address=address, source=source)
+                    else:
+                        self.ruleset_evidence(name, 'foreign-checkpoint')
+                        (self.directory/f'{name}.foreign-checkpoint.iptables.txt').write_text(before)
+                        transaction = self.apply(data, name)
+                        self.ruleset_evidence(name, 'applied')
+                        result = self.packet(address=address, source=source)
+                        assert result['outcome'] == 'drop', result
+                        self.rollback(transaction)
+                        self.ruleset_evidence(name, 'restored')
+                        assert self.ns('m24target', tool, '-S').stdout == before
                     assert result['outcome'] == 'drop', result
-                    self.rollback(transaction)
-                    self.ruleset_evidence(name, 'restored')
-                    assert self.ns('m24target', tool, '-S').stdout == before
                     self.results['cases'][name] = result
                     self.passed_case(name)
                 finally:

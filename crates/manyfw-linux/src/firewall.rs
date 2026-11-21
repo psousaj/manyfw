@@ -3,11 +3,13 @@
 
 use manyfw_core::backend::{
     AddressFamily, BackendKind, BackendMode, BackendObservation, BackendObservationSet,
-    CapabilityState, Hook, HookObservation, NftRuntimeCapability, Ownership, PacketPath,
-    ResourceObservation,
+    CapabilityState, Hook, HookObservation, NftRuntimeCapability, ObservedFirewallRule,
+    ObservedRuleVerdict, Ownership, PacketPath, ResourceObservation,
 };
+use manyfw_core::{PortRange, Protocol};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::process::{Command, Output};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +294,7 @@ fn parse_nftables(bytes: &[u8]) -> Option<BackendObservation> {
     let entries = document.get("nftables")?.as_array()?;
     let mut hooks = Vec::new();
     let mut resources = Vec::new();
+    let rules = parse_nftables_rules(entries);
     let mut limitations = vec!["unrecognized expressions and ownership remain unknown".into()];
     for entry in entries {
         let Some(chain) = entry.get("chain") else {
@@ -368,8 +371,433 @@ fn parse_nftables(bytes: &[u8]) -> Option<BackendObservation> {
         generation: 0,
         hooks,
         resources,
+        rules,
         limitations,
     })
+}
+
+/// Parses the conflict-relevant, conservative subset of an nftables listing.
+/// Unknown expressions remain marked unanalyzable rather than being discarded.
+pub fn parse_nft_rule_observations(bytes: &[u8]) -> Option<Vec<ObservedFirewallRule>> {
+    let document: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let entries = document.get("nftables")?.as_array()?;
+    Some(parse_nftables_rules(entries))
+}
+
+#[derive(Clone, Copy)]
+struct ChainContext {
+    hook: Hook,
+    priority: Option<i32>,
+}
+
+fn nft_family(value: &str) -> Vec<AddressFamily> {
+    match value {
+        "ip" => vec![AddressFamily::Ipv4],
+        "ip6" => vec![AddressFamily::Ipv6],
+        "inet" => vec![AddressFamily::Ipv4, AddressFamily::Ipv6],
+        _ => Vec::new(),
+    }
+}
+
+fn parse_nftables_rules(entries: &[serde_json::Value]) -> Vec<ObservedFirewallRule> {
+    let mut chains = BTreeMap::new();
+    for entry in entries {
+        let Some(chain) = entry.get("chain") else {
+            continue;
+        };
+        let (Some(family), Some(table), Some(name), Some(hook)) = (
+            chain.get("family").and_then(serde_json::Value::as_str),
+            chain.get("table").and_then(serde_json::Value::as_str),
+            chain.get("name").and_then(serde_json::Value::as_str),
+            chain.get("hook").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let hook = nft_hook(hook);
+        let priority = chain
+            .get("prio")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok());
+        chains.insert(
+            (family.to_owned(), table.to_owned(), name.to_owned()),
+            ChainContext { hook, priority },
+        );
+    }
+
+    let mut rules = Vec::new();
+    for entry in entries {
+        if let Some(chain) = entry.get("chain") {
+            if chain.get("policy").and_then(serde_json::Value::as_str) == Some("drop") {
+                let family = chain.get("family").and_then(serde_json::Value::as_str);
+                let table = chain
+                    .get("table")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let name = chain
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let hook = chain
+                    .get("hook")
+                    .and_then(serde_json::Value::as_str)
+                    .map(nft_hook)
+                    .unwrap_or(Hook::Unknown);
+                if table == "manyfw" && family == Some("inet") {
+                    continue;
+                }
+                let mut families = family.map(nft_family).unwrap_or_default();
+                if families.is_empty() {
+                    // A malformed or unsupported family is not evidence that
+                    // the base-chain drop cannot affect IP traffic.
+                    families.extend([AddressFamily::Ipv4, AddressFamily::Ipv6]);
+                }
+                let identifying_state_known = family.is_some()
+                    && chain
+                        .get("table")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                    && chain
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                    && hook != Hook::Unknown;
+                for address_family in families {
+                    rules.push(ObservedFirewallRule {
+                        family: address_family,
+                        table: table.into(),
+                        chain: name.into(),
+                        hook,
+                        priority: chain
+                            .get("prio")
+                            .and_then(serde_json::Value::as_i64)
+                            .and_then(|value| i32::try_from(value).ok()),
+                        handle: None,
+                        owner: Ownership::Unknown,
+                        verdict: ObservedRuleVerdict::Drop,
+                        source_subnets: Vec::new(),
+                        destination_subnets: Vec::new(),
+                        protocol: None,
+                        destination_ports: Vec::new(),
+                        input_interfaces: Vec::new(),
+                        address_family: None,
+                        analyzable: identifying_state_known,
+                    });
+                }
+            }
+            continue;
+        }
+        let Some(rule) = entry.get("rule") else {
+            continue;
+        };
+        let family = rule.get("family").and_then(serde_json::Value::as_str);
+        let table = rule.get("table").and_then(serde_json::Value::as_str);
+        let chain = rule.get("chain").and_then(serde_json::Value::as_str);
+        if family == Some("inet") && table == Some("manyfw") {
+            continue;
+        }
+        let (Some(family), Some(table), Some(chain)) = (family, table, chain) else {
+            rules.extend(unclassified_nft_rule(rule, family, table, chain));
+            continue;
+        };
+        let context = chains.get(&(family.into(), table.into(), chain.into()));
+        let hook = context.map_or(Hook::Unknown, |context| context.hook);
+        let priority = context.and_then(|context| context.priority);
+        let mut parsed = parse_nft_rule(rule, family, table, chain, hook, priority);
+        rules.append(&mut parsed);
+    }
+    rules.sort_by(|left, right| {
+        (
+            left.family,
+            &left.table,
+            &left.chain,
+            left.handle,
+            left.verdict,
+        )
+            .cmp(&(
+                right.family,
+                &right.table,
+                &right.chain,
+                right.handle,
+                right.verdict,
+            ))
+    });
+    rules
+}
+
+fn unclassified_nft_rule(
+    rule: &serde_json::Value,
+    family: Option<&str>,
+    table: Option<&str>,
+    chain: Option<&str>,
+) -> Vec<ObservedFirewallRule> {
+    let mut families = family.map(nft_family).unwrap_or_default();
+    if families.is_empty() {
+        families.extend([AddressFamily::Ipv4, AddressFamily::Ipv6]);
+    }
+    families
+        .into_iter()
+        .map(|address_family| ObservedFirewallRule {
+            family: address_family,
+            table: table.unwrap_or("unknown").into(),
+            chain: chain.unwrap_or("unknown").into(),
+            hook: Hook::Unknown,
+            priority: None,
+            handle: rule.get("handle").and_then(serde_json::Value::as_u64),
+            owner: Ownership::Unknown,
+            verdict: ObservedRuleVerdict::Unknown,
+            source_subnets: Vec::new(),
+            destination_subnets: Vec::new(),
+            protocol: None,
+            destination_ports: Vec::new(),
+            input_interfaces: Vec::new(),
+            address_family: None,
+            analyzable: false,
+        })
+        .collect()
+}
+
+fn nft_hook(value: &str) -> Hook {
+    match value {
+        "input" => Hook::Input,
+        "forward" => Hook::Forward,
+        "prerouting" => Hook::Prerouting,
+        "postrouting" => Hook::Postrouting,
+        "output" => Hook::Output,
+        _ => Hook::Unknown,
+    }
+}
+
+fn parse_nft_rule(
+    rule: &serde_json::Value,
+    family: &str,
+    table: &str,
+    chain: &str,
+    hook: Hook,
+    priority: Option<i32>,
+) -> Vec<ObservedFirewallRule> {
+    if nft_family(family).is_empty() {
+        return unclassified_nft_rule(rule, Some(family), Some(table), Some(chain));
+    }
+    let Some(expressions) = rule.get("expr").and_then(serde_json::Value::as_array) else {
+        return nft_family(family)
+            .into_iter()
+            .map(|address_family| ObservedFirewallRule {
+                family: address_family,
+                table: table.into(),
+                chain: chain.into(),
+                hook,
+                priority,
+                handle: rule.get("handle").and_then(serde_json::Value::as_u64),
+                owner: Ownership::Unknown,
+                verdict: ObservedRuleVerdict::Unknown,
+                source_subnets: Vec::new(),
+                destination_subnets: Vec::new(),
+                protocol: None,
+                destination_ports: Vec::new(),
+                input_interfaces: Vec::new(),
+                address_family: None,
+                analyzable: false,
+            })
+            .collect();
+    };
+    let mut verdict = ObservedRuleVerdict::Other;
+    let mut matches = NftMatchState::default();
+    let mut analyzable = true;
+    for expression in expressions {
+        if expression.get("counter").is_some() {
+            continue;
+        }
+        if expression.get("masquerade").is_some()
+            || expression.get("snat").is_some()
+            || expression.get("dnat").is_some()
+        {
+            continue;
+        }
+        if let Some(value) = expression.get("drop") {
+            if !value.is_null() {
+                analyzable = false;
+            }
+            verdict = ObservedRuleVerdict::Drop;
+            break;
+        }
+        if let Some(value) = expression.get("reject") {
+            let _ = value;
+            verdict = ObservedRuleVerdict::Reject;
+            break;
+        }
+        if expression.get("accept").is_some() {
+            verdict = ObservedRuleVerdict::Accept;
+            break;
+        }
+        if expression.get("jump").is_some() || expression.get("goto").is_some() {
+            verdict = ObservedRuleVerdict::Unknown;
+            analyzable = false;
+            break;
+        }
+        if let Some(matcher) = expression.get("match") {
+            if !parse_nft_match(matcher, &mut matches) {
+                analyzable = false;
+            }
+            continue;
+        }
+        analyzable = false;
+        verdict = ObservedRuleVerdict::Unknown;
+        break;
+    }
+    if verdict == ObservedRuleVerdict::Other && !analyzable {
+        // Unsupported terminal statements (for example a verdict map) can
+        // hide a drop even when no literal drop expression was recognized.
+        verdict = ObservedRuleVerdict::Unknown;
+    }
+    if !matches!(
+        verdict,
+        ObservedRuleVerdict::Drop | ObservedRuleVerdict::Reject | ObservedRuleVerdict::Unknown
+    ) {
+        return Vec::new();
+    }
+    let families = nft_family(family);
+    let handle = rule.get("handle").and_then(serde_json::Value::as_u64);
+    families
+        .into_iter()
+        .map(|family| ObservedFirewallRule {
+            family,
+            table: table.into(),
+            chain: chain.into(),
+            hook,
+            priority,
+            handle,
+            owner: Ownership::Unknown,
+            verdict,
+            source_subnets: matches.source_subnets.clone(),
+            destination_subnets: matches.destination_subnets.clone(),
+            protocol: matches.protocol,
+            destination_ports: matches.destination_ports.clone(),
+            input_interfaces: matches.input_interfaces.clone(),
+            address_family: matches.address_family,
+            analyzable,
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct NftMatchState {
+    source_subnets: Vec<ipnet::IpNet>,
+    destination_subnets: Vec<ipnet::IpNet>,
+    protocol: Option<Protocol>,
+    destination_ports: Vec<PortRange>,
+    input_interfaces: Vec<String>,
+    address_family: Option<AddressFamily>,
+}
+
+fn parse_nft_match(matcher: &serde_json::Value, state: &mut NftMatchState) -> bool {
+    let (Some(operator), Some(left), Some(right)) = (
+        matcher.get("op").and_then(serde_json::Value::as_str),
+        matcher.get("left"),
+        matcher.get("right"),
+    ) else {
+        return false;
+    };
+    if operator != "==" {
+        return false;
+    }
+    if left
+        .get("meta")
+        .and_then(|value| value.get("key"))
+        .and_then(serde_json::Value::as_str)
+        == Some("iifname")
+    {
+        return right.as_str().is_some_and(|value| {
+            state.input_interfaces.push(value.into());
+            true
+        });
+    }
+    if left
+        .get("meta")
+        .and_then(|value| value.get("key"))
+        .and_then(serde_json::Value::as_str)
+        == Some("nfproto")
+    {
+        state.address_family = match right.as_str() {
+            Some("ipv4") => Some(AddressFamily::Ipv4),
+            Some("ipv6") => Some(AddressFamily::Ipv6),
+            _ => return false,
+        };
+        return true;
+    }
+    if left
+        .get("meta")
+        .and_then(|value| value.get("key"))
+        .and_then(serde_json::Value::as_str)
+        == Some("l4proto")
+    {
+        state.protocol = match right.as_str() {
+            Some("tcp") => Some(Protocol::Tcp),
+            Some("udp") => Some(Protocol::Udp),
+            Some("icmp") => Some(Protocol::Icmp),
+            Some("ipv6-icmp") => Some(Protocol::Icmpv6),
+            _ => return false,
+        };
+        return true;
+    }
+    let Some(payload) = left.get("payload") else {
+        return false;
+    };
+    let (Some(payload_protocol), Some(field)) = (
+        payload.get("protocol").and_then(serde_json::Value::as_str),
+        payload.get("field").and_then(serde_json::Value::as_str),
+    ) else {
+        return false;
+    };
+    match (payload_protocol, field) {
+        ("ip", "saddr") | ("ip6", "saddr") => {
+            let Some(network) = parse_ip_network(right) else {
+                return false;
+            };
+            state.source_subnets.push(network);
+            true
+        }
+        ("ip", "daddr") | ("ip6", "daddr") => {
+            let Some(network) = parse_ip_network(right) else {
+                return false;
+            };
+            state.destination_subnets.push(network);
+            true
+        }
+        ("tcp", "dport") | ("udp", "dport") => {
+            let Some(port) = right.as_u64().and_then(|value| u16::try_from(value).ok()) else {
+                return false;
+            };
+            state.destination_ports.push(PortRange {
+                start: port,
+                end: port,
+            });
+            let observed = if payload_protocol == "tcp" {
+                Protocol::Tcp
+            } else {
+                Protocol::Udp
+            };
+            if state.protocol.is_some_and(|value| value != observed) {
+                return false;
+            }
+            state.protocol = Some(observed);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn parse_ip_network(value: &serde_json::Value) -> Option<ipnet::IpNet> {
+    if let Some(address) = value.as_str() {
+        if let Ok(network) = address.parse() {
+            return Some(network);
+        }
+        let address: IpAddr = address.parse().ok()?;
+        return Some(ipnet::IpNet::from(address));
+    }
+    let prefix = value.get("prefix")?;
+    let address: IpAddr = prefix.get("addr")?.as_str()?.parse().ok()?;
+    let length: u8 = prefix.get("len")?.as_u64()?.try_into().ok()?;
+    ipnet::IpNet::new(address, length).ok()
 }
 
 fn parse_iptables(bytes: &[u8], family: AddressFamily) -> Option<BackendObservation> {
@@ -419,6 +847,7 @@ fn parse_iptables(bytes: &[u8], family: AddressFamily) -> Option<BackendObservat
         generation: 0,
         hooks,
         resources,
+        rules: Vec::new(),
         limitations: vec![
             "iptables-save does not expose reliable hook priority or chain ownership metadata"
                 .into(),
@@ -494,6 +923,171 @@ mod tests {
         assert_eq!(value.mode, BackendMode::Unknown);
         assert_eq!(value.resources[0].ownership, Ownership::Unknown);
         assert_eq!(value.resources.len(), 4);
+    }
+
+    #[test]
+    fn nft_rule_observation_parses_supported_drop_predicates_and_preserves_unknowns() {
+        let data = br#"{"nftables":[
+            {"chain":{"family":"ip","table":"filter","name":"INPUT","type":"filter","hook":"input","prio":0,"policy":"accept"}},
+            {"rule":{"family":"ip","table":"filter","chain":"INPUT","handle":9,"expr":[
+                {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"192.0.2.0","len":24}}}},
+                {"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"tcp"}},
+                {"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},
+                {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"eth0"}},
+                {"counter":{}},{"drop":null}
+            ]}},
+            {"rule":{"family":"ip","table":"filter","chain":"INPUT","handle":10,"expr":[
+                {"match":{"op":"==","left":{"meta":{"key":"mark"}},"right":7}},{"drop":null}
+            ]}},
+            {"rule":{"family":"inet","table":"manyfw","chain":"input","handle":11,"expr":[{"drop":null}]}}
+        ]}"#;
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(data).is_ok(),
+            "{:?}",
+            serde_json::from_slice::<serde_json::Value>(data)
+        );
+        let rules = parse_nft_rule_observations(data).unwrap();
+        assert_eq!(rules.len(), 2);
+        let exact = &rules[0];
+        assert_eq!(exact.family, AddressFamily::Ipv4);
+        assert_eq!(exact.table, "filter");
+        assert_eq!(exact.chain, "INPUT");
+        assert_eq!(exact.hook, Hook::Input);
+        assert_eq!(exact.priority, Some(0));
+        assert_eq!(exact.handle, Some(9));
+        assert_eq!(exact.owner, Ownership::Unknown);
+        assert_eq!(exact.verdict, ObservedRuleVerdict::Drop);
+        assert_eq!(exact.source_subnets, vec!["192.0.2.0/24".parse().unwrap()]);
+        assert_eq!(exact.protocol, Some(Protocol::Tcp));
+        assert_eq!(
+            exact.destination_ports,
+            vec![PortRange {
+                start: 443,
+                end: 443
+            }]
+        );
+        assert_eq!(exact.input_interfaces, vec!["eth0"]);
+        assert!(exact.analyzable);
+        assert!(!rules[1].analyzable);
+    }
+
+    #[test]
+    fn nft_rule_uses_the_first_terminal_verdict() {
+        let rules = parse_nft_rule_observations(
+            br#"{"nftables":[
+                {"chain":{"family":"ip","table":"filter","name":"input","hook":"input","prio":0}},
+                {"rule":{"family":"ip","table":"filter","chain":"input","handle":1,"expr":[{"drop":null},{"accept":null}]}},
+                {"rule":{"family":"ip","table":"filter","chain":"input","handle":2,"expr":[{"accept":null},{"drop":null}]}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].handle, Some(1));
+        assert_eq!(rules[0].verdict, ObservedRuleVerdict::Drop);
+    }
+
+    #[test]
+    fn nft_rules_with_missing_identity_are_kept_as_unknown_candidates() {
+        let rules = parse_nft_rule_observations(
+            br#"{"nftables":[
+                {"rule":{"family":"ip","table":"filter","handle":1,"expr":[{"drop":null}]}},
+                {"rule":{"handle":2,"expr":[{"drop":null}]}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 3);
+        assert!(rules.iter().all(|rule| {
+            rule.hook == Hook::Unknown
+                && rule.verdict == ObservedRuleVerdict::Unknown
+                && rule.owner == Ownership::Unknown
+                && !rule.analyzable
+        }));
+        assert!(rules.iter().any(|rule| rule.family == AddressFamily::Ipv4));
+        assert!(rules.iter().any(|rule| rule.family == AddressFamily::Ipv6));
+    }
+
+    #[test]
+    fn unsupported_nft_family_rules_are_kept_as_unknown_candidates() {
+        let rules = parse_nft_rule_observations(
+            br#"{"nftables":[
+                {"chain":{"family":"netdev","table":"ingress","name":"input","hook":"ingress","prio":-500}},
+                {"rule":{"family":"netdev","table":"ingress","chain":"input","handle":3,"expr":[{"drop":null}]}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|rule| {
+            rule.hook == Hook::Unknown
+                && rule.verdict == ObservedRuleVerdict::Unknown
+                && rule.owner == Ownership::Unknown
+                && !rule.analyzable
+                && rule.table == "ingress"
+                && rule.chain == "input"
+        }));
+        assert!(rules.iter().any(|rule| rule.family == AddressFamily::Ipv4));
+        assert!(rules.iter().any(|rule| rule.family == AddressFamily::Ipv6));
+    }
+
+    #[test]
+    fn nft_drop_base_chain_policy_is_observed_as_an_unconditional_drop() {
+        let data = br#"{"nftables":[{"chain":{"family":"inet","table":"security","name":"input","type":"filter","hook":"input","prio":5,"policy":"drop"}}]}"#;
+        let rules = parse_nft_rule_observations(data).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|rule| {
+            rule.verdict == ObservedRuleVerdict::Drop
+                && rule.hook == Hook::Input
+                && rule.priority == Some(5)
+                && rule.analyzable
+        }));
+    }
+
+    #[test]
+    fn postrouting_masquerade_is_not_misclassified_as_a_possible_drop() {
+        let data = br#"{"nftables":[
+            {"chain":{"family":"ip","table":"nat","name":"post","type":"nat","hook":"postrouting","prio":100,"policy":"accept"}},
+            {"rule":{"family":"ip","table":"nat","chain":"post","handle":2,"expr":[
+                {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"192.0.2.0","len":24}}}},
+                {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"198.51.100.0","len":24}}}},
+                {"counter":{}},{"masquerade":null}
+            ]}}
+        ]}"#;
+        let rules = parse_nft_rule_observations(data).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn drop_policy_without_a_recognized_hook_is_preserved_as_unknown() {
+        let rules = parse_nft_rule_observations(
+            br#"{"nftables":[
+                {"chain":{"family":"ip","table":"filter","name":"no-hook","policy":"drop"}},
+                {"chain":{"family":"ip","table":"filter","name":"bad-hook","hook":"mystery","prio":3,"policy":"drop"}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|rule| {
+            rule.hook == Hook::Unknown
+                && rule.verdict == ObservedRuleVerdict::Drop
+                && !rule.analyzable
+        }));
+    }
+
+    #[test]
+    fn unknown_terminal_expression_and_missing_expression_remain_possible_drops() {
+        let rules = parse_nft_rule_observations(
+            br#"{"nftables":[
+                {"chain":{"family":"ip","table":"filter","name":"input","hook":"input","prio":0}},
+                {"rule":{"family":"ip","table":"filter","chain":"input","handle":1,"expr":[{"vmap":{"key":{"meta":{"key":"l4proto"}},"data":{"set":[{"elem":{"val":"tcp","stmt":{"drop":null}}}]}}}]}},
+                {"rule":{"family":"ip","table":"filter","chain":"input","handle":2}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|rule| {
+            rule.verdict == ObservedRuleVerdict::Unknown
+                && !rule.analyzable
+                && rule.hook == Hook::Input
+        }));
     }
 
     #[test]

@@ -117,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         hook: Some(Hook::Input),
                     },
                 ],
+                rules: Vec::new(),
                 limitations: Vec::new(),
             },
             family_limitations: Default::default(),
