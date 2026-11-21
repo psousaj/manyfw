@@ -2,8 +2,8 @@
 
 use manyfw_core::backend::{AddressFamily, PlanOperation};
 use manyfw_core::transaction::{
-    ApplyReport, Checkpoint, FileStore, Result as TxResult, TransactionBackend, TransactionError,
-    TransactionPlan, TransactionRecord, TransactionStore,
+    ApplyReport, ChangeArtifact, Checkpoint, FileStore, Result as TxResult, TransactionBackend,
+    TransactionError, TransactionPlan, TransactionRecord, TransactionStore,
 };
 use manyfw_core::{Action, PortScope, Protocol, Selector};
 use sha2::{Digest, Sha256};
@@ -131,7 +131,7 @@ impl NftBackend {
 
     fn owned_table(&self) -> TxResult<Option<String>> {
         let output = Command::new("nft")
-            .args(["list", "table", "inet", TABLE])
+            .args(["--json", "list", "table", "inet", TABLE])
             .output()
             .map_err(|error| backend_error(&format!("cannot inspect ManyFW table: {error}")))?;
         if !output.status.success() {
@@ -148,25 +148,13 @@ impl NftBackend {
             }
             return Err(backend_error("ManyFW table inspection failed"));
         }
-        let text = String::from_utf8(output.stdout)
-            .map_err(|_| backend_error("ManyFW table returned non-UTF8 state"))?;
-        if !text.contains(&format!("comment \"{TABLE_MARKER}\"")) {
-            return Err(TransactionError::OwnershipChanged);
-        }
-        let json_output = Command::new("nft")
-            .args(["--json", "list", "table", "inet", TABLE])
-            .output()
-            .map_err(|error| {
-                backend_error(&format!("cannot verify ManyFW object ownership: {error}"))
-            })?;
-        if !json_output.status.success() {
-            return Err(TransactionError::OwnershipChanged);
-        }
-        verify_owned_table_json(
-            &serde_json::from_slice(&json_output.stdout)
-                .map_err(|_| backend_error("invalid ManyFW table JSON"))?,
-        )?;
-        Ok(Some(text))
+        let mut value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| backend_error("invalid ManyFW table JSON"))?;
+        verify_owned_table_json(&value)?;
+        strip_volatile_counters(&mut value);
+        Ok(Some(serde_json::to_string(&value).map_err(|_| {
+            backend_error("cannot canonicalize ManyFW table JSON")
+        })?))
     }
 
     fn validate_plan(&self, plan: &TransactionPlan) -> TxResult<()> {
@@ -307,123 +295,92 @@ impl NftBackend {
         Err(backend_error("recovery supervisor did not arm transaction"))
     }
 
-    fn apply_script(&self, plan: &TransactionPlan) -> TxResult<()> {
+    fn change_artifact_for(&self, plan: &TransactionPlan) -> TxResult<ChangeArtifact> {
         self.validate_plan(plan)?;
-        let current = self.owned_table()?;
-        let mut script = String::new();
-        if current.is_some() {
-            script.push_str(&format!("delete table inet {TABLE}\n"));
-        }
-        script.push_str(&format!(
-            "add table inet {TABLE} {{ comment \"{TABLE_MARKER}\"; }}\n"
-        ));
-        script.push_str(&format!("add chain inet {TABLE} input {{ type filter hook input priority {CHAIN_PRIORITY}; policy accept; }}\n"));
-        let operations = plan
-            .operations
-            .iter()
-            .filter(|operation| {
-                matches!(
-                    operation.planned_operation.as_ref(),
-                    Some(PlanOperation::EnsureRule { .. })
-                )
-            })
-            .collect::<Vec<_>>();
-        for operation in operations {
-            let Some(PlanOperation::EnsureRule {
-                source_subnets,
-                source_interfaces,
-                family,
-                action,
-                protocol,
-                ports,
-                host_address,
-                ..
-            }) = operation.planned_operation.as_ref()
-            else {
-                unreachable!()
-            };
-            let family_match = |network: &&ipnet::IpNet| match family {
-                AddressFamily::Ipv4 => network.addr().is_ipv4(),
-                AddressFamily::Ipv6 => network.addr().is_ipv6(),
-            };
-            let source = source_subnets
-                .iter()
-                .filter(family_match)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            let src_expr = source.join(", ");
-            let addr = match family {
-                AddressFamily::Ipv4 => "ip",
-                AddressFamily::Ipv6 => "ip6",
-            };
-            let mut expression = if source.is_empty() {
-                format!(
-                    "meta nfproto {}",
-                    if *family == AddressFamily::Ipv4 {
+        let replace_owned_table = self.owned_table()?.is_some();
+        Ok(ChangeArtifact {
+            format: "nftables-json".into(),
+            version: 1,
+            document: build_apply_document(plan, replace_owned_table)?,
+        })
+    }
+}
+
+fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> TxResult<String> {
+    use serde_json::json;
+
+    let mut commands = Vec::new();
+    if replace_owned_table {
+        commands.push(json!({"delete":{"table":{"family":"inet","name":TABLE}}}));
+    }
+    commands.push(json!({"create":{"table":{
+        "family":"inet", "name":TABLE, "comment":TABLE_MARKER
+    }}}));
+    commands.push(json!({"add":{"chain":{
+        "family":"inet",
+        "table":TABLE,
+        "name":"input",
+        "type":"filter",
+        "hook":"input",
+        "prio":CHAIN_PRIORITY,
+        "policy":"accept"
+    }}}));
+
+    for operation in &plan.operations {
+        let Some(typed) = operation.planned_operation.as_ref() else {
+            return Err(backend_error("missing typed planner operation"));
+        };
+        match typed {
+            PlanOperation::EnsureRule { .. } => {
+                let comment = format!(
+                    "manyfw-rule-v1-{}",
+                    fingerprint(&serde_json::to_string(typed).unwrap_or_default())
+                );
+                let expressions = expected_rule_expression(typed)?;
+                commands.push(json!({"add":{"rule":{
+                    "family":"inet",
+                    "table":TABLE,
+                    "chain":"input",
+                    "expr":expressions,
+                    "comment":comment
+                }}}));
+            }
+            PlanOperation::SetManagedDefault { action, family, .. } => {
+                if default_rule(*family, *action)?.is_some() {
+                    let nfproto = if *family == AddressFamily::Ipv4 {
                         "ipv4"
                     } else {
                         "ipv6"
-                    }
-                )
-            } else {
-                format!("{addr} saddr {{ {src_expr} }}")
-            };
-            if !source_interfaces.is_empty() {
-                let names = source_interfaces
-                    .iter()
-                    .map(|interface| match interface {
-                        manyfw_core::InterfaceSelector::Exact(name)
-                            if valid_interface_name(name) =>
-                        {
-                            Ok(format!("\"{name}\""))
-                        }
-                        _ => Err(backend_error("unsupported source interface")),
-                    })
-                    .collect::<TxResult<Vec<_>>>()?;
-                expression.push_str(&format!(" iifname {{ {} }}", names.join(", ")));
-            }
-            if let Some(host) = host_address.as_ref() {
-                expression.push_str(&format!(" {addr} daddr {host}"));
-            }
-            match protocol {
-                Protocol::Tcp | Protocol::Udp => {
-                    expression.push_str(&format!(" {}", nft_transport(*protocol, ports)?));
+                    };
+                    let expressions = json!([
+                        {"match":{
+                            "op":"==",
+                            "left":{"meta":{"key":"nfproto"}},
+                            "right":nfproto
+                        }},
+                        {"drop":null}
+                    ]);
+                    let comment = format!(
+                        "manyfw-default-v1-{}",
+                        fingerprint(&serde_json::to_string(typed).unwrap_or_default())
+                    );
+                    commands.push(json!({"add":{"rule":{
+                        "family":"inet",
+                        "table":TABLE,
+                        "chain":"input",
+                        "expr":expressions,
+                        "comment":comment
+                    }}}));
                 }
-                Protocol::Icmp if *family == AddressFamily::Ipv4 => {
-                    expression.push_str(" ip protocol icmp")
-                }
-                Protocol::Icmpv6 if *family == AddressFamily::Ipv6 => {
-                    expression.push_str(" meta l4proto ipv6-icmp")
-                }
-                _ => return Err(backend_error("protocol and address family mismatch")),
             }
-            let verdict = match action {
-                Action::Allow => "accept",
-                Action::Deny => "drop",
-                Action::Reject => "reject",
-            };
-            script.push_str(&format!(
-                "add rule inet {TABLE} input {expression} {verdict} comment \"manyfw-rule-v1-{}\"\n",
-                fingerprint(&serde_json::to_string(&operation.planned_operation).unwrap_or_default())
-            ));
-        }
-        for operation in &plan.operations {
-            let Some(PlanOperation::SetManagedDefault { action, family, .. }) =
-                operation.planned_operation.as_ref()
-            else {
-                continue;
-            };
-            if let Some(expression) = default_rule(*family, *action)? {
-                let marker = fingerprint(
-                    &serde_json::to_string(&operation.planned_operation).unwrap_or_default(),
-                );
-                script.push_str(&format!(
-                    "add rule inet {TABLE} input {expression} comment \"manyfw-default-v1-{marker}\"\n"
-                ));
+            PlanOperation::Diagnostic { .. } => {
+                return Err(backend_error("diagnostic operation cannot be applied"));
             }
         }
-        run_nft_script(&script)
     }
+
+    serde_json::to_string(&json!({"nftables":commands}))
+        .map_err(|error| backend_error(&format!("cannot serialize nftables JSON: {error}")))
 }
 
 fn default_rule(family: AddressFamily, action: Action) -> TxResult<Option<&'static str>> {
@@ -436,6 +393,10 @@ fn default_rule(family: AddressFamily, action: Action) -> TxResult<Option<&'stat
 }
 
 impl TransactionBackend for NftBackend {
+    fn change_artifact(&self, plan: &TransactionPlan) -> TxResult<Option<ChangeArtifact>> {
+        self.change_artifact_for(plan).map(Some)
+    }
+
     fn restore_checkpoint_after_reboot(&self, record: &TransactionRecord) -> TxResult<bool> {
         use manyfw_core::transaction::{Clock, LinuxClock};
         let Some(deadline) = record.confirmed_deadline.as_ref() else {
@@ -470,7 +431,7 @@ impl TransactionBackend for NftBackend {
         // An exact checkpoint may already be restored after a crash between
         // kernel commit and durable success. Never rewrite a present table.
         if let Some(current) = self.owned_table()? {
-            return if current.split_whitespace().eq(saved.split_whitespace()) {
+            return if owned_table_json_equal(&current, saved)? {
                 Ok(true)
             } else {
                 Err(TransactionError::OwnershipChanged)
@@ -482,11 +443,11 @@ impl TransactionBackend for NftBackend {
         if absent_reboot_fingerprint(self.ruleset()?)? != before {
             return Err(TransactionError::OwnershipChanged);
         }
-        run_nft_script(&reboot_restore_script(saved)?)?;
+        run_nft_json(&reboot_restore_script(saved)?)?;
         let restored = self
             .owned_table()?
             .ok_or(TransactionError::OwnershipChanged)?;
-        if restored.split_whitespace().ne(saved.split_whitespace()) {
+        if !owned_table_json_equal(&restored, saved)? {
             return Err(TransactionError::OwnershipChanged);
         }
         Ok(true)
@@ -531,6 +492,10 @@ impl TransactionBackend for NftBackend {
                 "foreign-ruleset-v1:{}",
                 foreign_ruleset_fingerprint(&ruleset)?
             ),
+            format!(
+                "change-artifact-v1:{}",
+                fingerprint(&self.change_artifact_for(plan)?.document)
+            ),
         ]);
         Ok(Checkpoint::new(
             owned_resources,
@@ -560,7 +525,35 @@ impl TransactionBackend for NftBackend {
 
     fn apply(&self, plan: &TransactionPlan) -> TxResult<ApplyReport> {
         self.validate_plan(plan)?;
-        self.apply_script(plan)?;
+        let artifact = self.change_artifact_for(plan)?;
+        run_nft_json(&artifact.document)?;
+        Ok(ApplyReport {
+            complete: true,
+            ownership_fingerprint: self.transaction_fingerprint()?,
+        })
+    }
+
+    fn apply_record(
+        &self,
+        record: &TransactionRecord,
+        artifact: Option<&ChangeArtifact>,
+    ) -> TxResult<ApplyReport> {
+        self.validate_plan(&record.plan)?;
+        let artifact = artifact
+            .ok_or_else(|| backend_error("transaction has no persisted nftables artifact"))?;
+        let checkpoint = record
+            .checkpoint
+            .as_ref()
+            .ok_or(TransactionError::CorruptCheckpoint)?;
+        verify_change_artifact_binding(checkpoint, &record.plan, artifact)?;
+        if artifact.format != "nftables-json" || artifact.version != 1 {
+            return Err(backend_error("unsupported nftables change artifact"));
+        }
+        let current_artifact = self.change_artifact_for(&record.plan)?;
+        if current_artifact != *artifact {
+            return Err(TransactionError::OwnershipChanged);
+        }
+        run_nft_json(&artifact.document)?;
         Ok(ApplyReport {
             complete: true,
             ownership_fingerprint: self.transaction_fingerprint()?,
@@ -602,15 +595,24 @@ impl TransactionBackend for NftBackend {
         if current.is_none() && checkpoint.owned_resources.is_empty() {
             return Ok(());
         }
-        let current = current.ok_or(TransactionError::OwnershipChanged)?;
-        if !current.contains(&format!("comment \"{TABLE_MARKER}\"")) {
-            return Err(TransactionError::OwnershipChanged);
-        }
-        let mut script = format!("delete table inet {TABLE}\n");
+        current.ok_or(TransactionError::OwnershipChanged)?;
+        let mut commands = vec![serde_json::json!({"delete":{"table":{
+            "family":"inet","name":TABLE
+        }}})];
         if let Some(saved) = checkpoint.owned_resources.get(&format!("inet {TABLE}")) {
-            script.push_str(saved);
+            let restore = restore_document(saved)?;
+            commands.extend(
+                restore["nftables"]
+                    .as_array()
+                    .ok_or(TransactionError::CorruptCheckpoint)?
+                    .iter()
+                    .cloned(),
+            );
         }
-        run_nft_script(&script)
+        run_nft_json(
+            &serde_json::to_string(&serde_json::json!({"nftables":commands}))
+                .map_err(|_| TransactionError::CorruptCheckpoint)?,
+        )
     }
 
     fn rollback_interrupted(
@@ -955,6 +957,7 @@ fn valid_protocol_ports(protocol: Protocol, ports: &PortScope, family: AddressFa
     }
 }
 
+#[cfg(test)]
 fn nft_transport(protocol: Protocol, ports: &PortScope) -> TxResult<String> {
     let proto = match protocol {
         Protocol::Tcp => "tcp",
@@ -1095,6 +1098,27 @@ fn only_object_fields(value: &serde_json::Value, allowed: &[&str]) -> bool {
         .is_some_and(|fields| fields.keys().all(|key| allowed.contains(&key.as_str())))
 }
 
+fn verify_change_artifact_binding(
+    checkpoint: &Checkpoint,
+    plan: &TransactionPlan,
+    artifact: &ChangeArtifact,
+) -> TxResult<()> {
+    let binding = format!("change-artifact-v1:{}", fingerprint(&artifact.document));
+    if !checkpoint.is_intact()
+        || checkpoint.owner_fingerprint != plan.ownership_fingerprint
+        || checkpoint
+            .foreign_resources
+            .iter()
+            .filter(|entry| entry.starts_with("change-artifact-v1:"))
+            .count()
+            != 1
+        || !checkpoint.foreign_resources.contains(&binding)
+    {
+        return Err(TransactionError::CorruptCheckpoint);
+    }
+    Ok(())
+}
+
 fn expected_owned_comments(plan: &TransactionPlan) -> BTreeSet<String> {
     plan.operations
         .iter()
@@ -1165,137 +1189,383 @@ fn authorized_reboot_script<'a>(
         .owned_resources
         .get("inet manyfw")
         .ok_or(TransactionError::OwnershipChanged)?;
-    validate_reboot_checkpoint_script(saved)?;
+    validate_reboot_checkpoint_json(saved)?;
     Ok(Some(saved))
 }
 
-/// Accept only the listing grammar emitted by this adapter, not arbitrary nft
-/// command text. In particular, no command can escape the single table block,
-/// reference a foreign chain, include a file, or supply an unreviewed verdict.
-fn validate_reboot_checkpoint_script(saved: &str) -> TxResult<()> {
-    let lines = saved
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
+fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
+    use serde_json::Value;
     let invalid = || TransactionError::CorruptCheckpoint;
-    if lines.len() < 6
-        || lines[0] != "table inet manyfw {"
-        || lines[1].trim_end_matches(';') != format!("comment \"{TABLE_MARKER}\"")
-        || lines[2] != "chain input {"
-        || !matches!(
-            lines[3],
-            "type filter hook input priority raw; policy accept;"
-                | "type filter hook input priority -300; policy accept;"
-        )
-        || lines[lines.len() - 2] != "}"
-        || lines[lines.len() - 1] != "}"
-    {
-        return Err(invalid());
-    }
-    for line in &lines[4..lines.len() - 2] {
-        let (expression, marker) = line.rsplit_once(" comment \"").ok_or_else(invalid)?;
-        let marker = marker.strip_suffix('"').ok_or_else(invalid)?;
-        let digest = marker
+    let value: Value = serde_json::from_str(saved).map_err(|_| invalid())?;
+    verify_owned_table_json(&value).map_err(|_| invalid())?;
+    let objects = value["nftables"].as_array().ok_or_else(invalid)?;
+    for object in objects {
+        if let Some(chain) = object.get("chain") {
+            if chain["prio"].as_i64() != Some(i64::from(CHAIN_PRIORITY)) {
+                return Err(invalid());
+            }
+        }
+        let Some(rule) = object.get("rule") else {
+            continue;
+        };
+        let comment = rule["comment"].as_str().ok_or_else(invalid)?;
+        let digest = comment
             .strip_prefix("manyfw-rule-v1-")
-            .or_else(|| marker.strip_prefix("manyfw-default-v1-"))
+            .or_else(|| comment.strip_prefix("manyfw-default-v1-"))
             .ok_or_else(invalid)?;
         if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid());
         }
-        let tokens = expression
-            .replace('{', " { ")
-            .replace('}', " } ")
-            .replace(',', " , ");
-        let mut depth = 0i32;
-        for character in expression.chars() {
-            match character {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
+        let expressions = rule["expr"].as_array().ok_or_else(invalid)?;
+        if expressions.is_empty() {
+            return Err(invalid());
+        }
+        let verdict = expressions.last().ok_or_else(invalid)?;
+        let action = validate_checkpoint_verdict(verdict)?;
+        if comment.starts_with("manyfw-default-v1-") {
+            if expressions.len() != 2
+                || validate_checkpoint_match(&expressions[0])? != CheckpointMatch::Family4
+                    && validate_checkpoint_match(&expressions[0])? != CheckpointMatch::Family6
+                || action != CheckpointAction::Drop
+            {
+                return Err(invalid());
             }
-            if depth < 0 {
+        } else {
+            let mut ranks = Vec::new();
+            let mut family = None;
+            let mut has_transport = false;
+            for expression in &expressions[..expressions.len() - 1] {
+                let matched = validate_checkpoint_match(expression)?;
+                let (rank, observed_family, transport) = matched.details();
+                if ranks.last().is_some_and(|last| *last >= rank)
+                    || observed_family.is_some_and(|value| family.is_some_and(|old| old != value))
+                {
+                    return Err(invalid());
+                }
+                ranks.push(rank);
+                family = family.or(observed_family);
+                has_transport |= transport;
+            }
+            if !has_transport
+                || (action != CheckpointAction::Reject && family.is_none())
+                || (action == CheckpointAction::Reject && !reject_family_matches(verdict, family))
+            {
                 return Err(invalid());
             }
         }
-        if depth != 0
-            || !(matches!(
-                expression.split_whitespace().last(),
-                Some("accept" | "drop" | "reject")
-            ) || expression.ends_with(" reject with icmp port-unreachable")
-                || expression.ends_with(" reject with icmpv6 port-unreachable"))
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointMatch {
+    Family4,
+    Family6,
+    Source4,
+    Source6,
+    Interface,
+    Destination4,
+    Destination6,
+    Transport4,
+    Transport6,
+    TransportEither,
+}
+
+impl CheckpointMatch {
+    fn details(self) -> (u8, Option<u8>, bool) {
+        match self {
+            Self::Family4 => (0, Some(4), false),
+            Self::Family6 => (0, Some(6), false),
+            Self::Source4 => (1, Some(4), false),
+            Self::Source6 => (1, Some(6), false),
+            Self::Interface => (2, None, false),
+            Self::Destination4 => (3, Some(4), false),
+            Self::Destination6 => (3, Some(6), false),
+            Self::Transport4 => (4, Some(4), true),
+            Self::Transport6 => (4, Some(6), true),
+            Self::TransportEither => (4, None, true),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointAction {
+    Accept,
+    Drop,
+    Reject,
+}
+
+fn validate_checkpoint_verdict(expression: &serde_json::Value) -> TxResult<CheckpointAction> {
+    let verdict = expression
+        .as_object()
+        .ok_or(TransactionError::CorruptCheckpoint)?;
+    if verdict.len() != 1 {
+        return Err(TransactionError::CorruptCheckpoint);
+    }
+    match verdict
+        .iter()
+        .next()
+        .map(|(key, value)| (key.as_str(), value))
+    {
+        Some(("accept", value)) if value.is_null() => Ok(CheckpointAction::Accept),
+        Some(("drop", value)) if value.is_null() => Ok(CheckpointAction::Drop),
+        Some(("reject", value))
+            if value["expr"] == "port-unreachable"
+                && matches!(value["type"].as_str(), Some("icmp" | "icmpv6"))
+                && value.as_object().is_some_and(|fields| {
+                    fields
+                        .keys()
+                        .all(|key| ["type", "expr"].contains(&key.as_str()))
+                        && fields.len() == 2
+                }) =>
         {
+            Ok(CheckpointAction::Reject)
+        }
+        _ => Err(TransactionError::CorruptCheckpoint),
+    }
+}
+
+fn reject_family_matches(expression: &serde_json::Value, family: Option<u8>) -> bool {
+    let reject_type = expression["reject"]["type"].as_str();
+    matches!(
+        (family, reject_type),
+        (Some(4), Some("icmp")) | (Some(6), Some("icmpv6"))
+    ) || matches!((family, reject_type), (None, Some("icmp" | "icmpv6")))
+}
+
+fn validate_checkpoint_match(expression: &serde_json::Value) -> TxResult<CheckpointMatch> {
+    let invalid = || TransactionError::CorruptCheckpoint;
+    let matcher = expression
+        .get("match")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(invalid)?;
+    if matcher.len() != 3 || matcher.get("op").and_then(serde_json::Value::as_str) != Some("==") {
+        return Err(invalid());
+    }
+    let left = matcher
+        .get("left")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(invalid)?;
+    if left.len() != 1 {
+        return Err(invalid());
+    }
+    let right = matcher.get("right").ok_or_else(invalid)?;
+    let Some(meta) = left.get("meta").and_then(serde_json::Value::as_object) else {
+        let payload = left
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(invalid)?;
+        if payload.len() != 2 {
             return Err(invalid());
         }
-        for token in tokens.split_whitespace() {
-            if matches!(
-                token,
-                "{" | "}"
-                    | ","
-                    | "ip"
-                    | "ip6"
-                    | "saddr"
-                    | "daddr"
-                    | "tcp"
-                    | "udp"
-                    | "dport"
-                    | "protocol"
-                    | "icmp"
-                    | "meta"
-                    | "l4proto"
-                    | "ipv6-icmp"
-                    | "nfproto"
-                    | "ipv4"
-                    | "ipv6"
-                    | "accept"
-                    | "drop"
-                    | "reject"
-                    | "iifname"
-                    | "with"
-                    | "icmpv6"
-                    | "port-unreachable"
-            ) {
-                continue;
+        let protocol = payload.get("protocol").and_then(serde_json::Value::as_str);
+        let field = payload.get("field").and_then(serde_json::Value::as_str);
+        return match (protocol, field) {
+            (Some("ip"), Some("saddr")) => {
+                validate_checkpoint_address(right, 4)?;
+                Ok(CheckpointMatch::Source4)
             }
-            if token.parse::<std::net::IpAddr>().is_ok()
-                || token
-                    .strip_prefix('"')
-                    .and_then(|value| value.strip_suffix('"'))
-                    .is_some_and(valid_interface_name)
-                || token.parse::<ipnet::IpNet>().is_ok()
-                || token.parse::<u16>().is_ok()
-                || token
-                    .split_once('-')
-                    .is_some_and(|(a, b)| a.parse::<u16>().is_ok() && b.parse::<u16>().is_ok())
+            (Some("ip6"), Some("saddr")) => {
+                validate_checkpoint_address(right, 6)?;
+                Ok(CheckpointMatch::Source6)
+            }
+            (Some("ip"), Some("daddr")) => {
+                validate_checkpoint_address(right, 4)?;
+                Ok(CheckpointMatch::Destination4)
+            }
+            (Some("ip6"), Some("daddr")) => {
+                validate_checkpoint_address(right, 6)?;
+                Ok(CheckpointMatch::Destination6)
+            }
+            (Some("ip"), Some("protocol")) if right == "icmp" => Ok(CheckpointMatch::Transport4),
+            (Some("tcp" | "udp"), Some("dport")) => {
+                validate_checkpoint_ports(right)?;
+                Ok(CheckpointMatch::TransportEither)
+            }
+            _ => Err(invalid()),
+        };
+    };
+    if meta.len() != 1 {
+        return Err(invalid());
+    }
+    match meta.get("key").and_then(serde_json::Value::as_str) {
+        Some("nfproto") if right == "ipv4" => Ok(CheckpointMatch::Family4),
+        Some("nfproto") if right == "ipv6" => Ok(CheckpointMatch::Family6),
+        Some("iifname") => {
+            validate_checkpoint_interfaces(right)?;
+            Ok(CheckpointMatch::Interface)
+        }
+        Some("l4proto") if right == "ipv6-icmp" => Ok(CheckpointMatch::Transport6),
+        Some("l4proto") if matches!(right.as_str(), Some("tcp" | "udp")) => {
+            Ok(CheckpointMatch::TransportEither)
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn validate_checkpoint_address(value: &serde_json::Value, family: u8) -> TxResult<()> {
+    use serde_json::Value;
+    let invalid = || TransactionError::CorruptCheckpoint;
+    let valid_address = |address: &str| {
+        address
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| (family == 4 && ip.is_ipv4()) || (family == 6 && ip.is_ipv6()))
+    };
+    match value {
+        Value::String(address) if valid_address(address) => Ok(()),
+        Value::Object(object) if object.len() == 1 => {
+            if let Some(set) = object.get("set").and_then(Value::as_array) {
+                if set.is_empty()
+                    || set.iter().any(|member| {
+                        if let Some(address) = member.as_str() {
+                            return !valid_address(address);
+                        }
+                        let Some(prefix) = member.get("prefix").and_then(Value::as_object) else {
+                            return true;
+                        };
+                        let Some(address) = prefix.get("addr").and_then(Value::as_str) else {
+                            return true;
+                        };
+                        let maximum = if family == 4 { 32 } else { 128 };
+                        prefix.len() != 2
+                            || !valid_address(address)
+                            || !prefix
+                                .get("len")
+                                .and_then(Value::as_u64)
+                                .is_some_and(|length| length <= maximum)
+                    })
+                {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
+            let prefix = object
+                .get("prefix")
+                .and_then(Value::as_object)
+                .ok_or_else(invalid)?;
+            let address = prefix
+                .get("addr")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let maximum = if family == 4 { 32 } else { 128 };
+            if prefix.len() == 2
+                && valid_address(address)
+                && prefix
+                    .get("len")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|length| length <= maximum)
             {
-                continue;
+                Ok(())
+            } else {
+                Err(invalid())
             }
-            return Err(invalid());
         }
+        _ => Err(invalid()),
+    }
+}
+
+fn validate_checkpoint_interfaces(value: &serde_json::Value) -> TxResult<()> {
+    let invalid = || TransactionError::CorruptCheckpoint;
+    let names = if let Some(name) = value.as_str() {
+        vec![name]
+    } else {
+        value["set"]
+            .as_array()
+            .ok_or_else(invalid)?
+            .iter()
+            .map(|item| item.as_str().ok_or_else(invalid))
+            .collect::<TxResult<Vec<_>>>()?
+    };
+    if names.is_empty() || !names.iter().all(|name| valid_interface_name(name)) {
+        return Err(invalid());
     }
     Ok(())
 }
 
-fn reboot_restore_script(saved: &str) -> TxResult<String> {
-    validate_reboot_checkpoint_script(saved)?;
-    // `create table` must contain the ownership comment, but nftables 1.0.9
-    // does not instantiate nested chains/rules from that command's block.
-    // Translate the validated listing to explicit commands in one batch.
-    let lines = saved
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let mut script = format!(
-        "create table inet {TABLE} {{ comment \"{TABLE_MARKER}\"; }}\nadd chain inet {TABLE} input {{ {} }}\n",
-        lines[3]
-    );
-    for rule in &lines[4..lines.len() - 2] {
-        script.push_str(&format!("add rule inet {TABLE} input {rule}\n"));
-    }
-    Ok(script)
+fn validate_checkpoint_ports(value: &serde_json::Value) -> TxResult<()> {
+    use serde_json::Value;
+    let invalid = || TransactionError::CorruptCheckpoint;
+    let valid_port = |value: &Value| {
+        value
+            .as_u64()
+            .is_some_and(|port| (1..=u16::MAX as u64).contains(&port))
+    };
+    let valid = match value {
+        Value::Number(_) => valid_port(value),
+        Value::Object(object) if object.len() == 1 => {
+            if let Some(set) = object.get("set").and_then(Value::as_array) {
+                !set.is_empty()
+                    && set.iter().all(|item| {
+                        if let Some(range) = item.get("range").and_then(Value::as_array) {
+                            range.len() == 2
+                                && valid_port(&range[0])
+                                && valid_port(&range[1])
+                                && range[0].as_u64() <= range[1].as_u64()
+                        } else {
+                            valid_port(item)
+                        }
+                    })
+            } else if let Some(range) = object.get("range").and_then(Value::as_array) {
+                range.len() == 2
+                    && valid_port(&range[0])
+                    && valid_port(&range[1])
+                    && range[0].as_u64() <= range[1].as_u64()
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+    if valid { Ok(()) } else { Err(invalid()) }
 }
 
+fn restore_document(saved: &str) -> TxResult<serde_json::Value> {
+    use serde_json::json;
+    let value = validate_reboot_checkpoint_json(saved)?;
+    let mut commands = Vec::new();
+    for entry in value["nftables"]
+        .as_array()
+        .ok_or(TransactionError::CorruptCheckpoint)?
+    {
+        if let Some(table) = entry.get("table") {
+            commands.push(json!({"create":{"table":{
+                "family":table["family"],
+                "name":table["name"],
+                "comment":table["comment"]
+            }}}));
+        } else if let Some(chain) = entry.get("chain") {
+            let mut chain = chain.clone();
+            if let Some(fields) = chain.as_object_mut() {
+                fields.remove("handle");
+            }
+            commands.push(json!({"add":{"chain":chain}}));
+        } else if let Some(rule) = entry.get("rule") {
+            let mut rule = rule.clone();
+            if let Some(fields) = rule.as_object_mut() {
+                fields.remove("handle");
+            }
+            commands.push(json!({"add":{"rule":rule}}));
+        }
+    }
+    Ok(json!({"nftables":commands}))
+}
+
+fn reboot_restore_script(saved: &str) -> TxResult<String> {
+    serde_json::to_string(&restore_document(saved)?)
+        .map_err(|_| TransactionError::CorruptCheckpoint)
+}
+
+fn owned_table_json_equal(left: &str, right: &str) -> TxResult<bool> {
+    let mut left: serde_json::Value =
+        serde_json::from_str(left).map_err(|_| TransactionError::CorruptCheckpoint)?;
+    let mut right: serde_json::Value =
+        serde_json::from_str(right).map_err(|_| TransactionError::CorruptCheckpoint)?;
+    strip_volatile_counters(&mut left);
+    strip_volatile_counters(&mut right);
+    Ok(left == right)
+}
+
+#[cfg(test)]
 fn nft_ports(ports: &PortScope) -> TxResult<String> {
     match ports {
         PortScope::Specific(ranges) if ranges.len() == 1 && ranges[0].start == ranges[0].end => {
@@ -1319,10 +1589,14 @@ fn nft_ports(ports: &PortScope) -> TxResult<String> {
     }
 }
 
-fn run_nft_script(script: &str) -> TxResult<()> {
+fn run_nft_json(document: &str) -> TxResult<()> {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|_| backend_error("invalid nftables JSON change artifact"))?;
+    if value["nftables"].as_array().is_none() {
+        return Err(backend_error("nftables JSON artifact lacks commands"));
+    }
     let mut child = Command::new("nft")
-        .arg("-f")
-        .arg("-")
+        .args(["--json", "--file", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1332,13 +1606,13 @@ fn run_nft_script(script: &str) -> TxResult<()> {
         .stdin
         .take()
         .ok_or_else(|| backend_error("nft stdin unavailable"))?
-        .write_all(script.as_bytes())
-        .map_err(|error| backend_error(&format!("cannot submit nft batch: {error}")))?;
+        .write_all(document.as_bytes())
+        .map_err(|error| backend_error(&format!("cannot submit nft JSON batch: {error}")))?;
     let output = child
         .wait_with_output()
         .map_err(|error| backend_error(&format!("cannot wait for nft: {error}")))?;
     if !output.status.success() {
-        return Err(backend_error("nft batch failed"));
+        return Err(backend_error("nft JSON batch failed"));
     }
     Ok(())
 }
@@ -1502,6 +1776,90 @@ fn secure_directory_owned_by(path: &std::path::Path, expected_uid: u32) -> TxRes
 mod tests {
     use super::*;
 
+    fn saved_table(expr: Vec<serde_json::Value>) -> String {
+        serde_json::json!({"nftables":[
+            {"metainfo":{"version":"1.0.9"}},
+            {"table":{"family":"inet","name":TABLE,"comment":TABLE_MARKER}},
+            {"chain":{"family":"inet","table":TABLE,"name":"input","type":"filter","hook":"input","prio":CHAIN_PRIORITY,"policy":"accept"}},
+            {"rule":{"family":"inet","table":TABLE,"chain":"input","comment":format!("manyfw-rule-v1-{}", "a".repeat(64)),"expr":expr}}
+        ]})
+        .to_string()
+    }
+
+    #[test]
+    fn change_document_is_versioned_json_with_exclusive_table_creation() {
+        let (plan, _, _) = interrupted_fixture();
+        let document = build_apply_document(&plan, false).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(value["nftables"][0]["create"]["table"]["family"], "inet");
+        assert_eq!(value["nftables"][0]["create"]["table"]["name"], TABLE);
+        assert_eq!(
+            value["nftables"][0]["create"]["table"]["comment"],
+            TABLE_MARKER
+        );
+        assert_eq!(value["nftables"][1]["add"]["chain"]["name"], "input");
+        let rule = value["nftables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|command| command["add"].get("rule"))
+            .unwrap();
+        assert_eq!(
+            rule["comment"]
+                .as_str()
+                .unwrap()
+                .split('-')
+                .take(3)
+                .collect::<Vec<_>>(),
+            ["manyfw", "rule", "v1"]
+        );
+        assert_eq!(rule["expr"][0]["match"]["right"], "127.0.0.1");
+        assert_eq!(rule["expr"][1]["match"]["right"], 12345);
+        assert_eq!(rule["expr"][2]["drop"], serde_json::Value::Null);
+        assert!(!document.contains("add table inet"));
+    }
+
+    #[test]
+    fn change_document_replaces_only_a_verified_owned_table() {
+        let (plan, _, _) = interrupted_fixture();
+        let document = build_apply_document(&plan, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(value["nftables"][0]["delete"]["table"]["name"], TABLE);
+        assert_eq!(value["nftables"][1]["create"]["table"]["name"], TABLE);
+    }
+
+    #[test]
+    fn checkpoint_integrity_binds_the_exact_change_artifact() {
+        let (plan, _, _) = interrupted_fixture();
+        let artifact = ChangeArtifact {
+            format: "nftables-json".into(),
+            version: 1,
+            document: build_apply_document(&plan, false).unwrap(),
+        };
+        let binding = format!("change-artifact-v1:{}", fingerprint(&artifact.document));
+        let checkpoint = Checkpoint::new(
+            BTreeMap::new(),
+            BTreeSet::from([binding]),
+            plan.ownership_fingerprint.clone(),
+        );
+        verify_change_artifact_binding(&checkpoint, &plan, &artifact).unwrap();
+
+        let mut substituted = artifact.clone();
+        substituted.document.push(' ');
+        assert_eq!(
+            verify_change_artifact_binding(&checkpoint, &plan, &substituted),
+            Err(TransactionError::CorruptCheckpoint)
+        );
+        let mut tampered = checkpoint;
+        tampered
+            .foreign_resources
+            .insert("change-artifact-v1:substituted".into());
+        assert_eq!(
+            verify_change_artifact_binding(&tampered, &plan, &artifact),
+            Err(TransactionError::CorruptCheckpoint)
+        );
+    }
+
     #[test]
     fn recovery_storage_directory_rejects_symlinks_and_enforces_root_private_mode() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -1551,53 +1909,92 @@ mod tests {
 
     #[test]
     fn reboot_restore_creates_checkpoint_marker_in_the_exclusive_declaration() {
-        // Exact checkpoint listing from the retained nftables 1.0.9 guest.
-        // Creating an empty table first lost the marker; nesting this listing
-        // under `create table` instead lost the chain and rule on nft 1.0.9.
-        let saved = "table inet manyfw {\n\tcomment \"manyfw-owner-v1\"\n\tchain input {\n\t\ttype filter hook input priority raw; policy accept;\n\t\tip saddr 127.0.0.1 tcp dport 65434 drop comment \"manyfw-rule-v1-18d4070cc98dc3d1893b99e199a65089c496507733aa6ba4b1e0d90a4d64e2af\"\n\t}\n}\n";
+        let saved = saved_table(vec![
+            serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":"127.0.0.1"}}),
+            serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":65434}}),
+            serde_json::json!({"drop":null}),
+        ]);
+        let restore: serde_json::Value =
+            serde_json::from_str(&reboot_restore_script(&saved).unwrap()).unwrap();
         assert_eq!(
-            reboot_restore_script(saved).unwrap(),
-            "create table inet manyfw { comment \"manyfw-owner-v1\"; }\nadd chain inet manyfw input { type filter hook input priority raw; policy accept; }\nadd rule inet manyfw input ip saddr 127.0.0.1 tcp dport 65434 drop comment \"manyfw-rule-v1-18d4070cc98dc3d1893b99e199a65089c496507733aa6ba4b1e0d90a4d64e2af\"\n"
+            restore["nftables"][0]["create"]["table"]["comment"],
+            TABLE_MARKER
         );
-        assert!(reboot_restore_script(&format!("{saved}flush ruleset\n")).is_err());
+        assert_eq!(restore["nftables"][1]["add"]["chain"]["name"], "input");
+        assert_eq!(
+            restore["nftables"][2]["add"]["rule"]["expr"][2]["drop"],
+            serde_json::Value::Null
+        );
+        let mut invalid: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        invalid["nftables"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"flush":{"ruleset":null}}));
+        assert!(reboot_restore_script(&invalid.to_string()).is_err());
     }
 
     #[test]
     fn reboot_restore_explicitly_creates_chain_even_for_ruleless_checkpoint() {
-        let saved = "table inet manyfw {\ncomment \"manyfw-owner-v1\"\nchain input {\ntype filter hook input priority -300; policy accept;\n}\n}\n";
-        assert_eq!(
-            reboot_restore_script(saved).unwrap(),
-            "create table inet manyfw { comment \"manyfw-owner-v1\"; }\nadd chain inet manyfw input { type filter hook input priority -300; policy accept; }\n"
-        );
+        let saved = serde_json::json!({"nftables":[
+            {"table":{"family":"inet","name":TABLE,"comment":TABLE_MARKER}},
+            {"chain":{"family":"inet","table":TABLE,"name":"input","type":"filter","hook":"input","prio":CHAIN_PRIORITY,"policy":"accept"}}
+        ]}).to_string();
+        let restore: serde_json::Value =
+            serde_json::from_str(&reboot_restore_script(&saved).unwrap()).unwrap();
+        assert_eq!(restore["nftables"].as_array().unwrap().len(), 2);
+        assert!(restore["nftables"][0].get("create").is_some());
+        assert!(restore["nftables"][1].get("add").is_some());
     }
 
     #[test]
-    fn reboot_checkpoint_script_is_strictly_scoped() {
-        let saved = format!(
-            "table inet manyfw {{\n comment \"{TABLE_MARKER}\"\n chain input {{\n type filter hook input priority raw; policy accept;\n ip saddr 127.0.0.1 tcp dport 12345 drop comment \"manyfw-rule-v1-{}\"\n }}\n}}\n",
-            "a".repeat(64)
-        );
-        assert!(validate_reboot_checkpoint_script(&saved).is_ok());
-        for bad in [
-            saved.replace("table inet manyfw", "table inet foreign"),
-            format!("{saved}flush ruleset\n"),
-            saved.replace("tcp dport 12345 drop", "jump foreign"),
-            saved.replace("priority raw", "priority 0"),
-            saved.replace("policy accept", "policy drop"),
-            saved.replace("chain input", "chain foreign"),
-            saved.replace("tcp dport 12345 drop", "drop; delete table inet foreign"),
-            saved.replace("tcp dport 12345 drop", "ip saddr { 127.0.0.1 drop"),
-        ] {
-            assert!(validate_reboot_checkpoint_script(&bad).is_err(), "{bad}");
+    fn reboot_checkpoint_json_is_strictly_scoped() {
+        let valid_expr = vec![
+            serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":"127.0.0.1"}}),
+            serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":12345}}),
+            serde_json::json!({"drop":null}),
+        ];
+        let saved = saved_table(valid_expr);
+        assert!(validate_reboot_checkpoint_json(&saved).is_ok());
+        let mut subnet_set: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        subnet_set["nftables"][3]["rule"]["expr"][0]["match"]["right"] =
+            serde_json::json!({"set":["127.0.0.1",{"prefix":{"addr":"192.0.2.0","len":24}}]});
+        assert!(validate_reboot_checkpoint_json(&subnet_set.to_string()).is_ok());
+        let mutations: [fn(&mut serde_json::Value); 6] = [
+            |value: &mut serde_json::Value| {
+                value["nftables"][1]["table"]["name"] = "foreign".into()
+            },
+            |value: &mut serde_json::Value| value["nftables"][2]["chain"]["policy"] = "drop".into(),
+            |value: &mut serde_json::Value| {
+                value["nftables"][3]["rule"]["expr"][0] =
+                    serde_json::json!({"jump":{"target":"foreign"}})
+            },
+            |value: &mut serde_json::Value| {
+                value["nftables"][3]["rule"]["expr"][2] =
+                    serde_json::json!({"flush":{"ruleset":null}})
+            },
+            |value: &mut serde_json::Value| {
+                value["nftables"][3]["rule"]["expr"][0]["match"]["left"]["payload"]["protocol"] =
+                    "ip6".into()
+            },
+            |value: &mut serde_json::Value| {
+                value["nftables"][3]["rule"]["expr"][0]["match"]["left"]["payload"]["field"] =
+                    "dport".into()
+            },
+        ];
+        for mutate in mutations {
+            let mut bad: serde_json::Value = serde_json::from_str(&saved).unwrap();
+            mutate(&mut bad);
+            assert!(validate_reboot_checkpoint_json(&bad.to_string()).is_err());
         }
     }
 
     #[test]
     fn reboot_authorization_requires_intact_bound_record_and_changed_boot() {
         use manyfw_core::transaction::{ConfirmationDeadline, TransactionState};
-        let saved = format!(
-            "table inet manyfw {{\ncomment \"{TABLE_MARKER}\"\nchain input {{\ntype filter hook input priority raw; policy accept;\n}}\n}}\n"
-        );
+        let saved = serde_json::json!({"nftables":[
+            {"table":{"family":"inet","name":TABLE,"comment":TABLE_MARKER}},
+            {"chain":{"family":"inet","table":TABLE,"name":"input","type":"filter","hook":"input","prio":CHAIN_PRIORITY,"policy":"accept"}}
+        ]}).to_string();
         let checkpoint = Checkpoint::new(
             BTreeMap::from([("inet manyfw".into(), saved.clone())]),
             BTreeSet::new(),
@@ -1719,15 +2116,18 @@ mod tests {
     fn exact_interfaces_are_safe_checkpoint_tokens() {
         for name in ["lo", "eth0", "tailscale0", "enp0s1.42", "veth-test"] {
             assert!(valid_interface_name(name));
-            let saved = format!(
-                "table inet manyfw {{\ncomment \"{TABLE_MARKER}\"\nchain input {{\ntype filter hook input priority raw; policy accept;\nmeta nfproto ipv4 iifname \"{name}\" tcp dport 12345 drop comment \"manyfw-rule-v1-{}\"\n}}\n}}",
-                "a".repeat(64)
-            );
-            assert!(validate_reboot_checkpoint_script(&saved).is_ok());
-            assert!(
-                reboot_restore_script(&saved)
-                    .unwrap()
-                    .contains(&format!("iifname \"{name}\""))
+            let saved = saved_table(vec![
+                serde_json::json!({"match":{"op":"==","left":{"meta":{"key":"nfproto"}},"right":"ipv4"}}),
+                serde_json::json!({"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":name}}),
+                serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":12345}}),
+                serde_json::json!({"drop":null}),
+            ]);
+            assert!(validate_reboot_checkpoint_json(&saved).is_ok());
+            let restored: serde_json::Value =
+                serde_json::from_str(&reboot_restore_script(&saved).unwrap()).unwrap();
+            assert_eq!(
+                restored["nftables"][2]["add"]["rule"]["expr"][1]["match"]["right"],
+                name
             );
         }
         for name in [
@@ -2000,13 +2400,18 @@ mod tests {
     #[test]
     fn checkpoint_restores_any_ports_without_losing_protocol() {
         for (family, protocol) in [("ipv4", "tcp"), ("ipv6", "udp")] {
-            let saved = format!(
-                "table inet manyfw {{\ncomment \"{TABLE_MARKER}\"\nchain input {{\ntype filter hook input priority raw; policy accept;\nmeta nfproto {family} iifname \"eth0\" meta l4proto {protocol} drop comment \"manyfw-rule-v1-{}\"\n}}\n}}",
-                "a".repeat(64)
-            );
-            let script = reboot_restore_script(&saved).unwrap();
-            assert!(script.contains(&format!("meta l4proto {protocol} drop")));
-            assert!(!script.contains("dport"));
+            let saved = saved_table(vec![
+                serde_json::json!({"match":{"op":"==","left":{"meta":{"key":"nfproto"}},"right":family}}),
+                serde_json::json!({"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"eth0"}}),
+                serde_json::json!({"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":protocol}}),
+                serde_json::json!({"drop":null}),
+            ]);
+            let restore: serde_json::Value =
+                serde_json::from_str(&reboot_restore_script(&saved).unwrap()).unwrap();
+            let serialized = restore.to_string();
+            assert!(serialized.contains("\"key\":\"l4proto\""));
+            assert!(serialized.contains(protocol));
+            assert!(!serialized.contains("dport"));
         }
     }
 
@@ -2106,24 +2511,21 @@ mod tests {
         for (addr, source, reject_type) in
             [("ip", "192.0.2.2", "icmp"), ("ip6", "fd24::2", "icmpv6")]
         {
-            let saved = format!(
-                "table inet manyfw {{\ncomment \"{TABLE_MARKER}\"\nchain input {{\ntype filter hook input priority raw; policy accept;\n{addr} saddr {source} tcp dport 65434 reject with {reject_type} port-unreachable comment \"manyfw-rule-v1-{}\"\n}}\n}}",
-                "a".repeat(64)
+            let saved = saved_table(vec![
+                serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":addr,"field":"saddr"}},"right":source}}),
+                serde_json::json!({"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":65434}}),
+                serde_json::json!({"reject":{"type":reject_type,"expr":"port-unreachable"}}),
+            ]);
+            let restore: serde_json::Value =
+                serde_json::from_str(&reboot_restore_script(&saved).unwrap()).unwrap();
+            assert_eq!(
+                restore["nftables"][2]["add"]["rule"]["expr"][2]["reject"]["type"],
+                reject_type
             );
-            assert!(
-                reboot_restore_script(&saved)
-                    .unwrap()
-                    .contains(&format!("reject with {reject_type} port-unreachable"))
-            );
-            for invalid in [
-                "admin-prohibited",
-                "port-unreachable; flush ruleset",
-                "port-unreachable jump foreign",
-            ] {
-                assert!(
-                    validate_reboot_checkpoint_script(&saved.replace("port-unreachable", invalid))
-                        .is_err()
-                );
+            for invalid in ["admin-prohibited", "port-unreachable; flush ruleset"] {
+                let mut bad: serde_json::Value = serde_json::from_str(&saved).unwrap();
+                bad["nftables"][3]["rule"]["expr"][2]["reject"]["expr"] = invalid.into();
+                assert!(validate_reboot_checkpoint_json(&bad.to_string()).is_err());
             }
         }
     }

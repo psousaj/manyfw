@@ -253,6 +253,13 @@ pub struct TransactionRecord {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeArtifact {
+    pub format: String,
+    pub version: u32,
+    pub document: String,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConfirmationToken(String);
 
@@ -282,6 +289,18 @@ pub trait TransactionStore: Send + Sync {
     fn save(&self, record: &TransactionRecord) -> Result<()>;
     fn load(&self, id: &str) -> Result<Option<TransactionRecord>>;
     fn list(&self) -> Result<Vec<TransactionRecord>>;
+    /// Persist an adapter artifact adjacent to its durable transaction record.
+    /// Stores that do not support artifacts fail closed when one is requested.
+    fn save_change_artifact(&self, _id: &str, _artifact: &ChangeArtifact) -> Result<()> {
+        Err(TransactionError::Store(
+            "store does not support durable change artifacts".into(),
+        ))
+    }
+    fn load_change_artifact(&self, _id: &str) -> Result<Option<ChangeArtifact>> {
+        Err(TransactionError::Store(
+            "store does not support durable change artifacts".into(),
+        ))
+    }
     fn save_if_state(&self, record: &TransactionRecord, expected: TransactionState) -> Result<()> {
         let current = self
             .load(&record.plan.transaction_id)?
@@ -314,6 +333,12 @@ impl<T: TransactionStore + ?Sized> TransactionStore for Arc<T> {
     fn list(&self) -> Result<Vec<TransactionRecord>> {
         (**self).list()
     }
+    fn save_change_artifact(&self, id: &str, artifact: &ChangeArtifact) -> Result<()> {
+        (**self).save_change_artifact(id, artifact)
+    }
+    fn load_change_artifact(&self, id: &str) -> Result<Option<ChangeArtifact>> {
+        (**self).load_change_artifact(id)
+    }
     fn save_if_state(&self, record: &TransactionRecord, expected: TransactionState) -> Result<()> {
         (**self).save_if_state(record, expected)
     }
@@ -331,6 +356,7 @@ impl<T: TransactionStore + ?Sized> TransactionStore for Arc<T> {
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     records: Mutex<BTreeMap<String, TransactionRecord>>,
+    change_artifacts: Mutex<BTreeMap<String, ChangeArtifact>>,
     domains: Mutex<BTreeMap<String, String>>,
 }
 
@@ -358,6 +384,21 @@ impl TransactionStore for MemoryStore {
             .values()
             .cloned()
             .collect())
+    }
+    fn save_change_artifact(&self, id: &str, artifact: &ChangeArtifact) -> Result<()> {
+        self.change_artifacts
+            .lock()
+            .map_err(|_| TransactionError::Store("store lock poisoned".into()))?
+            .insert(id.into(), artifact.clone());
+        Ok(())
+    }
+    fn load_change_artifact(&self, id: &str) -> Result<Option<ChangeArtifact>> {
+        Ok(self
+            .change_artifacts
+            .lock()
+            .map_err(|_| TransactionError::Store("store lock poisoned".into()))?
+            .get(id)
+            .cloned())
     }
     fn acquire_domain(&self, domain: &str, owner: &str) -> Result<()> {
         let mut domains = self
@@ -442,6 +483,10 @@ impl FileStore {
         self.directory
             .join(format!("{}.json", safe_file_component(id)))
     }
+    fn change_artifact_path(&self, id: &str) -> PathBuf {
+        self.directory
+            .join(format!("{}.artifact.json", safe_file_component(id)))
+    }
 
     fn acquire_domain_lock(&self, domain: &str, owner: &str, reentrant: bool) -> Result<()> {
         let mut held_locks = self
@@ -519,44 +564,10 @@ impl FileStore {
 
 impl TransactionStore for FileStore {
     fn save(&self, record: &TransactionRecord) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        fs::create_dir_all(&self.directory).map_err(|e| TransactionError::Store(e.to_string()))?;
         let path = self.path(&record.plan.transaction_id);
         let bytes = serde_json::to_vec_pretty(record)
             .map_err(|e| TransactionError::Store(e.to_string()))?;
-        let (temp, mut file) = loop {
-            let suffix = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let candidate = path.with_file_name(format!(
-                ".{}.{}.tmp",
-                safe_file_component(&record.plan.transaction_id),
-                suffix
-            ));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&candidate)
-            {
-                Ok(file) => break (candidate, file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(TransactionError::Store(error.to_string())),
-            }
-        };
-        if let Err(error) = std::io::Write::write_all(&mut file, &bytes) {
-            let _ = fs::remove_file(&temp);
-            return Err(TransactionError::Store(error.to_string()));
-        }
-        if let Err(error) = file.sync_all() {
-            let _ = fs::remove_file(&temp);
-            return Err(TransactionError::Store(error.to_string()));
-        }
-        if let Err(error) = fs::rename(&temp, &path) {
-            let _ = fs::remove_file(&temp);
-            return Err(TransactionError::Store(error.to_string()));
-        }
-        fs::File::open(&self.directory)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|e| TransactionError::Store(e.to_string()))
+        write_secure_file(&self.directory, &path, &record.plan.transaction_id, &bytes)
     }
     fn load(&self, id: &str) -> Result<Option<TransactionRecord>> {
         read_secure_record(&self.path(id))?
@@ -575,9 +586,13 @@ impl TransactionStore for FileStore {
         for entry in entries {
             let entry = entry.map_err(|error| TransactionError::Store(error.to_string()))?;
             if entry
-                .path()
-                .extension()
-                .is_none_or(|extension| extension != "json")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".artifact.json")
+                || entry
+                    .path()
+                    .extension()
+                    .is_none_or(|extension| extension != "json")
             {
                 continue;
             }
@@ -589,6 +604,19 @@ impl TransactionStore for FileStore {
             records.push(record);
         }
         Ok(records)
+    }
+    fn save_change_artifact(&self, id: &str, artifact: &ChangeArtifact) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(artifact)
+            .map_err(|error| TransactionError::Store(error.to_string()))?;
+        write_secure_file(&self.directory, &self.change_artifact_path(id), id, &bytes)
+    }
+    fn load_change_artifact(&self, id: &str) -> Result<Option<ChangeArtifact>> {
+        read_secure_record(&self.change_artifact_path(id))?
+            .map(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| TransactionError::Store(error.to_string()))
+            })
+            .transpose()
     }
     fn acquire_domain(&self, domain: &str, owner: &str) -> Result<()> {
         self.acquire_domain_lock(domain, owner, true)
@@ -609,6 +637,40 @@ impl TransactionStore for FileStore {
             }
         }
     }
+}
+
+fn write_secure_file(directory: &Path, path: &Path, id: &str, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::create_dir_all(directory).map_err(|error| TransactionError::Store(error.to_string()))?;
+    let (temp, mut file) = loop {
+        let suffix = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = path.with_file_name(format!(".{}.{}.tmp", safe_file_component(id), suffix));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(TransactionError::Store(error.to_string())),
+        }
+    };
+    if let Err(error) = std::io::Write::write_all(&mut file, bytes) {
+        let _ = fs::remove_file(&temp);
+        return Err(TransactionError::Store(error.to_string()));
+    }
+    if let Err(error) = file.sync_all() {
+        let _ = fs::remove_file(&temp);
+        return Err(TransactionError::Store(error.to_string()));
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(TransactionError::Store(error.to_string()));
+    }
+    fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| TransactionError::Store(error.to_string()))
 }
 
 fn read_secure_record(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -758,6 +820,25 @@ impl TokenSource for OsTokenSource {
 }
 
 pub trait TransactionBackend: Send + Sync {
+    /// Build the exact deterministic change artifact before a transaction can
+    /// cross its mutation boundary. Read-only backends may return `None`.
+    fn change_artifact(&self, _plan: &TransactionPlan) -> Result<Option<ChangeArtifact>> {
+        Ok(None)
+    }
+    /// Apply a transaction record so an adapter can submit the persisted
+    /// artifact byte-for-byte. Backends without artifacts retain the plan API.
+    fn apply_record(
+        &self,
+        record: &TransactionRecord,
+        artifact: Option<&ChangeArtifact>,
+    ) -> Result<ApplyReport> {
+        if artifact.is_some() {
+            return Err(TransactionError::Backend(
+                "backend does not consume change artifacts".into(),
+            ));
+        }
+        self.apply(&record.plan)
+    }
     /// Exceptional reboot recovery. Return true only after validating the full
     /// record, persisted deadline/arm and a real boot change, restoring only
     /// absent owned resources, and verifying the scoped restored state. Foreign
@@ -1004,6 +1085,27 @@ where
             self.store.save(&record)?;
             return Err(error);
         }
+        let change_artifact = match self.backend.change_artifact(&record.plan) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                record.state = TransactionState::Failure;
+                record.diagnostics.push(sanitize(&error.to_string()));
+                self.store.save(&record)?;
+                return Err(error);
+            }
+        };
+        if let Some(artifact) = change_artifact.as_ref() {
+            if let Err(error) = self
+                .store
+                .save_change_artifact(&record.plan.transaction_id, artifact)
+            {
+                record.state = TransactionState::Failure;
+                record.diagnostics.push(sanitize(&error.to_string()));
+                self.store.save(&record)?;
+                return Err(error);
+            }
+        }
+        self.store.save(&record)?;
         record.state = TransactionState::Checkpoint;
         record.checkpoint = Some(match self.backend.checkpoint(&record.plan) {
             Ok(checkpoint) => checkpoint,
@@ -1059,6 +1161,22 @@ where
         if current != record.plan.ownership_fingerprint {
             return self.fail_before_mutation(record, TransactionError::OwnershipChanged);
         }
+        let persisted_artifact = if change_artifact.is_some() {
+            match self.store.load_change_artifact(&record.plan.transaction_id) {
+                Ok(Some(artifact)) => Some(artifact),
+                Ok(None) => {
+                    return self.fail_before_mutation(
+                        record,
+                        TransactionError::Store(
+                            "durable change artifact disappeared before apply".into(),
+                        ),
+                    );
+                }
+                Err(error) => return self.fail_before_mutation(record, error),
+            }
+        } else {
+            None
+        };
         // Arming and live inspection consume the already persisted deadline.
         // Never extend that deadline or enter Applying with an expired arm.
         if let Err(error) = self.require_unexpired_deadline(&record) {
@@ -1072,7 +1190,10 @@ where
         if let Err(error) = self.require_unexpired_deadline(&record) {
             return self.fail_before_mutation(record, error);
         }
-        let report = match self.backend.apply(&record.plan) {
+        let report = match self
+            .backend
+            .apply_record(&record, persisted_artifact.as_ref())
+        {
             Ok(report) => report,
             Err(error) => {
                 if let Ok(fingerprint) = self
@@ -1664,6 +1785,14 @@ mod tests {
             TestTokens,
         );
         runner.start(plan("reboot-scoped")).unwrap();
+        assert_eq!(
+            store
+                .load_change_artifact("reboot-scoped")
+                .unwrap()
+                .unwrap()
+                .document,
+            "{\"operation\":\"reviewed\"}"
+        );
         *backend.current.lock().unwrap() = "new-boot-foreign-state".into();
         backend.reboot_recovery.store(true, Ordering::Relaxed);
         runner.rollback("reboot-scoped").unwrap();
@@ -1883,6 +2012,24 @@ mod tests {
         }
     }
     impl TransactionBackend for Backend {
+        fn change_artifact(&self, _: &TransactionPlan) -> Result<Option<ChangeArtifact>> {
+            Ok(Some(ChangeArtifact {
+                format: "test-document".into(),
+                version: 1,
+                document: "{\"operation\":\"reviewed\"}".into(),
+            }))
+        }
+        fn apply_record(
+            &self,
+            record: &TransactionRecord,
+            artifact: Option<&ChangeArtifact>,
+        ) -> Result<ApplyReport> {
+            assert_eq!(
+                artifact.as_ref().map(|artifact| artifact.document.as_str()),
+                Some("{\"operation\":\"reviewed\"}")
+            );
+            self.apply(&record.plan)
+        }
         fn restore_checkpoint_after_reboot(&self, record: &TransactionRecord) -> Result<bool> {
             if !self.reboot_recovery.load(Ordering::Relaxed) {
                 return Ok(false);
@@ -2255,7 +2402,30 @@ mod tests {
             diagnostics: Vec::new(),
         };
         store.save(&record).unwrap();
-        assert_eq!(store.load("nine").unwrap(), Some(record));
+        let loaded = store.load("nine").unwrap().unwrap();
+        assert_eq!(loaded, record);
+        let artifact = ChangeArtifact {
+            format: "nftables-json".into(),
+            version: 1,
+            document: "{\"nftables\":[]}".into(),
+        };
+        store.save_change_artifact("nine", &artifact).unwrap();
+        assert_eq!(
+            store
+                .load_change_artifact("nine")
+                .unwrap()
+                .as_ref()
+                .map(|artifact| artifact.document.as_str()),
+            Some("{\"nftables\":[]}")
+        );
+        assert_eq!(store.list().unwrap().len(), 1);
+        let artifact_path = store.change_artifact_path("nine");
+        fs::set_permissions(&artifact_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.load_change_artifact("nine").unwrap().is_some());
+        assert_eq!(
+            fs::metadata(&artifact_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::set_permissions(store.path("nine"), fs::Permissions::from_mode(0o644)).unwrap();
         assert!(store.load("nine").unwrap().is_some());
         assert_eq!(
