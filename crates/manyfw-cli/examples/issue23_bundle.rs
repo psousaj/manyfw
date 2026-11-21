@@ -79,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         observation: snapshot,
         backend: BackendCapabilityObservation {
+            nft_runtime: None,
             observation: BackendObservation {
                 backend: BackendKind::Nftables,
                 mode: BackendMode::NativeNftables,

@@ -169,6 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy,
         observation: observation_snapshot,
         backend: BackendCapabilityObservation {
+            nft_runtime: None,
             observation: backend_observation,
             capabilities,
             family_limitations: BTreeMap::new(),

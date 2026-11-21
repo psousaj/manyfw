@@ -170,6 +170,7 @@ fn planner_input() -> PlannerInput {
         },
         observation: snapshot::ObservationSnapshot::compose(docker, host),
         backend: BackendCapabilityObservation {
+            nft_runtime: None,
             observation,
             capabilities,
             family_limitations: Default::default(),

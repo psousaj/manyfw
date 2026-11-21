@@ -41,6 +41,9 @@ if [[ "$MODE" == uninstall ]]; then
 fi
 for command in curl jq tar sha256sum install uname awk mktemp; do command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"; done
 [[ "$(uname -s)" == Linux ]] || die "unsupported operating system; ManyFW releases currently target Linux only"
+if ! command -v nft >/dev/null 2>&1 || ! nft --version >/dev/null 2>&1 || ! nft -j list ruleset >/dev/null 2>&1; then
+  info "WARNING: nftables required for experimental Apply; installation continues, runtime capability checks are authoritative"
+fi
 case "$(uname -m)" in x86_64|amd64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) die "unsupported architecture: $(uname -m)" ;; esac
 step 1 5 "Detecting Linux architecture and libc"
 if [[ -f /etc/alpine-release ]]; then libc=musl; else

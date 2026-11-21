@@ -111,8 +111,8 @@ impl NftBackend {
         if !kvm_guest_detected() {
             return Err(backend_error("target is not a verified KVM guest"));
         }
-        if !nft_available() {
-            return Err(backend_error("nft executable is unavailable"));
+        if let Err(reason) = nft_runtime_ready() {
+            return Err(backend_error(&reason));
         }
         Ok(())
     }
@@ -1343,11 +1343,37 @@ fn run_nft_script(script: &str) -> TxResult<()> {
     Ok(())
 }
 
-fn nft_available() -> bool {
-    Command::new("nft")
+fn nft_runtime_ready() -> Result<(), String> {
+    let output = Command::new("nft")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .map_err(|_| "nft executable is unavailable".to_string())?;
+    if !output.status.success() {
+        return Err("nft executable is unavailable".into());
+    }
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map_err(|_| "kernel version is unavailable".to_string())?;
+    let capability = manyfw_core::backend::NftRuntimeCapability {
+        nf_tables: manyfw_core::backend::CapabilityState::Supported,
+        nft_binary: manyfw_core::backend::CapabilityState::Supported,
+        nft_version: Some(String::from_utf8_lossy(&output.stdout).into_owned()),
+        kernel_version: Some(kernel.trim().to_string()),
+    };
+    if let Some(reason) = capability.blocking_diagnostics().into_iter().next() {
+        return Err(reason);
+    }
+    let ruleset = Command::new("nft")
+        .args(["-j", "list", "ruleset"])
+        .output()
+        .map_err(|_| "kernel nf_tables support could not be queried".to_string())?;
+    if !ruleset.status.success()
+        || serde_json::from_slice::<serde_json::Value>(&ruleset.stdout).is_err()
+    {
+        return Err(
+            "kernel nf_tables support is unavailable or nft JSON listing is unsupported".into(),
+        );
+    }
+    Ok(())
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecoverySupervisor {

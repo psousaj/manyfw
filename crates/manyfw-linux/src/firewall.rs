@@ -3,7 +3,8 @@
 
 use manyfw_core::backend::{
     AddressFamily, BackendKind, BackendMode, BackendObservation, BackendObservationSet,
-    CapabilityState, Hook, HookObservation, Ownership, PacketPath, ResourceObservation,
+    CapabilityState, Hook, HookObservation, NftRuntimeCapability, Ownership, PacketPath,
+    ResourceObservation,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -83,6 +84,29 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
         .run("nft", &["--version"])
         .ok()
         .and_then(|value| parse_version(&value));
+    let nft_binary = if nft_version.is_some() {
+        CapabilityState::Supported
+    } else if matches!(
+        runner.run("nft", &["--version"]),
+        Err(FirewallObservationError::Unavailable { .. })
+    ) {
+        CapabilityState::Unsupported
+    } else {
+        CapabilityState::Unknown
+    };
+    let kernel_version = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|value| value.trim().to_string());
+    let nft_runtime = Some(NftRuntimeCapability {
+        nf_tables: if nft.is_ok() {
+            CapabilityState::Supported
+        } else {
+            CapabilityState::Unknown
+        },
+        nft_binary,
+        nft_version: nft_version.clone(),
+        kernel_version,
+    });
     let ip4_version = runner
         .run("iptables", &["--version"])
         .ok()
@@ -213,6 +237,7 @@ fn observe_with(runner: &dyn ReadOnlyRunner) -> BackendObservationSet {
     observations.sort_by_key(|value| (value.backend, value.mode));
     BackendObservationSet {
         observations,
+        nft_runtime,
         complete: if collection_complete {
             CapabilityState::Supported
         } else {
@@ -476,6 +501,9 @@ mod tests {
         let observed = observe_with(&runner);
         assert_eq!(observed.complete, CapabilityState::Unknown);
         assert!(observed.observations.is_empty());
+        let runtime = observed.nft_runtime.as_ref().unwrap();
+        assert_eq!(runtime.nft_binary, CapabilityState::Unsupported);
+        assert_eq!(runtime.nf_tables, CapabilityState::Unknown);
         assert_eq!(observed.limitations.len(), 2);
         assert!(
             observed.family_limitations[&(BackendKind::Iptables, AddressFamily::Ipv4)]
@@ -523,6 +551,11 @@ mod tests {
         assert_eq!(observed.observations[0].backend, BackendKind::Nftables);
         assert_eq!(observed.observations[1].backend, BackendKind::Iptables);
         assert_eq!(observed.complete, CapabilityState::Supported);
+        let runtime = observed.nft_runtime.unwrap();
+        assert_eq!(runtime.nf_tables, CapabilityState::Supported);
+        assert_eq!(runtime.nft_binary, CapabilityState::Supported);
+        assert_eq!(runtime.nft_version.as_deref(), Some("v1.1.3"));
+        assert!(runtime.kernel_version.is_some());
     }
 
     #[test]

@@ -102,6 +102,10 @@ class InstallerTests(unittest.TestCase):
 case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exit 2 ;; esac
 """,
             "ldd": "#!/bin/sh\necho 'ldd (GNU libc) 2.39'\n",
+            "nft": """#!/bin/sh
+if [ "$1" = "-j" ]; then echo '{"nftables":[]}'; exit 0; fi
+echo available
+""",
             "curl": """#!/usr/bin/env python3
 import os, pathlib, shutil, sys
 args=sys.argv[1:]
@@ -190,6 +194,18 @@ else: sys.exit(1)
             subprocess.check_output([str(self.install_dir / "manyfw"), "--version"], text=True).strip(),
             "manyfw 1.2.4",
         )
+
+    def test_install_warns_when_nftables_is_unavailable_without_blocking(self) -> None:
+        self.prepare_release()
+        (self.fake_bin / "nft").write_text(
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\nexit 1\n", encoding="utf-8"
+        )
+
+        result = self.run_installer("1.2.3")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("nftables required", result.stdout.lower())
+        self.assertTrue((self.install_dir / "manyfw").is_file())
 
     def test_bad_checksum_keeps_existing_install_untouched(self) -> None:
         self.prepare_release("1.2.3", valid_checksum=False)

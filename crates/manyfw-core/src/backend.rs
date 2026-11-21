@@ -12,6 +12,77 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 pub const PLAN_VERSION: u32 = 1;
+pub const MINIMUM_NFT_VERSION: (u32, u32, u32) = (1, 0, 9);
+pub const MINIMUM_KERNEL_VERSION: (u32, u32, u32) = (5, 10, 0);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NftRuntimeCapability {
+    pub nf_tables: CapabilityState,
+    pub nft_binary: CapabilityState,
+    pub nft_version: Option<String>,
+    pub kernel_version: Option<String>,
+}
+
+impl NftRuntimeCapability {
+    pub fn blocking_diagnostics(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.nf_tables != CapabilityState::Supported {
+            errors.push(format!("nf_tables kernel support is {:?}", self.nf_tables));
+        }
+        if self.nft_binary != CapabilityState::Supported {
+            errors.push(format!("nft executable is {:?}", self.nft_binary));
+        } else if !self
+            .nft_version
+            .as_deref()
+            .is_some_and(|value| parse_nft_version(value).is_some_and(|v| v >= MINIMUM_NFT_VERSION))
+        {
+            errors.push(format!(
+                "nft version {:?} is missing, malformed or below {}.{}.{}",
+                self.nft_version,
+                MINIMUM_NFT_VERSION.0,
+                MINIMUM_NFT_VERSION.1,
+                MINIMUM_NFT_VERSION.2
+            ));
+        }
+        if !self.kernel_version.as_deref().is_some_and(|value| {
+            parse_kernel_version(value).is_some_and(|v| v >= MINIMUM_KERNEL_VERSION)
+        }) {
+            errors.push(format!(
+                "kernel version {:?} is missing, malformed or below {}.{}.{}",
+                self.kernel_version,
+                MINIMUM_KERNEL_VERSION.0,
+                MINIMUM_KERNEL_VERSION.1,
+                MINIMUM_KERNEL_VERSION.2
+            ));
+        }
+        errors
+    }
+}
+
+fn parse_nft_version(version: &str) -> Option<(u32, u32, u32)> {
+    version.split_whitespace().find_map(|part| {
+        let value = part.strip_prefix('v').unwrap_or(part);
+        let mut parts = value.split('.');
+        let version = (
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        );
+        parts.next().is_none().then_some(version)
+    })
+}
+
+fn parse_kernel_version(version: &str) -> Option<(u32, u32, u32)> {
+    let numeric = version.split_once('-').map_or(version, |(first, _)| first);
+    let mut parts = numeric.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,6 +187,8 @@ pub struct BackendObservation {
 pub struct BackendObservationSet {
     pub observations: Vec<BackendObservation>,
     pub complete: CapabilityState,
+    #[serde(default)]
+    pub nft_runtime: Option<NftRuntimeCapability>,
     /// Collection status for each backend/address-family pair.
     #[serde(default)]
     pub family_completeness:
@@ -243,6 +316,7 @@ impl BackendObservationSet {
                     CapabilityState::Unknown
                 };
                 BackendCapabilityObservation {
+                    nft_runtime: self.nft_runtime.clone(),
                     family_limitations: self
                         .family_limitations
                         .iter()
@@ -290,6 +364,8 @@ pub struct BackendCapabilityObservation {
     pub capabilities: BackendCapabilities,
     #[serde(default)]
     pub family_limitations: std::collections::BTreeMap<AddressFamily, Vec<String>>,
+    #[serde(default)]
+    pub nft_runtime: Option<NftRuntimeCapability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +497,18 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     let backend = &input.backend;
     let mut reasons = Vec::new();
     let mut unknowns = Vec::new();
+    if backend.observation.backend == BackendKind::Nftables {
+        match &backend.nft_runtime {
+            Some(capability) => {
+                for detail in capability.blocking_diagnostics() {
+                    reasons.push(BlockReason::ObservationIncomplete { detail });
+                }
+            }
+            None => reasons.push(BlockReason::ObservationIncomplete {
+                detail: "nftables runtime capability was not observed".into(),
+            }),
+        }
+    }
     let observation = &input.observation;
     let docker_snapshot = observation.docker();
     let host_snapshot = observation.host();
@@ -1586,6 +1674,12 @@ mod tests {
                 observation,
                 capabilities,
                 family_limitations: BTreeMap::new(),
+                nft_runtime: Some(NftRuntimeCapability {
+                    nf_tables: CapabilityState::Supported,
+                    nft_binary: CapabilityState::Supported,
+                    nft_version: Some("nftables v1.1.3 (stable)".into()),
+                    kernel_version: Some("6.8.0".into()),
+                }),
             },
         }
     }
@@ -1646,6 +1740,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nft_runtime_capability_refuses_each_missing_or_old_component() {
+        let mut fixture = input(CapabilityState::Supported);
+        let healthy = fixture.backend.nft_runtime.clone().unwrap();
+        assert!(healthy.blocking_diagnostics().is_empty());
+        assert!(
+            NftRuntimeCapability {
+                nft_version: Some("nftables v1.0.9-rc1".into()),
+                ..healthy.clone()
+            }
+            .blocking_diagnostics()
+            .iter()
+            .any(|message| message.contains("nft version"))
+        );
+        for (capability, expected) in [
+            (
+                NftRuntimeCapability {
+                    nf_tables: CapabilityState::Unsupported,
+                    ..healthy.clone()
+                },
+                "nf_tables",
+            ),
+            (
+                NftRuntimeCapability {
+                    nft_binary: CapabilityState::Unsupported,
+                    ..healthy.clone()
+                },
+                "nft executable",
+            ),
+            (
+                NftRuntimeCapability {
+                    nft_version: Some("1.0.8".into()),
+                    ..healthy.clone()
+                },
+                "nft version",
+            ),
+            (
+                NftRuntimeCapability {
+                    kernel_version: Some("5.9.0".into()),
+                    ..healthy.clone()
+                },
+                "kernel version",
+            ),
+        ] {
+            fixture.backend.nft_runtime = Some(capability);
+            let plan = Planner::plan(&fixture);
+            assert!(matches!(
+                plan.applicability,
+                PlanApplicability::Blocked { .. }
+            ));
+            assert!(format!("{:?}", plan.applicability).contains(expected));
+            assert!(
+                plan.explanations
+                    .iter()
+                    .any(|text| text.contains("nftables"))
+            );
+        }
+        fixture.backend.nft_runtime = None;
+        assert!(matches!(
+            Planner::plan(&fixture).applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+    }
+
     fn attach_docker_endpoint(input: &mut PlannerInput, mechanism: docker::PublicationMechanism) {
         let mut docker_observation = input.observation.docker();
         docker_observation
@@ -1683,6 +1841,17 @@ mod tests {
             CapabilityState::Supported
         });
         match name {
+            "nft-runtime-missing-nf-tables" => {
+                input.backend.nft_runtime.as_mut().unwrap().nf_tables =
+                    CapabilityState::Unsupported;
+            }
+            "nft-runtime-missing-binary" => {
+                input.backend.nft_runtime.as_mut().unwrap().nft_binary =
+                    CapabilityState::Unsupported;
+            }
+            "nft-runtime-old" => {
+                input.backend.nft_runtime.as_mut().unwrap().nft_version = Some("1.0.8".into());
+            }
             "host-only" => {}
             "docker-iptables"
             | "docker-iptables-without-docker-user"
@@ -1999,6 +2168,7 @@ mod tests {
                 vec!["IPv6 source permission denied".into()],
             )]),
             limitations: Vec::new(),
+            nft_runtime: None,
         };
         let candidate = set.capability_observations().pop().unwrap();
         assert_eq!(candidate.capabilities.ipv4, CapabilityState::Supported);
@@ -2023,6 +2193,7 @@ mod tests {
             family_completeness: BTreeMap::new(),
             family_limitations: BTreeMap::new(),
             limitations: vec!["iptables IPv6 collection failed".into()],
+            nft_runtime: None,
         };
         let candidate = set.capability_observations().pop().unwrap();
         assert_eq!(candidate.capabilities.ipv4, CapabilityState::Unknown);
@@ -2044,6 +2215,7 @@ mod tests {
                 vec![detail.clone()],
             )]),
             limitations: vec![detail.clone()],
+            nft_runtime: None,
         };
         let candidate = set.capability_observations().pop().unwrap();
         assert_eq!(candidate.observation.limitations, vec![detail]);
@@ -2076,6 +2248,7 @@ mod tests {
             family_completeness: BTreeMap::new(),
             family_limitations: BTreeMap::new(),
             limitations: Vec::new(),
+            nft_runtime: None,
         };
         let capabilities = set.capability_observations().pop().unwrap().capabilities;
         assert_eq!(capabilities.input_hook, CapabilityState::Supported);
@@ -2101,6 +2274,7 @@ mod tests {
             family_completeness: BTreeMap::new(),
             family_limitations: BTreeMap::new(),
             limitations: Vec::new(),
+            nft_runtime: None,
         };
         assert_eq!(
             set.capability_observations()[0].capabilities.docker_user,
@@ -2128,6 +2302,7 @@ mod tests {
                 vec!["IPv6 source permission denied".into()],
             )]),
             limitations: Vec::new(),
+            nft_runtime: input(CapabilityState::Supported).backend.nft_runtime,
         };
         set.observations[0]
             .resources
@@ -2392,6 +2567,9 @@ mod tests {
     fn planner_scenarios_match_versioned_golden_artifacts() {
         for name in [
             "host-only",
+            "nft-runtime-missing-nf-tables",
+            "nft-runtime-missing-binary",
+            "nft-runtime-old",
             "docker-iptables",
             "docker-iptables-without-docker-user",
             "docker-native-nftables",
@@ -2410,7 +2588,10 @@ mod tests {
                 | "docker-iptables-without-docker-user"
                 | "mixed-managers"
                 | "conflicting-hook-priorities"
-                | "unknown-capability" => {
+                | "unknown-capability"
+                | "nft-runtime-missing-nf-tables"
+                | "nft-runtime-missing-binary"
+                | "nft-runtime-old" => {
                     assert!(matches!(
                         plan.applicability,
                         PlanApplicability::Blocked { .. }
@@ -2472,6 +2653,13 @@ mod tests {
             }
             let expected = match name {
                 "host-only" => include_str!("../tests/golden/planner/host-only.json"),
+                "nft-runtime-missing-nf-tables" => {
+                    include_str!("../tests/golden/planner/nft-runtime-missing-nf-tables.json")
+                }
+                "nft-runtime-missing-binary" => {
+                    include_str!("../tests/golden/planner/nft-runtime-missing-binary.json")
+                }
+                "nft-runtime-old" => include_str!("../tests/golden/planner/nft-runtime-old.json"),
                 "docker-iptables" => {
                     include_str!("../tests/golden/planner/docker-iptables.json")
                 }

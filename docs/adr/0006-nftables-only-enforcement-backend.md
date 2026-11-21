@@ -31,11 +31,20 @@ nftables lacks.
    binary, or an `nft`/kernel below the minimum versions blocks Apply. The
    installer warns "nftables required" when it cannot find them; runtime
    detection is authoritative.
-3. **Minimum versions.** The minimum `nft` is the lowest release that accepts
-   JSON input for every construct ManyFW emits and has no known unpatched CVE
-   on those paths; the minimum kernel is the lowest that supports every
-   emitted expression in the `inet` family, including the forward hook. Exact
-   numbers must be recorded here, with sources, before this ADR is Accepted.
+3. **Minimum versions.** The experimental runtime compatibility gate requires
+   nftables userspace **1.0.9** and Linux kernel **5.10.0**. nftables 1.0.8
+   added JSON table and chain comments; 1.0.9 added the explicit JSON-input
+   mode. Kernel 5.10 is the selected minimum supported LTS baseline, not the
+   feature floor; nftables' hook matrix records the `inet` filter family
+   support at this baseline. Sources: [nftables 1.0.8 release notes](https://www.netfilter.org/projects/nftables/files/changes-nftables-1.0.8.txt),
+   [nftables 1.0.9 release notes](https://www.netfilter.org/projects/nftables/files/changes-nftables-1.0.9.txt),
+   [nftables kernel update matrix](https://wiki.nftables.org/wiki-nftables/index.php/List_of_updates_since_Linux_kernel_3.13),
+   [NVD CVE-2023-31248](https://nvd.nist.gov/vuln/detail/CVE-2023-31248),
+   and [NVD CVE-2024-1086](https://nvd.nist.gov/vuln/detail/CVE-2024-1086).
+   Kernel fixes land at branch-specific patch levels. A kernel version floor
+   cannot establish vendor backport status or guarantee absence of unpatched
+   CVEs; these are compatibility gates, not a security certification. Runtime
+   capability must still be queried and unknown state blocks Apply.
 4. **Asymmetric verdict guarantee.** A ManyFW block is guaranteed. A ManyFW
    allow is guaranteed only within ManyFW's table. ManyFW never edits,
    removes, flushes, or reorders foreign objects to make an allow win.
