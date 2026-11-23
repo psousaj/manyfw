@@ -1,0 +1,19 @@
+[Unit]
+Description=ManyFW experimental firewall recovery supervisor
+After=local-fs.target
+ConditionPathExists=/etc/manyfw-disposable-vm
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/manyfw recover --watch
+Restart=always
+RestartSec=1
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

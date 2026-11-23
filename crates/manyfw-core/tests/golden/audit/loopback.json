@@ -1,0 +1,213 @@
+{
+  "version": 1,
+  "snapshot_version": 1,
+  "findings": [
+    {
+      "id": "finding-3b5a0f8287091b85",
+      "subject": "identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(127.0.0.1)/8080->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "category": "PublishedPort",
+      "assessment": "potential_exposure",
+      "severity": "low",
+      "severity_factors": {
+        "exposure": "potentialexposure",
+        "coverage": "observed",
+        "policy": "matching rule present",
+        "justification": "severity is based on observed relationship and evidence coverage; port names are not used"
+      },
+      "policy": {
+        "declared": "allow",
+        "matching_rule_ids": [
+          "allow-web"
+        ],
+        "static_result": "policy_match_only",
+        "effective_verification": "unverified",
+        "unverified_capabilities": [
+          "firewall_state",
+          "internet_reachability"
+        ]
+      },
+      "evidence": [
+        "evidence-e9501d63de2f8b49",
+        "evidence-59de8b4ba50625dc",
+        "evidence-5ec0187f2aac5650"
+      ],
+      "limitations": [],
+      "coverage": [
+        {
+          "dimension": "docker_publications",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_listeners",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_interfaces",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_addresses",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_routes",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "tailscale",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv4",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv6",
+          "status": "no_observation",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_tcp",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_udp",
+          "status": "no_observation",
+          "limitations": []
+        }
+      ]
+    },
+    {
+      "id": "finding-679839c490bdae5c",
+      "subject": "listener:Tcp/Ipv4/127.0.0.1/wildcard-false/port-8080/interface-name-Some(\"lo\")",
+      "category": "HostListener",
+      "assessment": "unknown",
+      "severity": "low",
+      "severity_factors": {
+        "exposure": "unknown",
+        "coverage": "observed",
+        "policy": "not mapped to a logical destination",
+        "justification": "a listener is an observed bind, not proof of external reachability"
+      },
+      "policy": {
+        "declared": "default_deny",
+        "matching_rule_ids": [],
+        "static_result": "policy_match_only",
+        "effective_verification": "unverified",
+        "unverified_capabilities": [
+          "firewall_state",
+          "internet_reachability"
+        ]
+      },
+      "evidence": [
+        "evidence-1123cce103bc62b5"
+      ],
+      "limitations": [],
+      "coverage": [
+        {
+          "dimension": "docker_publications",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_listeners",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_interfaces",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_addresses",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "host_routes",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "tailscale",
+          "status": "complete",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv4",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "family_ipv6",
+          "status": "no_observation",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_tcp",
+          "status": "observed",
+          "limitations": []
+        },
+        {
+          "dimension": "transport_udp",
+          "status": "no_observation",
+          "limitations": []
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evidence-1123cce103bc62b5",
+      "source": "host_listener_observation",
+      "resource": "listener:Tcp/Ipv4/127.0.0.1/wildcard-false/port-8080/interface-name-Some(\"lo\")",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-59de8b4ba50625dc",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(127.0.0.1)/8080->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-5ec0187f2aac5650",
+      "source": "correlation_graph",
+      "resource": "correlation:identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(127.0.0.1)/8080->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    },
+    {
+      "id": "evidence-e9501d63de2f8b49",
+      "source": "docker_observation",
+      "resource": "identity-04da5023b339f593:instance-db68da40f91dc820:tcp/ipv4/Some(127.0.0.1)/8080->8080:Nat/Bridge/PortBinding/targets=[\"bridge:172.18.0.2:DockerInspection\"]",
+      "interval": {
+        "started_at": 10,
+        "finished_at": 20
+      },
+      "limitations": []
+    }
+  ],
+  "limitations": [
+    "NoReachabilityProbe"
+  ]
+}

@@ -1,15 +1,32 @@
 # Security model
 
-**No privileged enforcement exists in v0.3.0.** The CLI validates local policy
-and analyzes supplied observation snapshots. `discover` performs read-only
-Docker Engine and host-network collection; firewall observation is a separate
-read-only Linux library API. Neither path modifies firewall state.
+**The released v0.3.0 has no privileged enforcement.** This checkout adds only
+the opt-in experimental adapter documented in ADR-0005, restricted to
+disposable isolated QEMU/KVM guests; production deployment remains unauthorized.
+The ordinary CLI validates local policy and analyzes supplied observation
+snapshots. `discover` performs read-only Docker Engine and host-network
+collection; it does not inspect or modify firewall state.
+
+The v0.4.0 candidate is under review and is not published. A future release
+must not be interpreted as operational authorization; production and
+development-host firewall mutation remain unauthorized.
 
 Backend observation is separate from `discover`. Linux firewall listings use
 fixed read-only argument vectors (`nft -j list ruleset`, `iptables-save -c`,
-and `ip6tables-save -c`); no shell is invoked. Missing tools, permission failures,
-partial families, and unrecognized state remain unknown and block applicability.
+`ip6tables-save -c`, and, only when kernel legacy table names are present,
+`iptables-legacy-save -c` / `ip6tables-legacy-save -c`); `/proc/net` legacy
+table-name reads are also read-only. No shell is invoked. Missing tools,
+permission failures, partial families, and unrecognized active state remain
+unknown and block applicability.
+Readable iptables-legacy rules are merged into foreign-rule conflict analysis;
+the adapter never writes through either iptables frontend.
 Chain names and comments alone do not establish ownership or Docker mode.
+Conflict analysis retains malformed nft rule records and rules from unsupported
+address families as unknown candidates, and uses the first terminal verdict in
+each rule. It considers prerouting drops before INPUT/FORWARD and postrouting
+drops after FORWARD; a known postrouting rule does not falsely block an INPUT
+allow. A FORWARD allow is rejected by pre-mutation validation even when
+presented in a stale or crafted plan.
 
 ## Threat boundaries
 
@@ -19,7 +36,68 @@ Chain names and comments alone do not establish ownership or Docker mode.
 - IPv4 and IPv6, host-network containers, routed traffic, NAT and proxies must be accounted for.
 - An audit finding describes observable policy and potential exposure, not a guaranteed internet reachability test.
 
+### Experimental supervisor trust boundary
+
+For the experimental v0.4.0 scope, the operating system's unrestricted root
+authority is part of the trusted computing base. A process already possessing
+unrestricted root privileges is not treated as an untrusted adversary; this
+threat model does not promise protection from hostile root processes. A unique
+cryptographic identity for every supervisor invocation is not required. The
+absence of that identity is an owner-accepted architectural limitation, not an
+unresolved security finding. Do not add per-invocation identity infrastructure
+solely to address this accepted boundary.
+
+This acceptance does not weaken non-root authorization or transaction
+protection. Apply remains gated on effective root, a marked disposable KVM
+guest, an active explicitly installed recovery supervisor, and the existing
+durable transaction/arm protocol. OS-enforced ownership, restrictive file
+permissions, process privileges, and applicable service authorization remain
+the controls. Transaction identity and recovery-arm binding continue to scope
+each transaction; they are not represented as cryptographic supervisor-process
+identity.
+
+An authorized root operator may invoke `recover --rollback` while the recovery
+supervisor is inactive. That path still requires the marked KVM guest and root,
+prepares/validates protected recovery storage, serializes transaction access,
+verifies transaction/checkpoint integrity and ownership/fingerprint guards,
+restores only ManyFW-owned resources, and verifies the resulting state. This
+manual recovery path does not replace independent supervisor recovery: Apply
+still requires the active supervisor, and unattended interrupted-Apply,
+timeout, and reboot recovery retain their existing supervisor requirements.
+
 ## Apply/rollback design gate
+
+Experimental architecture/security approval for implementations developed and
+verified exclusively in disposable isolated QEMU/KVM guests may be performed
+by the Goal agent through a dedicated review phase, as explicitly authorized
+by the project owner and documented in `AGENTS.md`. The phase must be separate
+from implementation, evidence-based, record findings/remediation, and repeat
+after material corrections. It is technical self-review, not independent
+review. The project owner is the project's architecture/experimental-scope
+approval authority; the owner authorization and the review evidence must both
+be recorded in the applicable ADR.
+
+This approval path does not permit mutation on the WSL/development host,
+production deployment, unrestricted operations, or bypassing mandatory
+security/integration tests. Production deployment or operation outside the
+explicitly authorized isolated scope requires separate project-owner
+operational authorization and independent architecture/security review.
+Material changes to the reviewed operation subset, resource ownership,
+privileges, recovery supervisor, or environment invalidate the experimental
+approval and require reassessment. Test-only recovery is not production-code
+recovery validation.
+
+No production mutation adapter is approved or enabled. ADR-0005 records
+approval only for the bounded isolated experimental implementation.
+
+The transaction `FileStore` opens record and lock files without following
+symlinks, verifies that they are regular files owned by the effective user,
+and creates or tightens their permissions to owner-only. Callers must still
+provide a trusted transaction directory; the experimental CLI additionally
+requires the fixed recovery directories to be root-owned and mode `0700` before
+the supervisor or apply path accesses them. The generic core store is not an
+authorization mechanism and must not be pointed at an attacker-writable
+directory.
 
 Privileged implementation must only ship after network namespace/VM integration tests demonstrate:
 
@@ -28,7 +106,23 @@ Privileged implementation must only ship after network namespace/VM integration 
 3. Automatic rollback on expired confirmation deadline, process crash or lost SSH without relying on a foreground shell.
 4. Atomic updates within backend guarantees; no promise of global atomicity across managers.
 5. No unapproved opening of new ingress; reject partial backend support.
-6. Tests for remote SSH, Docker legacy and native nftables, Tailscale changes, IPv6 and concurrent rule modifications.
+6. Tests for remote SSH, Docker legacy and native nftables, IPv6 and concurrent rule modifications, plus the generic packet-verdict contract in [issue #24](specs/issue-24-linux-enforcement.md).
+7. Under [ADR-0006](adr/0006-nftables-only-enforcement-backend.md): coexistence evidence for firewalld (nftables backend), UFW over iptables-nft, hosts with active iptables-legacy rules, and refusal of allows conflicting with foreign drops, before any support claim.
+
+The same contract separately retains real Tailscale change/interoperability
+coverage. External tailnet access is not mandatory for generic Linux acceptance;
+missing specialized evidence blocks Tailscale claims, not the generic contract.
+Historical reports keep their original false gate. The bounded experimental
+deny-authority and exact INPUT selector/composition scope passed fresh
+packet/recovery evidence and a dedicated review, as recorded in ADR-0005. This
+approval is limited to the bounded experimental scope; allow never overrides
+foreign drop, and unsupported/bypassed paths cannot be claimed protected. The
+bounded experimental integrations verify systemd or OpenRC; unknown supervisors
+refuse Apply. This is not universal Linux portability. Production remains
+unauthorized.
+Observed nftables flowtables are rejected before mutation because they may
+bypass INPUT; other kernel/device offload or unobservable paths remain unknown
+unless independently excluded or measured.
 
 The recovery matrix is tracked in [`TEST-MATRIX.md`](TEST-MATRIX.md). Local
 fixture coverage may proceed without privileges, but missing VM or privileged

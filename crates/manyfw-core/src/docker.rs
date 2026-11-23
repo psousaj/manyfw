@@ -14,10 +14,51 @@ pub struct DockerDiscoveryResult {
     pub collected_at: CollectionInterval,
     pub outcome: CollectionOutcome,
     pub completeness: Completeness,
+    #[serde(default)]
+    pub firewall_mode: DockerFirewallMode,
     pub containers: Vec<ContainerObservation>,
     pub diagnostics: Vec<DiscoveryDiagnostic>,
     pub provenance: Provenance,
     pub limitations: Vec<Limitation>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerFirewallMode {
+    Iptables,
+    NativeNftables,
+    #[default]
+    Unknown,
+}
+
+pub(crate) fn firewall_path_explanation(
+    mode: DockerFirewallMode,
+    mechanism: &PublicationMechanism,
+    docker_user_status: &str,
+) -> String {
+    match (mode, mechanism) {
+        (DockerFirewallMode::Iptables, PublicationMechanism::Nat) => format!(
+            "Docker firewall mode is iptables; the published NAT path is DNAT then FORWARD; DOCKER-USER is {docker_user_status}"
+        ),
+        (DockerFirewallMode::NativeNftables, PublicationMechanism::Nat) => {
+            "Docker firewall mode is native nftables; the published NAT path is DNAT then FORWARD; DOCKER-USER is absent in native nftables mode".into()
+        }
+        (DockerFirewallMode::Unknown, PublicationMechanism::Nat) => {
+            "Docker firewall mode is unknown; the published NAT path and DOCKER-USER availability are not inferred".into()
+        }
+        (DockerFirewallMode::Iptables, PublicationMechanism::UserlandProxy) => format!(
+            "Docker firewall mode is iptables; published userland-proxy traffic traverses INPUT, not DNAT/FORWARD; DOCKER-USER is {docker_user_status} but is not on this proxy path"
+        ),
+        (DockerFirewallMode::NativeNftables, PublicationMechanism::UserlandProxy) => {
+            "Docker firewall mode is native nftables; published userland-proxy traffic traverses INPUT, not DNAT/FORWARD; DOCKER-USER is absent in native nftables mode".into()
+        }
+        (DockerFirewallMode::Unknown, PublicationMechanism::UserlandProxy) => {
+            "Docker firewall mode is unknown; observed userland-proxy traffic traverses INPUT; DOCKER-USER availability is not inferred".into()
+        }
+        (_, PublicationMechanism::Direct | PublicationMechanism::Unknown(_)) => {
+            "Docker firewall path is unknown for this publication mechanism".into()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,6 +344,10 @@ pub enum InspectionFailureKind {
 
 pub trait DockerTransport: Send + Sync {
     fn list_containers(&self) -> Result<ContainerList, TransportError>;
+
+    fn firewall_mode(&self) -> DockerFirewallMode {
+        DockerFirewallMode::Unknown
+    }
 }
 
 pub trait Clock: Send + Sync {
@@ -375,6 +420,7 @@ impl DockerDiscovery {
     pub fn collect(&self) -> DockerDiscoveryResult {
         let started_at = self.clock.now();
         let list = self.transport.list_containers();
+        let firewall_mode = self.transport.firewall_mode();
         let finished_at = self.clock.now();
         let interval = CollectionInterval {
             started_at,
@@ -391,6 +437,7 @@ impl DockerDiscovery {
                     } else {
                         Completeness::Unknown
                     },
+                    firewall_mode,
                     outcome,
                     containers: Vec::new(),
                     diagnostics: vec![DiscoveryDiagnostic {
@@ -544,6 +591,7 @@ impl DockerDiscovery {
         DockerDiscoveryResult {
             collected_at: interval,
             outcome,
+            firewall_mode,
             completeness: if outcome == CollectionOutcome::Complete {
                 Completeness::Complete
             } else {
@@ -958,7 +1006,7 @@ fn transport_error_message(outcome: &CollectionOutcome) -> &'static str {
         CollectionOutcome::Interrupted => "collection interrupted",
         CollectionOutcome::Malformed => "malformed response",
         CollectionOutcome::TemporalInconsistency => "temporal inconsistency",
-        CollectionOutcome::Partial => "partial collection",
+        CollectionOutcome::Partial => "partial collection; some Docker observations may be missing",
         CollectionOutcome::Complete => "complete",
     }
 }
@@ -1295,6 +1343,28 @@ mod tests {
         .collect();
         assert_eq!(unavailable.outcome, CollectionOutcome::Unavailable);
         assert_eq!(unavailable.completeness, Completeness::Unavailable);
+
+        let permission_denied = DockerDiscovery::new(
+            Fake {
+                result: Err(TransportError::PermissionDenied),
+            },
+            T(10),
+        )
+        .collect();
+        assert_eq!(
+            permission_denied.outcome,
+            CollectionOutcome::PermissionDenied
+        );
+        assert_eq!(permission_denied.completeness, Completeness::Unknown);
+        assert_eq!(
+            permission_denied.limitations,
+            [Limitation::PermissionDenied]
+        );
+        assert_eq!(
+            permission_denied.diagnostics[0].message,
+            "Docker container listing failed: permission denied"
+        );
+        assert!(permission_denied.containers.is_empty());
     }
 
     #[test]
@@ -1340,6 +1410,34 @@ mod tests {
         assert_eq!(
             result.diagnostics[0].message,
             "Docker inspection failed for an allowlisted instance"
+        );
+
+        let result = DockerDiscovery::new(
+            Fake {
+                result: Ok(ContainerList {
+                    collected_at: 10,
+                    containers: vec![record("valid", &[("com.manyfw.service-id", "svc")])],
+                    inspection_failures: vec![InspectionFailure {
+                        instance_id: "restricted-instance".into(),
+                        kind: InspectionFailureKind::PermissionDenied,
+                    }],
+                    inspected_at: Some(10),
+                }),
+            },
+            T(10),
+        )
+        .collect();
+        assert_eq!(result.outcome, CollectionOutcome::Partial);
+        assert_eq!(result.completeness, Completeness::Partial);
+        assert_eq!(result.containers.len(), 1);
+        assert!(result.limitations.contains(&Limitation::InspectionFailed));
+        assert_eq!(
+            result.diagnostics[0].message,
+            "permission denied while inspecting a Docker container"
+        );
+        assert_eq!(
+            result.diagnostics[0].instance_id.as_deref(),
+            Some("restricted-instance")
         );
     }
 

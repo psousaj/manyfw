@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 thiserror = "2"

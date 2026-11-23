@@ -1,6 +1,12 @@
 # Architecture
 
-ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel firewall.
+ManyFW's architectural target is a **Linux firewall policy enforcement system**
+using Linux kernel firewall mechanisms while preserving resources owned by
+other components, not a framework requiring an integration with each product.
+The current released CLI is read-only; this checkout's opt-in experimental
+adapter is restricted to verified disposable KVM guests. Expanded enforcement
+is reviewed only for the exact INPUT subset recorded in ADR-0005. This does not
+authorize production or claim protection for a host or unsupported packet path.
 
 ## Initial components
 
@@ -8,12 +14,32 @@ ManyFW is a **policy coordination tool**, not a replacement for the Linux kernel
 - **CLI**: one executable. `check` validates policy, `discover` collects a snapshot, `audit` and `explain` consume saved snapshots, and `plan` summarizes policy intent.
 - **Docker adapter**: the CLI uses Bollard for read-only `list`/`inspect` operations over a local Unix socket and projects only allowlisted fields.
 - **Linux host adapter**: the separate `manyfw-linux` crate uses Netlink for interfaces, addresses, and routes, and Socket Diagnostics for TCP/UDP sockets. Read-only sysfs/procfs fallbacks are explicitly partial; the core contains only typed source contracts and normalization.
-- **Backends**: typed capability/feasibility planning in the core. The Linux adapter may collect nftables and iptables listings using fixed, read-only invocations; collection failures and unverified mode/ownership remain unknown. No nftables or iptables mutation adapter is approved.
-- **Transaction runner**: durable state-machine primitives and fixture tests exist, but no production apply command or independent recovery supervisor is shipped.
+- **Backends**: typed capability/feasibility planning in the core. nftables is the only enforcement backend ([ADR-0006](adr/0006-nftables-only-enforcement-backend.md)); iptables (legacy or nft compatibility) is observed only and never written, with no fallback. The Linux adapter collects nftables and iptables listings using fixed, read-only invocations; active xtables-legacy tables are detected through kernel table-name files and their `*-legacy-save` output is merged into conflict analysis. Collection failures and unverified mode/ownership remain unknown. ADR-0005 accepts a narrowly scoped nftables host-input adapter only for explicitly opted-in experimental use in disposable isolated QEMU/KVM guests; production deployment and development-host mutation remain unauthorized.
+- **Transaction runner**: durable state-machine primitives and an independently supervised recovery worker retain wall-clock metadata and use boot-scoped monotonic deadlines; a boot change expires pending confirmation conservatively. ADR-0005 supplies a narrowly scoped experimental apply command with explicitly installed systemd or OpenRC service integration for disposable isolated QEMU/KVM guests only; neither is approved for production deployment. The owner-accepted v0.4.0 trust boundary treats unrestricted root as trusted and does not require a cryptographic identity per supervisor invocation. A root-authorized manual rollback remains available with the supervisor inactive, subject to all durable state, ownership, integrity, concurrency, and resource-verification guards; it does not replace the active supervisor required before Apply or for unattended recovery.
 
 ## Integration constraints
 
-Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic.
+The owner-approved technology-agnostic Linux target and exact supported-path
+acceptance live in [issue #24's contract](specs/issue-24-linux-enforcement.md).
+Within supported INPUT composition, deny must prevail over external accepts;
+allow cannot override external drops. Under ADR-0006 a detected or possible
+foreign drop against a planned allow is reported by `plan` and refuses the
+whole Apply; ManyFW never edits foreign rules to resolve it. The expanded packet suite and dedicated
+runtime review are recorded in ADR-0005 for the bounded experimental subset;
+the historical clean-input-hook approval alone did not cover this change.
+OUTPUT remains unsupported. The accepted enforcement scope still excludes
+FORWARD; the proposed Issue #51 extension implements only experimental FORWARD
+drops for published Docker destinations. It is authorized only for verified
+disposable-KVM tests and is not approved for development-host or production use;
+KVM evidence and the separate Goal Architecture/Security review are required
+before even that bounded behavior is described as accepted. FORWARD allow rules
+and FORWARD default-drop policies remain refused. The experimental adapter supports explicitly
+installed, verified systemd and OpenRC recovery integrations. It refuses unknown
+service managers and does not claim universal Linux portability.
+
+Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic. Published Docker DNAT traffic can be protected by the experimental drop-only ManyFW-owned FORWARD chain at priority −300; Docker-owned chains are observed but are not an insertion-point prerequisite or ManyFW write target.
+
+Observing Docker-owned DOCKER-USER does not grant ManyFW write ownership.
 
 Service identity must not depend on changing container IPs; use Docker metadata, labels and publish mappings and reconcile on events. Conntrack original-destination matching is a possible backend mechanism, not the service identity model.
 

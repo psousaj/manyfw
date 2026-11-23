@@ -7,7 +7,7 @@ workflows:
 | --- | --- | --- |
 | `ci.yml` | fmt, clippy, workspace tests, docs, fixtures, dependency audit | Yes |
 | `compatibility.yml` | GNU/musl builds, Linux architecture matrix, distro/binary smoke tests, disposable host-namespace discovery | Main, scheduled, manual, relevant PRs |
-| `release.yml` | Detect unpublished Cargo workspace versions, package/checksum/smoke artifacts, create an annotated tag and GitHub Release | Version/lock/workflow changes on `main`, or manual dispatch from `main` |
+| `release.yml` | Detect unpublished Cargo workspace versions, package/checksum/smoke artifacts, create an annotated tag and GitHub Release | Explicit manual dispatch from `main` only |
 
 The optional issue #24 recovery and candidate-evidence gate are consolidated
 into `compatibility.yml` rather than maintained as additional workflows. A
@@ -71,9 +71,9 @@ compatibility coverage is required.
 
 1. Change `[workspace.package].version` in the root `Cargo.toml`; both crates
    inherit this version. Update and commit `Cargo.lock` with the change.
-2. Open and merge the version bump through the normal PR checks. The release
-   workflow only publishes commits that have reached `main`.
-3. On a matching push to `main` (or a manual dispatch from `main`),
+2. Open and merge the version bump through normal PR checks. CI and compatibility
+   workflows validate PRs and `main`; merging a version bump does not publish.
+3. An operator must explicitly dispatch `release.yml` from `main`.
    `release.yml` reads the workspace version. If its
    matching `vX.Y.Z` tag/release is absent, it validates the workspace and runs
    the full four-target Linux build and artifact smoke matrix.
@@ -84,8 +84,9 @@ compatibility coverage is required.
 The first successful run published `v0.2.0` from commit `07cbf3e`; see the
 [release](https://github.com/psousaj/manyfw/releases/tag/v0.2.0) and its
 [successful workflow run](https://github.com/psousaj/manyfw/actions/runs/42066292818).
-Subsequent releases are triggered by bumping the workspace version and merging
-it. A push at an already released version is a no-op. The tag and release are
+Subsequent releases require a version bump merged to `main` and an explicit
+manual workflow dispatch. A push at an already released version is not a
+publication trigger. The tag and release are
 created in the same workflow run so publication does not depend on a tag-push
 event from `GITHUB_TOKEN` (which would not trigger another workflow). The
 workflow rejects stale main-branch commits, non-increasing versions, and
@@ -95,23 +96,30 @@ prereleases are not published by this workflow.
 The release installer at `scripts/install.sh` detects Linux architecture and
 GNU versus musl libc, selects the matching release archive, verifies its
 SHA-256 checksum and binary version, then installs `manyfw` into
-`/usr/local/bin` (using `sudo` only when needed). It fails closed for unsupported
-platforms or missing release assets. The installer does not perform firewall
-operations.
+`/usr/local/bin` (using `sudo` only when needed). Re-running it updates an
+existing recognized ManyFW binary; unrelated files and symlinks are never
+overwritten. `--uninstall` removes only that executable from
+`MANYFW_INSTALL_DIR` (default `/usr/local/bin`), preserving services,
+configuration, transaction state, and firewall rules. The installer fails
+closed for unsupported platforms or missing release assets and performs no
+firewall operations. Offline installer contract tests run with
+`python3 -m unittest scripts.test_install`.
 
-The release workflow has `contents: write` only on its publish job. It does
+The v0.4.0 candidate is not published by this PR or by merging it. The release
+workflow has `contents: write` only on its publish job. It does
 not publish an artifact if a build, checksum, or final smoke test fails.
 
-Issue #24 remains independent. Its SSH-loss, reboot, rollback, and privileged
-kernel scenarios are not implemented or approved by these conventional CI
-pipelines. The recovery runner requires a dedicated self-hosted label,
-pre-provisioned guest artifacts, an external controller, and disposable VM
-teardown; it is not a claim that the current GitHub runner is isolated. An
-enforcement release would require a candidate-SHA-bound report with every
-critical scenario `Passed`; `Skipped` and `NotApplicable` are blockers. The
- optional candidate-gate job verifies that binding from the
-candidate SHA and recovery run artifact. It is deliberately not called by the
-read-only `release.yml`; that release cannot enable enforcement.
+Conventional CI and compatibility jobs do not execute privileged firewall
+recovery. The bounded #8/#24 generic packet and recovery suites have separate
+disposable-QEMU/KVM evidence recorded in `docs/TEST-MATRIX.md`; Tailscale remains
+pending in #42. The optional candidate-gate job verifies a candidate-SHA-bound
+recovery report and requires every critical scenario to be `Passed`; `Skipped`
+and `NotApplicable` block that gate. `release.yml` does not itself run the
+privileged packet/recovery suites or infer release eligibility from ordinary
+build/smoke success. Before manually dispatching a v0.4.0 publication, the
+operator must review the candidate-bound packet and recovery evidence and
+complete the separate gates. A published experimental binary still does not
+authorize production or development-host operation.
 
 ## Current local evidence
 

@@ -84,12 +84,18 @@ source limitations, temporal inconsistencies, and unknown process ownership.
 - Failure tests cover Netlink unavailable, Socket Diagnostics unavailable,
   procfs unavailable, permission errors, interrupted reads, and source
   divergence.
-- Linux namespace integration tests are read-only and disposable. They do not
-  alter the development host firewall or routing configuration.
-- `bash tests/host_namespace.sh` exercises the collector in a disposable Docker
+- Linux namespace integration tests are disposable. Fixture setup may change
+  interface/address state only inside the test container's isolated network
+  namespace; the ManyFW collector remains read-only, and the test does not alter
+  the development host firewall or routing configuration.
+- `bash tests/host_namespace.sh` first runs the collector in a disposable Docker
   network namespace with `--network none`, no Docker socket, and no capabilities.
-  It uses only an already-cached image selected by `MANYFW_HOST_TEST_IMAGE`; it
-  never pulls an image implicitly. Missing Docker/image support is reported as
+  A second disposable `--network none` container grants only `NET_ADMIN` to the
+  fixture setup, toggles loopback state, and adds documentation-only IPv4/IPv6
+  addresses before collecting again. A statically linked host BusyBox `ip`
+  applet performs the namespace-local setup. The script uses only an
+  already-cached image selected by `MANYFW_HOST_TEST_IMAGE`; it never pulls an
+  image implicitly. Missing Docker/image/helper support is reported as
   `NotApplicable` (exit 77), not a passing integration assertion.
 - Determinism tests vary source ordering and collection timing metadata while
   asserting stable normalized records and explicit temporal limitations.

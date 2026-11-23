@@ -7,12 +7,16 @@ use bollard::{
     errors::Error as BollardError,
     models::{ContainerInspectResponse, ContainerSummary},
 };
+use http_body_util::{BodyExt, Empty};
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Client;
+use hyperlocal::{UnixClientExt, UnixConnector, Uri as UnixUri};
 use manyfw_core::docker::{
     self, BindingRecord, ConfiguredHostBindingRecord, ConfiguredPortRecord, ContainerAddressRecord,
-    ContainerList, ContainerRecord, DockerTransport, IdentityLabels, InspectionFailure,
-    TransportError,
+    ContainerList, ContainerRecord, DockerFirewallMode, DockerTransport, IdentityLabels,
+    InspectionFailure, TransportError,
 };
-use std::{io, time::SystemTime};
+use std::{io, path::PathBuf, time::SystemTime};
 use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +29,15 @@ enum DockerApiError {
     Other,
 }
 
-/// Injectable boundary around the two read-only Docker Engine operations used
+/// Injectable boundary around the read-only Docker Engine operations used
 /// by discovery. Raw Bollard responses remain inside this adapter; only
 /// allowlisted records are projected into `manyfw-core`.
 trait DockerEngineApi: Send + Sync {
     fn list_containers(&self) -> Result<Vec<ContainerSummary>, DockerApiError>;
     fn inspect_container(&self, id: &str) -> Result<ContainerInspectResponse, DockerApiError>;
+    fn firewall_mode(&self) -> Result<DockerFirewallMode, DockerApiError> {
+        Ok(DockerFirewallMode::Unknown)
+    }
 }
 
 struct DockerEngineTransport<A> {
@@ -83,24 +90,40 @@ impl<A: DockerEngineApi> DockerTransport for DockerEngineTransport<A> {
             inspected_at: Some(inspected_at),
         })
     }
+
+    fn firewall_mode(&self) -> DockerFirewallMode {
+        self.api
+            .firewall_mode()
+            .unwrap_or(DockerFirewallMode::Unknown)
+    }
 }
 
 struct LocalDockerEngine {
     client: Result<(Docker, Runtime), DockerApiError>,
+    socket_path: Option<PathBuf>,
 }
 
 impl LocalDockerEngine {
     fn connect() -> Self {
-        let docker = match std::env::var_os("DOCKER_HOST") {
-            None => Docker::connect_with_unix_defaults(),
+        let (docker, socket_path) = match std::env::var_os("DOCKER_HOST") {
+            None => (
+                Docker::connect_with_unix_defaults(),
+                Some(PathBuf::from("/var/run/docker.sock")),
+            ),
             Some(host) => {
                 let host = host.to_string_lossy();
-                if host.starts_with("unix://") {
-                    Docker::connect_with_unix(&host, 120, API_DEFAULT_VERSION)
+                if let Some(path) = host.strip_prefix("unix://") {
+                    (
+                        Docker::connect_with_unix(&host, 120, API_DEFAULT_VERSION),
+                        Some(PathBuf::from(path)),
+                    )
                 } else {
-                    Err(BollardError::UnsupportedURISchemeError {
-                        uri: "non-local Docker endpoint".into(),
-                    })
+                    (
+                        Err(BollardError::UnsupportedURISchemeError {
+                            uri: "non-local Docker endpoint".into(),
+                        }),
+                        None,
+                    )
                 }
             }
         };
@@ -115,7 +138,38 @@ impl LocalDockerEngine {
                     _ => DockerApiError::Unavailable,
                 })
         });
-        Self { client }
+        Self {
+            client,
+            socket_path,
+        }
+    }
+
+    fn read_firewall_info(&self) -> Result<Vec<u8>, DockerApiError> {
+        let socket_path = self
+            .socket_path
+            .as_ref()
+            .and_then(|path| path.to_str())
+            .ok_or(DockerApiError::Unavailable)?;
+        let (docker, runtime) = self.client.as_ref().map_err(|error| *error)?;
+        let daemon_api_version = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), docker.version()).await
+            })
+            .map_err(|_| DockerApiError::Timeout)?
+            .map_err(classify_bollard_error)?
+            .api_version
+            .ok_or(DockerApiError::Malformed)?;
+        let endpoint =
+            versioned_info_endpoint(&daemon_api_version).ok_or(DockerApiError::Malformed)?;
+        runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    request_firewall_info(socket_path, &endpoint),
+                )
+                .await
+            })
+            .map_err(|_| DockerApiError::Timeout)?
     }
 }
 
@@ -137,6 +191,66 @@ impl DockerEngineApi for LocalDockerEngine {
         runtime
             .block_on(docker.inspect_container(id, None))
             .map_err(classify_bollard_error)
+    }
+
+    fn firewall_mode(&self) -> Result<DockerFirewallMode, DockerApiError> {
+        let bytes = self.read_firewall_info()?;
+        Ok(parse_firewall_mode(&bytes))
+    }
+}
+
+async fn request_firewall_info(
+    socket_path: &str,
+    endpoint: &str,
+) -> Result<Vec<u8>, DockerApiError> {
+    let client: Client<UnixConnector, Empty<Bytes>> = Client::unix();
+    let uri = UnixUri::new(socket_path, endpoint).into();
+    let response = client
+        .get(uri)
+        .await
+        .map_err(|_| DockerApiError::Unavailable)?;
+    if !response.status().is_success() {
+        return Err(DockerApiError::Unavailable);
+    }
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|_| DockerApiError::Malformed)?
+        .to_bytes();
+    Ok(body.to_vec())
+}
+
+fn versioned_info_endpoint(api_version: &str) -> Option<String> {
+    let mut parts = api_version.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    if parts.next().is_some()
+        || major.is_empty()
+        || minor.is_empty()
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!("/v{major}.{minor}/info"))
+}
+
+fn parse_firewall_mode(bytes: &[u8]) -> DockerFirewallMode {
+    let Ok(info) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return DockerFirewallMode::Unknown;
+    };
+    match info
+        .get("FirewallBackend")
+        .and_then(|value| value.get("Driver"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("iptables") => DockerFirewallMode::Iptables,
+        Some("nftables") => DockerFirewallMode::NativeNftables,
+        _ => DockerFirewallMode::Unknown,
     }
 }
 
@@ -378,12 +492,57 @@ fn classify_bollard_error(error: BollardError) -> DockerApiError {
             io::ErrorKind::TimedOut => DockerApiError::Timeout,
             _ => DockerApiError::Other,
         },
+        BollardError::HyperResponseError { err } => {
+            classify_io_source(&err).unwrap_or_else(|| {
+                // Hyper does not expose every connect-time OS error through
+                // `source()`. Preserve actionable Unix socket permission
+                // failures without retaining the raw transport error.
+                if err
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("permission denied")
+                {
+                    DockerApiError::PermissionDenied
+                } else {
+                    DockerApiError::Other
+                }
+            })
+        }
+        BollardError::HyperLegacyError { err } => classify_io_source(&err).unwrap_or_else(|| {
+            let message = format!("{err:?}").to_ascii_lowercase();
+            if message.contains("permissiondenied") || message.contains("permission denied") {
+                DockerApiError::PermissionDenied
+            } else if message.contains("connectionrefused") {
+                DockerApiError::Unavailable
+            } else {
+                DockerApiError::Other
+            }
+        }),
         BollardError::RequestTimeoutError => DockerApiError::Timeout,
         BollardError::JsonDataError { .. } | BollardError::JsonSerdeError { .. } => {
             DockerApiError::Malformed
         }
         _ => DockerApiError::Other,
     }
+}
+
+fn classify_io_source(error: &(dyn std::error::Error + 'static)) -> Option<DockerApiError> {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<io::Error>() {
+            return Some(match io_error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                    DockerApiError::Unavailable
+                }
+                io::ErrorKind::PermissionDenied => DockerApiError::PermissionDenied,
+                io::ErrorKind::Interrupted => DockerApiError::Interrupted,
+                io::ErrorKind::TimedOut => DockerApiError::Timeout,
+                _ => DockerApiError::Other,
+            });
+        }
+        source = error.source();
+    }
+    None
 }
 
 fn to_transport_error(error: DockerApiError) -> TransportError {
@@ -441,6 +600,7 @@ mod tests {
         summaries: Vec<ContainerSummary>,
         inspections: HashMap<String, Result<ContainerInspectResponse, DockerApiError>>,
         list_error: Option<DockerApiError>,
+        firewall_mode: DockerFirewallMode,
     }
 
     impl DockerEngineApi for FakeApi {
@@ -454,6 +614,10 @@ mod tests {
                 .get(id)
                 .cloned()
                 .unwrap_or(Err(DockerApiError::Unavailable))
+        }
+
+        fn firewall_mode(&self) -> Result<DockerFirewallMode, DockerApiError> {
+            Ok(self.firewall_mode)
         }
     }
 
@@ -556,6 +720,7 @@ mod tests {
         let result = DockerDiscovery::new(DockerEngineTransport::new(api), SystemClock).collect();
 
         assert_eq!(result.outcome, CollectionOutcome::Complete);
+        assert_eq!(result.firewall_mode, DockerFirewallMode::Unknown);
         let container = &result.containers[0];
         assert_eq!(
             container.logical_identity.as_ref().unwrap().value,
@@ -593,6 +758,45 @@ mod tests {
         )));
         let serialized = serde_json::to_string(&result).unwrap();
         assert!(!serialized.contains("not-allowlisted"));
+    }
+
+    #[test]
+    fn docker_firewall_mode_comes_from_engine_info_and_unknowns_stay_unknown() {
+        assert_eq!(
+            versioned_info_endpoint("1.51").as_deref(),
+            Some("/v1.51/info")
+        );
+        for malformed in ["", "1", "1.x", "1.50/../../evil", "1.2.3"] {
+            assert_eq!(versioned_info_endpoint(malformed), None);
+        }
+        for (payload, expected) in [
+            (
+                br#"{"FirewallBackend":{"Driver":"iptables"}}"#.as_slice(),
+                DockerFirewallMode::Iptables,
+            ),
+            (
+                br#"{"FirewallBackend":{"Driver":"nftables"}}"#.as_slice(),
+                DockerFirewallMode::NativeNftables,
+            ),
+            (br#"{}"#.as_slice(), DockerFirewallMode::Unknown),
+            (
+                br#"{"FirewallBackend":{"Driver":"other"}}"#.as_slice(),
+                DockerFirewallMode::Unknown,
+            ),
+            (b"not-json".as_slice(), DockerFirewallMode::Unknown),
+        ] {
+            assert_eq!(parse_firewall_mode(payload), expected);
+        }
+
+        let result = DockerDiscovery::new(
+            DockerEngineTransport::new(FakeApi {
+                firewall_mode: DockerFirewallMode::Iptables,
+                ..Default::default()
+            }),
+            SystemClock,
+        )
+        .collect();
+        assert_eq!(result.firewall_mode, DockerFirewallMode::Iptables);
     }
 
     #[test]

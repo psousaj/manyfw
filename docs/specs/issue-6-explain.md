@@ -39,6 +39,9 @@ without adding business logic.
   evidence, limitations, and unknown facts.
 - Identity outcomes are `Resolved`, `UnresolvedIdentity`, and
   `AmbiguousIdentity`; multiple instances of one logical identity are resolved.
+- The CLI renders the typed unresolved/ambiguous explanation (including
+  candidates) and exits nonzero for those selectors; the core evaluator retains
+  the versioned outcome for callers that consume the model directly.
 - Each observed path owns its evidence references; a global evidence index is
   supplementary only.
 - Paths preserve Docker publication, host listener, DNAT/proxy when proven,

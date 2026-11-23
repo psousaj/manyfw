@@ -1,0 +1,6 @@
+partial rollback injected after IPv4 cleanup
+iptables:chain-absent
+ip6tables:chain-present
+-N MFW_RECOVERY_TEST
+-A MFW_RECOVERY_TEST -p tcp -m tcp --dport 22 -j DROP
+ip6tables:jump-present

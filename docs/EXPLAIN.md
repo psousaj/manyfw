@@ -2,7 +2,7 @@
 
 `manyfw explain <service> --file <policy> --snapshot <snapshot.json> --format
 json` emits a versioned `Explanation` artifact. The current schema version is
-`3` (`version: 3`). Consumers should check this field and reject versions they
+`4` (`version: 4`). Consumers should check this field and reject versions they
 do not support; the schema is not covered by a compatibility promise across
 version changes.
 
@@ -31,10 +31,25 @@ Path-step kinds, statuses, and conclusions use snake-case JSON values. Path
 conclusions are `observed_path`, `potential_path`, and `unknown`. A non-running,
 restarting, paused, or status-unknown container does
 not produce an observed runtime path, even if a Docker publication is recorded.
+Published NAT and userland-proxy paths include a `docker_firewall_path` step
+describing the observed Docker firewall mode and packet path; unknown mode
+remains explicit and does not infer the Docker firewall path for NAT traffic.
+When the publication mechanism is observed as a userland proxy, the step still
+identifies its host `INPUT` path even if the firewall mode is unknown.
 Configured policy and observed Docker publication are not evidence of effective
 firewall enforcement or external reachability.
+
+For a container using host networking, host listeners remain separate host
+observations. Explain does not attribute a listener to a container unless the
+snapshot contains a supported correlation; without process-ownership evidence,
+the path and runtime conclusion remain unknown rather than inferring a host
+input path from the shared network namespace alone.
 
 Output ordering is deterministic for the same normalized policy and snapshot.
 Credentials, raw Docker responses, unallowlisted selectors, environment
 variables, and secret-bearing errors are excluded. See the [Explain contract](specs/issue-6-explain.md)
 for the full behavior and acceptance criteria.
+
+The CLI emits the typed explanation for unresolved or ambiguous selectors,
+including candidate identities, but exits nonzero so automation can distinguish
+a failed lookup from a resolved explanation.

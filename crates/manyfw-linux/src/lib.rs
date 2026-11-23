@@ -5,7 +5,11 @@ mod firewall;
 mod netlink;
 mod procfs;
 
-pub use firewall::{FirewallObservationError, observe_firewall};
+pub use firewall::{
+    DockerNatEvidence, DockerNatMapping, FirewallObservationError, LegacyFirewallObservation,
+    observe_firewall, observe_legacy_firewall, parse_nft_rule_observations,
+    verify_docker_nat_mapping,
+};
 
 pub(crate) struct SourceDump<T> {
     pub records: Vec<T>,

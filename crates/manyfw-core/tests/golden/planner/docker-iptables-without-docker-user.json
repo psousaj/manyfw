@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "applicability": "Applicable",
+  "operations": [
+    {
+      "EnsureRule": {
+        "rule_id": "r1",
+        "source": {
+          "Zone": "lan"
+        },
+        "source_interfaces": [
+          {
+            "Exact": "eth0"
+          }
+        ],
+        "source_subnets": [],
+        "destination": {
+          "Docker": "web"
+        },
+        "priority": 10,
+        "requires_dnat_original_destination": false,
+        "requires_conntrack": true,
+        "path": "forward",
+        "family": "ipv4",
+        "action": "Deny",
+        "protocol": "Tcp",
+        "ports": "Any",
+        "host_port": 18080,
+        "container_port": 8080,
+        "publication": "Nat",
+        "container_targets": [
+          {
+            "network": "bridge",
+            "address": "172.18.0.20",
+            "provenance": "DockerInspection"
+          }
+        ],
+        "host_address": "192.0.2.20",
+        "managed_resource": "manyfw-forward-v4"
+      }
+    },
+    {
+      "EnsureRule": {
+        "rule_id": "r1",
+        "source": {
+          "Zone": "lan"
+        },
+        "source_interfaces": [
+          {
+            "Exact": "eth0"
+          }
+        ],
+        "source_subnets": [],
+        "destination": {
+          "Docker": "web"
+        },
+        "priority": 10,
+        "requires_dnat_original_destination": false,
+        "requires_conntrack": true,
+        "path": "forward",
+        "family": "ipv6",
+        "action": "Deny",
+        "protocol": "Tcp",
+        "ports": "Any",
+        "host_port": 18443,
+        "container_port": 8443,
+        "publication": "Nat",
+        "container_targets": [
+          {
+            "network": "bridge",
+            "address": "2001:db8:1::20",
+            "provenance": "DockerInspection"
+          }
+        ],
+        "host_address": "2001:db8::20",
+        "managed_resource": "manyfw-forward-v6"
+      }
+    },
+    {
+      "SetManagedDefault": {
+        "action": "Deny",
+        "path": "input",
+        "family": "ipv4",
+        "managed_resource": "manyfw-input-v4"
+      }
+    },
+    {
+      "SetManagedDefault": {
+        "action": "Deny",
+        "path": "input",
+        "family": "ipv6",
+        "managed_resource": "manyfw-input-v6"
+      }
+    }
+  ],
+  "preconditions": {
+    "input_fingerprint": "fnv1a64:fefee8c2bdabf19e",
+    "observation_generation": 7,
+    "backend_identity": "nftables",
+    "backend_version": "1",
+    "required_hooks": [
+      "forward",
+      "prerouting"
+    ],
+    "required_priorities": [
+      -100,
+      0
+    ],
+    "policy_priorities": [
+      10
+    ],
+    "backend": "iptables",
+    "mode": "iptables_docker"
+  },
+  "ownership": [
+    {
+      "resource": "manyfw-forward-v4",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "manyfw-forward-v6",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "manyfw-input-v4",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "manyfw-input-v6",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
+    }
+  ],
+  "unknowns": [],
+  "explanations": [
+    "plan generation is read-only and produces typed diagnostic operations",
+    "Docker iptables mode is evaluated through observed FORWARD/DOCKER-USER boundaries",
+    "Docker destination web: Docker firewall mode is iptables; the published NAT path is DNAT then FORWARD; DOCKER-USER is absent from complete IPv4 and IPv6 iptables observations",
+    "ManyFW FORWARD deny rules use an independent accept-policy base chain at priority -300 after an established/related exception",
+    "managed INPUT default-deny exceptions: established/related return traffic, loopback ingress, and ICMPv6 neighbor discovery/router advertisements",
+    "DOCKER-USER remains Docker-owned; it is observed as a path boundary, never a ManyFW write target",
+    "foreign manager resources are preserved and global atomicity is not assumed"
+  ]
+}
