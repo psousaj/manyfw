@@ -16,6 +16,13 @@ pub const PLAN_VERSION: u32 = 1;
 pub const MINIMUM_NFT_VERSION: (u32, u32, u32) = (1, 0, 9);
 pub const MINIMUM_KERNEL_VERSION: (u32, u32, u32) = (5, 10, 0);
 pub const MANAGED_DEFAULT_DENY_EXPLANATION: &str = "managed INPUT default-deny exceptions: established/related return traffic, loopback ingress, and ICMPv6 neighbor discovery/router advertisements";
+pub const MANAGED_FORWARD_CHAIN_PRIORITY: i32 = -300;
+pub const IPTABLES_OBSERVATION_METADATA_LIMITATION: &str =
+    "iptables-save does not expose reliable hook priority or chain ownership metadata";
+pub const NFTABLES_OWNERSHIP_LIMITATION: &str =
+    "nftables resource ownership is not independently attributable";
+pub const FORWARD_DROP_HOST_ROUTES_LIMITATION: &str =
+    "host route observations are partial; no Docker packet reachability is inferred";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NftRuntimeCapability {
@@ -576,6 +583,7 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     let observation = &input.observation;
     let docker_snapshot = observation.docker();
     let host_snapshot = observation.host();
+    let verified_forward_drop_plan = is_verified_forward_drop_plan(&input.policy, &docker_snapshot);
     let policy_needs_docker = input
         .policy
         .rules
@@ -612,9 +620,25 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             host_snapshot.routes.outcome,
         ),
     ] {
-        if completeness != crate::host::Completeness::Complete
-            || outcome != crate::host::CollectionOutcome::Complete
-        {
+        let incomplete = completeness != crate::host::Completeness::Complete
+            || outcome != crate::host::CollectionOutcome::Complete;
+        let known_forward_route_limitations = dimension == "routes"
+            && verified_forward_drop_plan
+            && host_snapshot
+                .routes
+                .limitations
+                .contains(&crate::host::Limitation::PolicyRoutingIncomplete)
+            && host_snapshot.routes.limitations.iter().all(|limitation| {
+                matches!(
+                    limitation,
+                    crate::host::Limitation::CurrentNamespaceOnly
+                        | crate::host::Limitation::PolicyRoutingIncomplete
+                        | crate::host::Limitation::UnsupportedDimension
+                )
+            });
+        if incomplete && known_forward_route_limitations {
+            unknowns.push(FORWARD_DROP_HOST_ROUTES_LIMITATION.into());
+        } else if incomplete {
             reasons.push(BlockReason::ObservationIncomplete {
                 detail: format!("host {dimension} observation is incomplete or unavailable"),
             });
@@ -726,7 +750,7 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             .filter(|observation| observation.hook == hook)
             .filter_map(|observation| observation.priority)
             .collect::<BTreeSet<_>>();
-        if priorities.len() > 1 {
+        if priorities.len() > 1 && !verified_forward_drop_plan {
             reasons.push(BlockReason::Unknown {
                 detail: format!("conflicting priorities observed for {:?} hook", hook),
             });
@@ -823,6 +847,17 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             }
         };
         for (family, path, host_port, container_port, publication, host_address, targets) in paths {
+            if path == PacketPath::Forward && rule.action != Action::Deny {
+                let detail = format!(
+                    "FORWARD allows are unsupported for rule {}; only published-Docker drop rules are supported",
+                    rule.id
+                );
+                reasons.push(BlockReason::Unknown {
+                    detail: detail.clone(),
+                });
+                unknowns.push(detail);
+                continue;
+            }
             let family_capability = match family {
                 AddressFamily::Ipv4 => backend.capabilities.ipv4,
                 AddressFamily::Ipv6 => backend.capabilities.ipv6,
@@ -916,32 +951,6 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                         required_priorities.insert(h.priority.unwrap_or_default());
                     }
                 }
-                require_capability(
-                    &mut reasons,
-                    &mut unknowns,
-                    "dnat_original_destination",
-                    backend.capabilities.dnat_original_destination,
-                );
-                if backend.observation.mode == BackendMode::IptablesDocker {
-                    require_capability(
-                        &mut reasons,
-                        &mut unknowns,
-                        "docker_user",
-                        backend.capabilities.docker_user,
-                    );
-                    if !backend.observation.resources.iter().any(|resource| {
-                        resource.name.eq_ignore_ascii_case("DOCKER-USER")
-                            && resource.path == PacketPath::Forward
-                            && resource.family == family
-                            && resource.hook == Some(Hook::Forward)
-                            && resource.ownership == Ownership::Docker
-                    }) {
-                        reasons.push(BlockReason::Unknown {
-                            detail: "DOCKER-USER ownership/hook placement was not observed".into(),
-                        });
-                        unknowns.push("DOCKER-USER resource is not observed".into());
-                    }
-                }
             }
             if uses_nat {
                 require_capability(
@@ -966,7 +975,7 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                 source_subnets: rule_source_subnets(&input.policy, &rule.source, family),
                 destination: rule.destination.clone(),
                 priority: rule.priority,
-                requires_dnat_original_destination: uses_nat,
+                requires_dnat_original_destination: false,
                 requires_conntrack: uses_nat,
                 path,
                 family,
@@ -986,14 +995,16 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
         .iter()
         .filter_map(operation_scope)
         .collect::<BTreeSet<_>>();
-    if input.policy.rules.is_empty() {
+    managed_scopes.retain(|(path, _)| *path != PacketPath::Forward);
+    if managed_scopes.is_empty() {
         managed_scopes.extend(
             backend
                 .observation
                 .resources
                 .iter()
                 .filter(|resource| {
-                    resource.ownership == Ownership::Manyfw
+                    resource.path != PacketPath::Forward
+                        && resource.ownership == Ownership::Manyfw
                         && resource_supports_operation(
                             resource,
                             resource.path,
@@ -1003,12 +1014,22 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                 })
                 .map(|resource| (resource.path, resource.family)),
         );
-        if managed_scopes.is_empty() {
-            reasons.push(BlockReason::Unknown {
-                detail: "default action has no observed ManyFW-owned managed scope".into(),
-            });
-            unknowns.push("default action scope is unknown".into());
-        }
+    }
+    if input.policy.default_action == Action::Allow {
+        managed_scopes.extend(operations.iter().filter_map(|operation| match operation {
+            PlanOperation::EnsureRule {
+                path: PacketPath::Forward,
+                family,
+                ..
+            } => Some((PacketPath::Input, *family)),
+            _ => None,
+        }));
+    }
+    if managed_scopes.is_empty() {
+        reasons.push(BlockReason::Unknown {
+            detail: "default action has no observed ManyFW-owned managed scope".into(),
+        });
+        unknowns.push("default action scope is unknown".into());
     }
     operations.extend(managed_scopes.into_iter().map(|(path, family)| {
         PlanOperation::SetManagedDefault {
@@ -1018,23 +1039,82 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             managed_resource: managed_resource_for_scope(&backend.observation, path, family),
         }
     }));
+    if verified_forward_drop_plan {
+        for family in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
+            let matching_defaults = operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    PlanOperation::SetManagedDefault {
+                        action: Action::Allow,
+                        path: PacketPath::Input,
+                        family: operation_family,
+                        managed_resource: Some(resource),
+                    } if *operation_family == family => Some(resource),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            // Resource names may legitimately be reused between families
+            // (for example, `manyfw/input` identifies one inet chain observed
+            // once for IPv4 and once for IPv6). Check ownership in this exact
+            // packet-path/family scope rather than counting name-only
+            // OwnershipBoundary records across the whole backend.
+            let owner_bound = if matching_defaults.len() == 1 {
+                let resource = matching_defaults[0];
+                let scoped_resources = backend
+                    .observation
+                    .resources
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.name == *resource
+                            && candidate.path == PacketPath::Input
+                            && candidate.family == family
+                    })
+                    .collect::<Vec<_>>();
+                scoped_resources.len() == 1 && scoped_resources[0].ownership == Ownership::Manyfw
+            } else {
+                false
+            };
+            if !owner_bound {
+                let detail = format!(
+                    "verified Docker FORWARD drops require one owner-bound INPUT Allow scope for {family:?}"
+                );
+                reasons.push(BlockReason::Unknown {
+                    detail: detail.clone(),
+                });
+                unknowns.push(detail);
+            }
+        }
+    }
     // Policy normalization normally orders rules, but the planner is also a
     // public seam and must not make its artifact depend on declaration order.
     // The typed operation remains the source of truth; the debug strings are
     // only deterministic sort keys, never commands or backend syntax.
     operations.sort_by_key(operation_sort_key);
     for resource in &backend.observation.resources {
-        if resource.ownership != Ownership::Manyfw
-            && operations.iter().any(|operation| {
+        let matching_operations = operations
+            .iter()
+            .filter(|operation| {
                 operation_scope(operation) == Some((resource.path, resource.family))
             })
+            .collect::<Vec<_>>();
+        let drop_only_forward_scope = resource.path == PacketPath::Forward
+            && !matching_operations.is_empty()
+            && matching_operations
+                .iter()
+                .all(|operation| is_forward_drop_operation(operation));
+        if resource.ownership != Ownership::Manyfw
+            && !matching_operations.is_empty()
+            && !drop_only_forward_scope
         {
             reasons.push(BlockReason::Ownership {
                 resource: resource.name.clone(),
                 owner: resource.ownership,
             });
         }
-        if resource.ownership == Ownership::Unknown {
+        if resource.ownership == Ownership::Unknown
+            && !drop_only_forward_scope
+            && !matching_operations.is_empty()
+        {
             unknowns.push(format!("ownership of {} is unknown", resource.name));
             reasons.push(BlockReason::Ownership {
                 resource: resource.name.clone(),
@@ -1058,7 +1138,13 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                         )
                 })
                 .count();
-            if matches == 0 {
+            let new_forward_chain = path == PacketPath::Forward
+                && operations.iter().any(|operation| {
+                    operation_scope(operation) == Some((path, family))
+                        && is_forward_drop_operation(operation)
+                })
+                && backend.capabilities.ownership_boundary == CapabilityState::Supported;
+            if matches == 0 && !new_forward_chain {
                 reasons.push(BlockReason::Unknown {
                     detail: format!(
                         "no ManyFW-owned resource was observed for {:?} {:?}",
@@ -1083,6 +1169,17 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             .resources
             .iter()
             .any(|resource| resource.ownership == Ownership::Manyfw)
+        && !(verified_forward_drop_plan
+            && backend.capabilities.ownership_boundary == CapabilityState::Supported
+            && operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    PlanOperation::EnsureRule {
+                        path: PacketPath::Forward,
+                        ..
+                    }
+                )
+            }))
     {
         reasons.push(BlockReason::Unknown {
             detail: "no ManyFW-owned backend resource was observed".into(),
@@ -1091,15 +1188,12 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
     }
     for operation in &operations {
         let boundary_name = match operation {
-            PlanOperation::EnsureRule { rule_id, .. } => Some(rule_id.clone()),
+            PlanOperation::EnsureRule {
+                managed_resource, ..
+            } => managed_resource.clone(),
             PlanOperation::SetManagedDefault {
-                path,
-                family,
-                managed_resource,
-                ..
-            } => managed_resource
-                .clone()
-                .or_else(|| Some(format!("managed-default-{path:?}-{family:?}"))),
+                managed_resource, ..
+            } => managed_resource.clone(),
             PlanOperation::Diagnostic { .. } => None,
         };
         if let Some(resource) = boundary_name {
@@ -1125,33 +1219,43 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             detail: diagnostic.detail,
         });
     }
-    let mut observed_priorities = BTreeSet::new();
-    for hook in &backend.observation.hooks {
-        if let Some(priority) = hook.priority {
-            if !observed_priorities.insert((hook.hook, priority)) {
-                reasons.push(BlockReason::Unknown {
-                    detail: format!(
-                        "backend {:?} hook priority {priority} is conflicting",
+    if !verified_forward_drop_plan {
+        let mut observed_priorities = BTreeSet::new();
+        for hook in &backend.observation.hooks {
+            if let Some(priority) = hook.priority {
+                if !observed_priorities.insert((hook.hook, priority)) {
+                    reasons.push(BlockReason::Unknown {
+                        detail: format!(
+                            "backend {:?} hook priority {priority} is conflicting",
+                            hook.hook
+                        ),
+                    });
+                    unknowns.push(format!(
+                        "{:?} hook priority {priority} is conflicting",
                         hook.hook
-                    ),
-                });
-                unknowns.push(format!(
-                    "{:?} hook priority {priority} is conflicting",
-                    hook.hook
-                ));
+                    ));
+                }
             }
         }
     }
-    if backend
-        .observation
-        .limitations
-        .iter()
-        .any(|l| !l.is_empty())
-    {
-        reasons.push(BlockReason::ObservationIncomplete {
-            detail: "backend observation has unresolved limitations".into(),
-        });
-        unknowns.extend(backend.observation.limitations.iter().cloned());
+    for limitation in &backend.observation.limitations {
+        // A verified, drop-only Docker FORWARD plan is not weakened by
+        // uncertainty about foreign ownership/priority metadata: foreign
+        // drops only make the requested deny redundant, and accepts cannot
+        // override ManyFW's terminal drop. Keep the uncertainty visible, but
+        // do not make it a blocker. Malformed or otherwise unclassified
+        // observation limitations remain fail-closed.
+        let non_blocking_for_forward_drop = verified_forward_drop_plan
+            && matches!(
+                limitation.as_str(),
+                IPTABLES_OBSERVATION_METADATA_LIMITATION | NFTABLES_OWNERSHIP_LIMITATION
+            );
+        if !non_blocking_for_forward_drop {
+            reasons.push(BlockReason::ObservationIncomplete {
+                detail: "backend observation has unresolved limitations".into(),
+            });
+        }
+        unknowns.push(limitation.clone());
     }
     reasons.sort_by_key(reason_key);
     reasons.dedup();
@@ -1201,6 +1305,21 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             )
         ));
     }
+    if operations.iter().any(|operation| {
+        matches!(
+            operation,
+            PlanOperation::EnsureRule {
+                path: PacketPath::Forward,
+                action: Action::Deny,
+                ..
+            }
+        )
+    }) {
+        explanations.push(format!(
+            "ManyFW FORWARD deny rules use an independent accept-policy base chain at priority {} after an established/related exception",
+            MANAGED_FORWARD_CHAIN_PRIORITY
+        ));
+    }
     if backend.observation.backend == BackendKind::Nftables {
         explanations.push(
             backend
@@ -1208,6 +1327,15 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
                 .as_ref()
                 .map(NftRuntimeCapability::summary)
                 .unwrap_or_else(|| "nft runtime: capability observation unavailable".into()),
+        );
+    }
+    if unknowns
+        .iter()
+        .any(|detail| detail == FORWARD_DROP_HOST_ROUTES_LIMITATION)
+    {
+        explanations.push(
+            "a verified Docker NAT FORWARD deny does not infer packet reachability from incomplete host routes; route limitations remain visible and non-route or unknown-host limitations still block"
+                .into(),
         );
     }
     if operations.iter().any(|operation| {
@@ -1227,15 +1355,6 @@ pub fn plan(input: &PlannerInput) -> DiagnosticPlan {
             "DOCKER-USER remains Docker-owned; it is observed as a path boundary, never a ManyFW write target"
                 .into(),
         );
-        if operations.iter().any(|operation| {
-            operation_scope(operation).is_some_and(|(path, _)| path == PacketPath::Forward)
-        }) && matches!(applicability, PlanApplicability::Blocked { .. })
-        {
-            explanations.push(
-                "Docker iptables applicability is blocked unless an independent ManyFW-owned insertion point and ordering are verified"
-                    .into(),
-            );
-        }
     }
     if matches!(applicability, PlanApplicability::Blocked { .. }) {
         explanations
@@ -1347,6 +1466,14 @@ pub fn analyze_foreign_rules(
             {
                 analysis.informational.push(format!(
                     "redundant block rule {rule_id}: {location} already drops matching traffic"
+                ));
+            } else if *action == Action::Deny
+                && (!foreign.analyzable
+                    || foreign.verdict == ObservedRuleVerdict::Unknown
+                    || overlap == RuleOverlap::Unknown)
+            {
+                analysis.informational.push(format!(
+                    "block rule {rule_id} may overlap {location}; the foreign rule cannot be fully analyzed, but this uncertainty does not weaken the explicit ManyFW drop"
                 ));
             }
         }
@@ -1475,6 +1602,42 @@ fn backend_observation_state(observation: &BackendObservation) -> CapabilityStat
     } else {
         CapabilityState::Supported
     }
+}
+
+fn is_verified_forward_drop_plan(
+    policy: &NormalizedPolicy,
+    docker: &docker::DockerDiscoveryResult,
+) -> bool {
+    policy.default_action == Action::Allow
+        && !policy.rules.is_empty()
+        && policy.rules.iter().all(|rule| {
+            let Selector::Docker(selector) = &rule.destination else {
+                return false;
+            };
+            rule.action == Action::Deny
+                && docker.containers.iter().any(|container| {
+                    let identity_matches =
+                        container.logical_identity.as_ref().is_some_and(|identity| {
+                            identity.value == *selector
+                                || identity.value == format!("docker:{selector}")
+                        });
+                    identity_matches
+                        && container.lifecycle == docker::LifecycleState::Running
+                        && container.operational_status == docker::OperationalStatus::Running
+                        && container.observed_endpoints.iter().any(|endpoint| {
+                            endpoint.mechanism == docker::PublicationMechanism::Nat
+                                && matches!(
+                                    endpoint.network_mode,
+                                    docker::NetworkMode::Bridge | docker::NetworkMode::Custom(_)
+                                )
+                                && endpoint.family != docker::IpFamily::Unspecified
+                                && endpoint.host.address.is_some()
+                                && endpoint.host.port != 0
+                                && endpoint.container_port != 0
+                                && !endpoint.container_addresses.is_empty()
+                        })
+                })
+        })
 }
 
 fn backend_mode_matches_kind(kind: BackendKind, mode: BackendMode) -> bool {
@@ -1626,7 +1789,9 @@ fn docker_rule_paths(
         if !source_families.contains(&family) {
             continue;
         }
-        if endpoint.network_mode != docker::NetworkMode::Bridge {
+        let verified_nat_custom_network = endpoint.mechanism == docker::PublicationMechanism::Nat
+            && matches!(endpoint.network_mode, docker::NetworkMode::Custom(_));
+        if endpoint.network_mode != docker::NetworkMode::Bridge && !verified_nat_custom_network {
             reasons.push(BlockReason::Unknown {
                 detail: format!(
                     "Docker publication mode {:?} is not safely attributable for rule {}",
@@ -1774,11 +1939,44 @@ fn operation_scope(operation: &PlanOperation) -> Option<(PacketPath, AddressFami
     }
 }
 
+fn operation_managed_resource(operation: &PlanOperation) -> Option<&str> {
+    match operation {
+        PlanOperation::SetManagedDefault {
+            managed_resource, ..
+        }
+        | PlanOperation::EnsureRule {
+            managed_resource, ..
+        } => managed_resource.as_deref(),
+        PlanOperation::Diagnostic { .. } => None,
+    }
+}
+
+fn is_forward_drop_operation(operation: &PlanOperation) -> bool {
+    matches!(
+        operation,
+        PlanOperation::EnsureRule {
+            path: PacketPath::Forward,
+            action: Action::Deny,
+            ..
+        }
+    ) && operation_managed_resource(operation)
+        .is_some_and(|managed| managed.starts_with("manyfw-forward-"))
+}
+
 fn managed_resource_for_scope(
     observation: &BackendObservation,
     path: PacketPath,
     family: AddressFamily,
 ) -> Option<String> {
+    if path == PacketPath::Forward {
+        return Some(format!(
+            "manyfw-forward-{}",
+            match family {
+                AddressFamily::Ipv4 => "v4",
+                AddressFamily::Ipv6 => "v6",
+            }
+        ));
+    }
     let mut matching = observation
         .resources
         .iter()
@@ -2437,6 +2635,9 @@ mod tests {
                 let iptables = name.starts_with("docker-iptables");
                 let userland_proxy = name == "docker-userland-proxy";
                 input.policy.rules[0].destination = Selector::Docker("web".into());
+                if !userland_proxy {
+                    input.policy.rules[0].action = Action::Deny;
+                }
                 let mut docker_observation = input.observation.docker();
                 docker_observation.firewall_mode = match name {
                     "docker-iptables" | "docker-iptables-without-docker-user" => {
@@ -2525,6 +2726,11 @@ mod tests {
                 } else {
                     observation.hooks = vec![
                         HookObservation {
+                            hook: Hook::Input,
+                            priority: Some(-300),
+                            present: CapabilityState::Supported,
+                        },
+                        HookObservation {
                             hook: Hook::Forward,
                             priority: Some(0),
                             present: CapabilityState::Supported,
@@ -2536,6 +2742,20 @@ mod tests {
                         },
                     ];
                     observation.resources = vec![
+                        ResourceObservation {
+                            name: "manyfw-input-v4".into(),
+                            ownership: Ownership::Manyfw,
+                            path: PacketPath::Input,
+                            family: AddressFamily::Ipv4,
+                            hook: Some(Hook::Input),
+                        },
+                        ResourceObservation {
+                            name: "manyfw-input-v6".into(),
+                            ownership: Ownership::Manyfw,
+                            path: PacketPath::Input,
+                            family: AddressFamily::Ipv6,
+                            hook: Some(Hook::Input),
+                        },
                         ResourceObservation {
                             name: "manyfw-forward-v4".into(),
                             ownership: Ownership::Manyfw,
@@ -3046,7 +3266,9 @@ mod tests {
     #[test]
     fn native_nftables_docker_plan_requires_prerouting_but_not_docker_user() {
         let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
         input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
         attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
         input.backend.capabilities.docker_user = CapabilityState::Unsupported;
         input.backend.observation.hooks.extend([
@@ -3062,6 +3284,20 @@ mod tests {
             },
         ]);
         input.backend.observation.resources = vec![
+            ResourceObservation {
+                name: "manyfw-input-v4".into(),
+                ownership: Ownership::Manyfw,
+                path: PacketPath::Input,
+                family: AddressFamily::Ipv4,
+                hook: Some(Hook::Input),
+            },
+            ResourceObservation {
+                name: "manyfw-input-v6".into(),
+                ownership: Ownership::Manyfw,
+                path: PacketPath::Input,
+                family: AddressFamily::Ipv6,
+                hook: Some(Hook::Input),
+            },
             ResourceObservation {
                 name: "manyfw-forward-v4".into(),
                 ownership: Ownership::Manyfw,
@@ -3084,7 +3320,694 @@ mod tests {
             plan.preconditions.required_hooks,
             vec![Hook::Forward, Hook::Prerouting]
         );
-        assert_eq!(plan.operations.len(), 2);
+        assert_eq!(plan.operations.len(), 3);
+        assert!(plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::EnsureRule {
+                path: PacketPath::Forward,
+                action: Action::Deny,
+                ..
+            }
+        )));
+        assert!(plan.operations.iter().all(|operation| {
+            operation_scope(operation).is_none_or(|(path, _)| {
+                path != PacketPath::Forward
+                    || operation_managed_resource(operation)
+                        .is_some_and(|name| name.starts_with("manyfw-forward-"))
+            })
+        }));
+        assert!(plan.explanations.iter().any(|explanation| {
+            explanation.contains("priority -300")
+                && explanation.contains("established/related exception")
+        }));
+    }
+
+    #[test]
+    fn docker_nat_forward_allow_is_refused_with_drop_only_diagnostic() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Allow;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        let plan = Planner::plan(&input);
+
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(plan.unknowns.iter().any(|detail| {
+            detail.contains("FORWARD allows are unsupported")
+                && detail.contains("published-Docker drop rules")
+        }));
+        assert!(!plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::EnsureRule {
+                path: PacketPath::Forward,
+                action: Action::Allow,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn docker_forward_drop_retains_but_does_not_block_on_known_foreign_metadata_limits() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.limitations = vec![
+            IPTABLES_OBSERVATION_METADATA_LIMITATION.into(),
+            NFTABLES_OWNERSHIP_LIMITATION.into(),
+        ];
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(0),
+                present: CapabilityState::Supported,
+            },
+        ]);
+
+        let plan = Planner::plan(&input);
+
+        assert_eq!(
+            plan.applicability,
+            PlanApplicability::Applicable,
+            "unknowns: {:?}",
+            plan.unknowns
+        );
+        assert!(
+            input
+                .backend
+                .observation
+                .limitations
+                .iter()
+                .all(|detail| plan.unknowns.contains(detail))
+        );
+        assert!(plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::EnsureRule {
+                path: PacketPath::Forward,
+                action: Action::Deny,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn docker_forward_drop_preserves_only_known_host_route_limitations() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(0),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        let mut host = input.observation.host();
+        host.routes.completeness = crate::host::Completeness::Partial;
+        host.routes.outcome = crate::host::CollectionOutcome::Partial;
+        host.routes.limitations = vec![
+            crate::host::Limitation::CurrentNamespaceOnly,
+            crate::host::Limitation::PolicyRoutingIncomplete,
+            crate::host::Limitation::UnsupportedDimension,
+        ];
+        input.observation =
+            crate::snapshot::ObservationSnapshot::compose(input.observation.docker(), host);
+
+        let plan = Planner::plan(&input);
+
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
+        assert!(
+            plan.unknowns
+                .contains(&FORWARD_DROP_HOST_ROUTES_LIMITATION.into())
+        );
+        assert!(plan.explanations.iter().any(|explanation| {
+            explanation.contains("does not infer packet reachability from incomplete host routes")
+        }));
+
+        let mut unclassified = input.clone();
+        let mut host = unclassified.observation.host();
+        host.routes
+            .limitations
+            .push(crate::host::Limitation::MalformedSource);
+        unclassified.observation =
+            crate::snapshot::ObservationSnapshot::compose(unclassified.observation.docker(), host);
+        let blocked = Planner::plan(&unclassified);
+        assert!(matches!(
+            blocked.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(
+            blocked
+                .unknowns
+                .iter()
+                .any(|detail| detail == "host routes coverage is incomplete")
+        );
+
+        fn mark_partial<T>(observation: &mut crate::host::DimensionObservation<T>) {
+            observation.completeness = crate::host::Completeness::Partial;
+            observation.outcome = crate::host::CollectionOutcome::Partial;
+            observation.limitations = vec![crate::host::Limitation::MalformedSource];
+        }
+        for dimension in ["interfaces", "addresses", "listeners"] {
+            let mut incomplete_host = input.clone();
+            let mut host = incomplete_host.observation.host();
+            match dimension {
+                "interfaces" => mark_partial(&mut host.interfaces),
+                "addresses" => mark_partial(&mut host.addresses),
+                "listeners" => mark_partial(&mut host.listeners),
+                _ => unreachable!(),
+            }
+            incomplete_host.observation = crate::snapshot::ObservationSnapshot::compose(
+                incomplete_host.observation.docker(),
+                host,
+            );
+            assert!(matches!(
+                Planner::plan(&incomplete_host).applicability,
+                PlanApplicability::Blocked { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn docker_forward_drop_remains_blocked_by_malformed_backend_observation() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.limitations =
+            vec!["nftables ruleset response was malformed".into()];
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(0),
+                present: CapabilityState::Supported,
+            },
+        ]);
+
+        let plan = Planner::plan(&input);
+
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(
+            plan.unknowns
+                .iter()
+                .any(|detail| detail == "nftables ruleset response was malformed")
+        );
+    }
+
+    #[test]
+    fn docker_forward_drop_remains_blocked_by_unclassified_observation_limitations() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.limitations =
+            vec!["unclassified nftables observation limitation".into()];
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(0),
+                present: CapabilityState::Supported,
+            },
+        ]);
+
+        let plan = Planner::plan(&input);
+
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(
+            plan.unknowns
+                .iter()
+                .any(|detail| { detail == "unclassified nftables observation limitation" })
+        );
+    }
+
+    #[test]
+    fn docker_forward_drop_reports_but_does_not_block_on_an_unanalyzable_foreign_rule() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(0),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        let mut foreign = observed_drop_rule(AddressFamily::Ipv4, -200);
+        foreign.chain = "foreign-forward".into();
+        foreign.hook = Hook::Forward;
+        foreign.analyzable = false;
+        foreign.verdict = ObservedRuleVerdict::Unknown;
+        foreign.destination_subnets.clear();
+        foreign.destination_ports.clear();
+        foreign.protocol = None;
+        input.backend.observation.rules.push(foreign);
+
+        let plan = Planner::plan(&input);
+
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
+        assert!(plan.explanations.iter().any(|detail| {
+            detail.contains("block rule r1 may overlap")
+                && detail.contains("foreign-forward")
+                && detail.contains("cannot be fully analyzed")
+        }));
+    }
+
+    #[test]
+    fn docker_forward_drop_is_blocked_by_an_unknown_hook() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(0),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Unknown,
+                priority: None,
+                present: CapabilityState::Unknown,
+            },
+        ]);
+
+        let plan = Planner::plan(&input);
+
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(
+            plan.unknowns
+                .iter()
+                .any(|detail| detail == "backend hook semantics are unknown")
+        );
+    }
+
+    #[test]
+    fn docker_forward_drop_plan_refreshes_ip_without_changing_stable_identity() {
+        let mut original = input(CapabilityState::Supported);
+        original.policy.rules[0].destination = Selector::Docker("web".into());
+        original.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut original, docker::PublicationMechanism::Nat);
+        let original_plan = Planner::plan(&original);
+
+        let mut refreshed = original.clone();
+        let mut docker_snapshot = refreshed.observation.docker();
+        docker_snapshot.containers[0].observed_endpoints[0].container_addresses[0].address =
+            "172.18.0.99".parse().unwrap();
+        refreshed.observation =
+            snapshot::ObservationSnapshot::compose(docker_snapshot, refreshed.observation.host());
+        let refreshed_plan = Planner::plan(&refreshed);
+
+        let planned_destination = |plan: &DiagnosticPlan| {
+            plan.operations
+                .iter()
+                .find_map(|operation| match operation {
+                    PlanOperation::EnsureRule {
+                        destination: Selector::Docker(identity),
+                        container_targets,
+                        path: PacketPath::Forward,
+                        ..
+                    } => Some((identity.clone(), container_targets[0].address)),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            planned_destination(&original_plan),
+            Some(("web".into(), "172.18.0.20".parse().unwrap()))
+        );
+        assert_eq!(
+            planned_destination(&refreshed_plan),
+            Some(("web".into(), "172.18.0.99".parse().unwrap()))
+        );
+        assert_ne!(
+            original_plan.preconditions.input_fingerprint,
+            refreshed_plan.preconditions.input_fingerprint,
+            "an observed container address change invalidates the reviewed plan"
+        );
+    }
+
+    #[test]
+    fn docker_forward_drop_can_create_the_first_owned_forward_chain() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(-300),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        input.backend.observation.resources.retain(|resource| {
+            !(resource.path == PacketPath::Forward && resource.ownership == Ownership::Manyfw)
+        });
+        input
+            .backend
+            .observation
+            .resources
+            .push(ResourceObservation {
+                name: "foreign/forward".into(),
+                ownership: Ownership::Unknown,
+                path: PacketPath::Forward,
+                family: AddressFamily::Ipv4,
+                hook: Some(Hook::Forward),
+            });
+
+        let plan = Planner::plan(&input);
+
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
+        assert!(plan.ownership.iter().any(|boundary| {
+            boundary.resource == "manyfw-forward-v4" && boundary.owner == Ownership::Manyfw
+        }));
+        assert!(plan.operations.iter().any(|operation| matches!(
+            operation,
+            PlanOperation::EnsureRule {
+                path: PacketPath::Forward,
+                action: Action::Deny,
+                managed_resource: Some(name),
+                ..
+            } if name == "manyfw-forward-v4"
+        )));
+        assert!(
+            crate::transaction::TransactionPlan::from_diagnostic_plan(
+                &plan,
+                "mfw-test-forward-plan".into(),
+                "nft:inet:input".into(),
+                "test-fingerprint".into(),
+                60,
+            )
+            .is_ok(),
+            "an applicable plan must bind its operation to the owned resource"
+        );
+    }
+
+    #[test]
+    fn docker_forward_drop_without_an_owned_input_scope_is_blocked_before_conversion() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(-300),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        input
+            .backend
+            .observation
+            .resources
+            .retain(|resource| resource.path == PacketPath::Forward);
+
+        let plan = Planner::plan(&input);
+
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(
+            plan.unknowns
+                .iter()
+                .any(|detail| { detail.contains("owner-bound INPUT Allow scope for Ipv4") }),
+            "unknowns: {:?}",
+            plan.unknowns
+        );
+        assert!(
+            crate::transaction::TransactionPlan::from_diagnostic_plan(
+                &plan,
+                "mfw-test-forward-plan".into(),
+                "nft:inet:input".into(),
+                "test-fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "a plan without an owner-bound INPUT default must not reach transaction conversion"
+        );
+
+        let mut partial_input = self::input(CapabilityState::Supported);
+        partial_input.policy.default_action = Action::Allow;
+        partial_input.policy.rules[0].destination = Selector::Docker("web".into());
+        partial_input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut partial_input, docker::PublicationMechanism::Nat);
+        partial_input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(-300),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        partial_input
+            .backend
+            .observation
+            .resources
+            .retain(|resource| {
+                resource.path == PacketPath::Forward
+                    || (resource.path == PacketPath::Input
+                        && resource.family == AddressFamily::Ipv4)
+            });
+
+        let partial_plan = Planner::plan(&partial_input);
+
+        assert!(matches!(
+            partial_plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(
+            partial_plan
+                .unknowns
+                .iter()
+                .any(|detail| { detail.contains("owner-bound INPUT Allow scope for Ipv6") })
+        );
+        assert!(
+            crate::transaction::TransactionPlan::from_diagnostic_plan(
+                &partial_plan,
+                "mfw-test-forward-plan".into(),
+                "nft:inet:input".into(),
+                "test-fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "partial-family INPUT ownership must block before transaction conversion"
+        );
+
+        let mut conflicting_input = self::input(CapabilityState::Supported);
+        conflicting_input.policy.default_action = Action::Allow;
+        conflicting_input.policy.rules[0].destination = Selector::Docker("web".into());
+        conflicting_input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut conflicting_input, docker::PublicationMechanism::Nat);
+        conflicting_input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(-300),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        let mut duplicate = conflicting_input
+            .backend
+            .observation
+            .resources
+            .iter()
+            .find(|resource| {
+                resource.path == PacketPath::Input && resource.family == AddressFamily::Ipv4
+            })
+            .expect("IPv4 INPUT resource")
+            .clone();
+        duplicate.ownership = Ownership::Unknown;
+        conflicting_input
+            .backend
+            .observation
+            .resources
+            .push(duplicate);
+
+        let conflicting_plan = Planner::plan(&conflicting_input);
+
+        assert!(matches!(
+            conflicting_plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(conflicting_plan.unknowns.iter().any(|detail| {
+            detail.contains("owner-bound INPUT Allow scope for Ipv4")
+        }));
+    }
+
+    #[test]
+    fn docker_forward_drop_accepts_one_shared_owned_input_chain_across_families() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(-300),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        for resource in &mut input.backend.observation.resources {
+            if resource.path == PacketPath::Input {
+                resource.name = "manyfw/input".into();
+            }
+        }
+
+        let plan = Planner::plan(&input);
+
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
+        let input_defaults = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                PlanOperation::SetManagedDefault {
+                    action: Action::Allow,
+                    path: PacketPath::Input,
+                    family,
+                    managed_resource: Some(resource),
+                } => Some((*family, resource.as_str())),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            input_defaults,
+            BTreeSet::from([
+                (AddressFamily::Ipv4, "manyfw/input"),
+                (AddressFamily::Ipv6, "manyfw/input"),
+            ])
+        );
+
+        let mut ambiguous = input;
+        ambiguous
+            .backend
+            .observation
+            .resources
+            .push(ResourceObservation {
+                name: "manyfw/input".into(),
+                ownership: Ownership::Unknown,
+                path: PacketPath::Input,
+                family: AddressFamily::Ipv4,
+                hook: Some(Hook::Input),
+            });
+        let ambiguous_plan = Planner::plan(&ambiguous);
+        assert!(matches!(
+            ambiguous_plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(ambiguous_plan.unknowns.iter().any(|detail| {
+            detail.contains("owner-bound INPUT Allow scope for Ipv4")
+        }));
+    }
+
+    #[test]
+    fn docker_forward_drop_rejects_ambiguous_input_ownership_within_a_family() {
+        let mut input = input(CapabilityState::Supported);
+        input.policy.default_action = Action::Allow;
+        input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
+        attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        input.backend.observation.hooks.extend([
+            HookObservation {
+                hook: Hook::Forward,
+                priority: Some(-300),
+                present: CapabilityState::Supported,
+            },
+            HookObservation {
+                hook: Hook::Prerouting,
+                priority: Some(-100),
+                present: CapabilityState::Supported,
+            },
+        ]);
+        input.backend.observation.resources.push(ResourceObservation {
+            name: "manyfw-input-v4".into(),
+            ownership: Ownership::Unknown,
+            path: PacketPath::Input,
+            family: AddressFamily::Ipv4,
+            hook: Some(Hook::Input),
+        });
+
+        let plan = Planner::plan(&input);
+
+        assert!(matches!(
+            plan.applicability,
+            PlanApplicability::Blocked { .. }
+        ));
+        assert!(plan.unknowns.iter().any(|detail| {
+            detail.contains("owner-bound INPUT Allow scope for Ipv4")
+        }));
     }
 
     #[test]
@@ -3130,6 +4053,7 @@ mod tests {
     fn docker_plan_without_prerouting_is_blocked_without_fallback() {
         let mut input = input(CapabilityState::Supported);
         input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
         attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
         input
             .backend
@@ -3146,13 +4070,27 @@ mod tests {
                     BlockReason::MissingHook { hook: Hook::Prerouting }
                 ))
         ));
+        assert!(
+            !plan
+                .explanations
+                .iter()
+                .any(|line| { line.contains("independent ManyFW-owned insertion point") })
+        );
     }
 
     #[test]
-    fn docker_iptables_mode_blocks_when_docker_user_ownership_conflicts() {
+    fn docker_forward_drop_accepts_verified_nat_on_custom_bridge_networks() {
         let mut input = input(CapabilityState::Supported);
         input.policy.rules[0].destination = Selector::Docker("web".into());
+        input.policy.rules[0].action = Action::Deny;
         attach_docker_endpoint(&mut input, docker::PublicationMechanism::Nat);
+        let mut docker_observation = input.observation.docker();
+        docker_observation.containers[0].observed_endpoints[0].network_mode =
+            docker::NetworkMode::Custom("issue51-test-bridge".into());
+        input.observation = crate::snapshot::ObservationSnapshot::compose(
+            docker_observation,
+            input.observation.host(),
+        );
         input.backend.observation.backend = BackendKind::Iptables;
         input.backend.observation.mode = BackendMode::IptablesDocker;
         input.backend.capabilities.backend = BackendKind::Iptables;
@@ -3201,17 +4139,7 @@ mod tests {
         ]);
 
         let plan = Planner::plan(&input);
-        assert!(matches!(
-            plan.applicability,
-            PlanApplicability::Blocked { ref reasons }
-                if reasons.iter().any(|reason| matches!(
-                    reason,
-                    BlockReason::Ownership {
-                        resource,
-                        owner: Ownership::Docker
-                    } if resource == "DOCKER-USER"
-                ))
-        ));
+        assert_eq!(plan.applicability, PlanApplicability::Applicable);
         assert!(plan.ownership.iter().any(|boundary| {
             boundary.resource == "DOCKER-USER" && boundary.owner == Ownership::Docker
         }));
@@ -3247,15 +4175,15 @@ mod tests {
             let plan = Planner::plan(&input);
             match name {
                 "host-only"
+                | "docker-iptables"
+                | "docker-iptables-without-docker-user"
                 | "docker-native-nftables"
                 | "docker-unknown-firewall-mode"
                 | "docker-userland-proxy"
                 | "foreign-drop-redundant" => {
                     assert_eq!(plan.applicability, PlanApplicability::Applicable);
                 }
-                "docker-iptables"
-                | "docker-iptables-without-docker-user"
-                | "mixed-managers"
+                "mixed-managers"
                 | "conflicting-hook-priorities"
                 | "unknown-capability"
                 | "nft-runtime-missing-nf-tables"
@@ -3283,7 +4211,7 @@ mod tests {
                     PlanOperation::EnsureRule {
                         path: PacketPath::Forward,
                         family: AddressFamily::Ipv4,
-                        requires_dnat_original_destination: true,
+                        requires_dnat_original_destination: false,
                         requires_conntrack: true,
                         host_port: Some(18080),
                         host_address,

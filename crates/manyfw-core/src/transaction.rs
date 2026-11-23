@@ -20,6 +20,89 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub type Result<T> = std::result::Result<T, TransactionError>;
 
+fn unknowns_are_limited_to_verified_forward_drop_exceptions(plan: &DiagnosticPlan) -> bool {
+    if plan.unknowns.is_empty() {
+        return true;
+    }
+    if !plan.unknowns.iter().all(|limitation| {
+        matches!(
+            limitation.as_str(),
+            crate::backend::IPTABLES_OBSERVATION_METADATA_LIMITATION
+                | crate::backend::NFTABLES_OWNERSHIP_LIMITATION
+                | crate::backend::FORWARD_DROP_HOST_ROUTES_LIMITATION
+        )
+    }) || plan.preconditions.backend != crate::backend::BackendKind::Nftables
+        || plan.preconditions.mode != crate::backend::BackendMode::NativeNftables
+        || !plan
+            .preconditions
+            .required_hooks
+            .contains(&crate::backend::Hook::Forward)
+        || !plan
+            .preconditions
+            .required_hooks
+            .contains(&crate::backend::Hook::Prerouting)
+        || !plan
+            .preconditions
+            .required_priorities
+            .contains(&crate::backend::MANAGED_FORWARD_CHAIN_PRIORITY)
+    {
+        return false;
+    }
+
+    let mut forward_families = BTreeSet::new();
+    for operation in &plan.operations {
+        match operation {
+            PlanOperation::EnsureRule {
+                source_subnets,
+                destination: crate::Selector::Docker(_),
+                requires_dnat_original_destination: false,
+                requires_conntrack: true,
+                path: crate::backend::PacketPath::Forward,
+                family,
+                action: crate::Action::Deny,
+                host_port: Some(_),
+                container_port: Some(_),
+                publication: Some(crate::docker::PublicationMechanism::Nat),
+                container_targets,
+                managed_resource: Some(_),
+                ..
+            } if !source_subnets.is_empty() && !container_targets.is_empty() => {
+                forward_families.insert(*family);
+            }
+            PlanOperation::SetManagedDefault { .. } => {}
+            _ => return false,
+        }
+    }
+
+    let mut input_default_families = BTreeSet::new();
+    let mut input_default_count = 0;
+    let operations_are_scoped = plan.operations.iter().all(|operation| match operation {
+        PlanOperation::EnsureRule { .. } => true,
+        PlanOperation::SetManagedDefault {
+            action: crate::Action::Allow,
+            path: crate::backend::PacketPath::Input,
+            family,
+            managed_resource: Some(resource),
+        } if plan.ownership.iter().any(|boundary| {
+            boundary.resource == *resource && boundary.owner == Ownership::Manyfw
+        }) =>
+        {
+            input_default_count += 1;
+            input_default_families.insert(*family)
+        }
+        PlanOperation::SetManagedDefault { .. } | PlanOperation::Diagnostic { .. } => false,
+    });
+
+    !forward_families.is_empty()
+        && operations_are_scoped
+        && input_default_count == 2
+        && input_default_families
+            == BTreeSet::from([
+                crate::backend::AddressFamily::Ipv4,
+                crate::backend::AddressFamily::Ipv6,
+            ])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionPlan {
     pub transaction_id: String,
@@ -44,7 +127,7 @@ impl TransactionPlan {
         if !matches!(plan.applicability, PlanApplicability::Applicable)
             || ownership_domain.is_empty()
             || ownership_fingerprint.is_empty()
-            || !plan.unknowns.is_empty()
+            || !unknowns_are_limited_to_verified_forward_drop_exceptions(plan)
             || plan.ownership.is_empty()
         {
             return Err(TransactionError::InvalidState);
@@ -2241,6 +2324,223 @@ mod tests {
                 10,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn planner_conversion_allows_only_metadata_unknowns_for_docker_forward_drops() {
+        let make_plan = |action| DiagnosticPlan {
+            version: 1,
+            applicability: PlanApplicability::Applicable,
+            operations: vec![
+                PlanOperation::EnsureRule {
+                    rule_id: "deny-published-web".into(),
+                    source: crate::Selector::Cidr("198.18.51.2/32".parse().unwrap()),
+                    source_interfaces: Vec::new(),
+                    source_subnets: vec!["198.18.51.2/32".parse().unwrap()],
+                    destination: crate::Selector::Docker("web".into()),
+                    priority: 10,
+                    requires_dnat_original_destination: false,
+                    requires_conntrack: true,
+                    path: crate::backend::PacketPath::Forward,
+                    family: crate::backend::AddressFamily::Ipv4,
+                    action,
+                    protocol: crate::Protocol::Tcp,
+                    ports: crate::PortScope::Specific(vec![crate::PortRange {
+                        start: 8080,
+                        end: 8080,
+                    }]),
+                    host_port: Some(18080),
+                    container_port: Some(8080),
+                    publication: Some(crate::docker::PublicationMechanism::Nat),
+                    container_targets: Box::new(vec![crate::docker::ContainerAddress {
+                        network: "bridge".into(),
+                        address: "172.18.0.20".parse().unwrap(),
+                        provenance: crate::docker::FieldProvenance::DockerInspection,
+                    }]),
+                    host_address: Box::new(Some("198.18.51.1".parse().unwrap())),
+                    managed_resource: Some("manyfw-forward-v4".into()),
+                },
+                PlanOperation::SetManagedDefault {
+                    action: crate::Action::Allow,
+                    path: crate::backend::PacketPath::Input,
+                    family: crate::backend::AddressFamily::Ipv4,
+                    managed_resource: Some("manyfw/input".into()),
+                },
+                PlanOperation::SetManagedDefault {
+                    action: crate::Action::Allow,
+                    path: crate::backend::PacketPath::Input,
+                    family: crate::backend::AddressFamily::Ipv6,
+                    managed_resource: Some("manyfw/input".into()),
+                },
+            ],
+            preconditions: crate::backend::Preconditions {
+                input_fingerprint: "fnv1a64:forward-drop".into(),
+                observation_generation: 1,
+                backend_identity: "nftables".into(),
+                backend_version: Some("1.0.9".into()),
+                required_hooks: vec![
+                    crate::backend::Hook::Forward,
+                    crate::backend::Hook::Prerouting,
+                ],
+                required_priorities: vec![crate::backend::MANAGED_FORWARD_CHAIN_PRIORITY],
+                policy_priorities: vec![10],
+                backend: crate::backend::BackendKind::Nftables,
+                mode: crate::backend::BackendMode::NativeNftables,
+            },
+            ownership: vec![
+                crate::backend::OwnershipBoundary {
+                    resource: "manyfw-forward-v4".into(),
+                    owner: Ownership::Manyfw,
+                    reason: "ManyFW-owned forward chain".into(),
+                },
+                crate::backend::OwnershipBoundary {
+                    resource: "manyfw/input".into(),
+                    owner: Ownership::Manyfw,
+                    reason: "ManyFW-owned input scope".into(),
+                },
+            ],
+            unknowns: vec![
+                crate::backend::IPTABLES_OBSERVATION_METADATA_LIMITATION.into(),
+                crate::backend::NFTABLES_OWNERSHIP_LIMITATION.into(),
+                crate::backend::FORWARD_DROP_HOST_ROUTES_LIMITATION.into(),
+            ],
+            explanations: Vec::new(),
+        };
+
+        let plan = make_plan(crate::Action::Deny);
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &plan,
+                "forward-deny".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_ok(),
+            "verified Docker NAT FORWARD drops tolerate only the known scoped limitations"
+        );
+
+        let mut missing_input_defaults = plan.clone();
+        missing_input_defaults.operations.retain(|operation| {
+            !matches!(
+                operation,
+                PlanOperation::SetManagedDefault {
+                    path: crate::backend::PacketPath::Input,
+                    ..
+                }
+            )
+        });
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &missing_input_defaults,
+                "forward-deny".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "exceptional unknowns require the planner's IPv4 and IPv6 INPUT Allow companions"
+        );
+
+        let mut missing_ipv6_input_default = plan.clone();
+        missing_ipv6_input_default.operations.retain(|operation| {
+            !matches!(
+                operation,
+                PlanOperation::SetManagedDefault {
+                    path: crate::backend::PacketPath::Input,
+                    family: crate::backend::AddressFamily::Ipv6,
+                    ..
+                }
+            )
+        });
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &missing_ipv6_input_default,
+                "forward-deny".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "exceptional unknowns require both expected INPUT families"
+        );
+
+        let mut unclassified = plan.clone();
+        unclassified
+            .unknowns
+            .push("unclassified observation limitation".into());
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &unclassified,
+                "forward-deny".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_err()
+        );
+
+        let allow = make_plan(crate::Action::Allow);
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &allow,
+                "forward-allow".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "metadata exceptions must not enable FORWARD allows"
+        );
+
+        let mut wrong_scope_default = plan;
+        wrong_scope_default
+            .operations
+            .push(PlanOperation::SetManagedDefault {
+                action: crate::Action::Deny,
+                path: crate::backend::PacketPath::Forward,
+                family: crate::backend::AddressFamily::Ipv4,
+                managed_resource: Some("manyfw-forward-v4".into()),
+            });
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &wrong_scope_default,
+                "forward-deny".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "metadata exceptions must not admit a FORWARD default policy"
+        );
+
+        let mut input_deny_default = make_plan(crate::Action::Deny);
+        input_deny_default
+            .operations
+            .push(PlanOperation::SetManagedDefault {
+                action: crate::Action::Deny,
+                path: crate::backend::PacketPath::Input,
+                family: crate::backend::AddressFamily::Ipv4,
+                managed_resource: Some("manyfw/input".into()),
+            });
+        input_deny_default
+            .ownership
+            .push(crate::backend::OwnershipBoundary {
+                resource: "manyfw/input".into(),
+                owner: Ownership::Manyfw,
+                reason: "ManyFW-owned input scope".into(),
+            });
+        assert!(
+            TransactionPlan::from_diagnostic_plan(
+                &input_deny_default,
+                "forward-deny".into(),
+                "nft:inet:manyfw".into(),
+                "fingerprint".into(),
+                60,
+            )
+            .is_err(),
+            "metadata exceptions must not admit unrelated INPUT default-deny operations"
         );
     }
 

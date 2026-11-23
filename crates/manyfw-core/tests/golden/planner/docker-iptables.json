@@ -1,17 +1,6 @@
 {
   "version": 1,
-  "applicability": {
-    "Blocked": {
-      "reasons": [
-        {
-          "Ownership": {
-            "resource": "DOCKER-USER",
-            "owner": "docker"
-          }
-        }
-      ]
-    }
-  },
+  "applicability": "Applicable",
   "operations": [
     {
       "EnsureRule": {
@@ -29,11 +18,11 @@
           "Docker": "web"
         },
         "priority": 10,
-        "requires_dnat_original_destination": true,
+        "requires_dnat_original_destination": false,
         "requires_conntrack": true,
         "path": "forward",
         "family": "ipv4",
-        "action": "Allow",
+        "action": "Deny",
         "protocol": "Tcp",
         "ports": "Any",
         "host_port": 18080,
@@ -66,11 +55,11 @@
           "Docker": "web"
         },
         "priority": 10,
-        "requires_dnat_original_destination": true,
+        "requires_dnat_original_destination": false,
         "requires_conntrack": true,
         "path": "forward",
         "family": "ipv6",
-        "action": "Allow",
+        "action": "Deny",
         "protocol": "Tcp",
         "ports": "Any",
         "host_port": 18443,
@@ -90,22 +79,22 @@
     {
       "SetManagedDefault": {
         "action": "Deny",
-        "path": "forward",
+        "path": "input",
         "family": "ipv4",
-        "managed_resource": "manyfw-forward-v4"
+        "managed_resource": "manyfw-input-v4"
       }
     },
     {
       "SetManagedDefault": {
         "action": "Deny",
-        "path": "forward",
+        "path": "input",
         "family": "ipv6",
-        "managed_resource": "manyfw-forward-v6"
+        "managed_resource": "manyfw-input-v6"
       }
     }
   ],
   "preconditions": {
-    "input_fingerprint": "fnv1a64:7bdf9a831c92a70a",
+    "input_fingerprint": "fnv1a64:ac89706848ef714f",
     "observation_generation": 7,
     "backend_identity": "nftables",
     "backend_version": "1",
@@ -140,9 +129,14 @@
       "reason": "ownership is explicitly observed"
     },
     {
-      "resource": "r1",
+      "resource": "manyfw-input-v4",
       "owner": "manyfw",
-      "reason": "planned operation is scoped to the ManyFW ownership boundary"
+      "reason": "ownership is explicitly observed"
+    },
+    {
+      "resource": "manyfw-input-v6",
+      "owner": "manyfw",
+      "reason": "ownership is explicitly observed"
     }
   ],
   "unknowns": [],
@@ -150,9 +144,9 @@
     "plan generation is read-only and produces typed diagnostic operations",
     "Docker iptables mode is evaluated through observed FORWARD/DOCKER-USER boundaries",
     "Docker destination web: Docker firewall mode is iptables; the published NAT path is DNAT then FORWARD; DOCKER-USER is present in the firewall observation; ownership is not inferred from its name",
+    "ManyFW FORWARD deny rules use an independent accept-policy base chain at priority -300 after an established/related exception",
+    "managed INPUT default-deny exceptions: established/related return traffic, loopback ingress, and ICMPv6 neighbor discovery/router advertisements",
     "DOCKER-USER remains Docker-owned; it is observed as a path boundary, never a ManyFW write target",
-    "Docker iptables applicability is blocked unless an independent ManyFW-owned insertion point and ordering are verified",
-    "applicability is blocked; proposed operations are not executable",
     "foreign manager resources are preserved and global atomicity is not assumed"
   ]
 }

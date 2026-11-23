@@ -2,8 +2,10 @@
 """Run apply locally and persist only its token-redacted result."""
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 if len(sys.argv) != 4:
@@ -30,7 +32,22 @@ try:
     if result.stdout[end:].strip():
         raise json.JSONDecodeError("unexpected text after apply JSON", result.stdout, end)
 except json.JSONDecodeError as error:
-    print(f"ManyFW apply did not return JSON: {error}; stdout={result.stdout!r}", file=sys.stderr)
+    print(
+        f"ManyFW apply did not return JSON (parse error at position {error.pos})",
+        file=sys.stderr,
+    )
     raise SystemExit(1) from error
 response.pop("confirmation_token", None)
-Path(output).write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
+output_path = Path(output)
+file_descriptor, temporary_name = tempfile.mkstemp(
+    prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+)
+temporary_path = Path(temporary_name)
+try:
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+        temporary_file.write(json.dumps(response, indent=2) + "\n")
+        temporary_file.flush()
+        os.fsync(temporary_file.fileno())
+    os.replace(temporary_path, output_path)
+finally:
+    temporary_path.unlink(missing_ok=True)

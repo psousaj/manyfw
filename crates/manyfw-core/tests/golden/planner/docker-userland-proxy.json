@@ -70,11 +70,6 @@
       "resource": "manyfw-input-v4",
       "owner": "manyfw",
       "reason": "ownership is explicitly observed"
-    },
-    {
-      "resource": "r1",
-      "owner": "manyfw",
-      "reason": "planned operation is scoped to the ManyFW ownership boundary"
     }
   ],
   "unknowns": [],

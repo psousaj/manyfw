@@ -1,9 +1,72 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+BOOTSTRAP_VM_ROOT=${MANYFW_VM_ROOT:-${XDG_CACHE_HOME:-"$HOME/.cache"}/manyfw-integration}
+BOOTSTRAP_EVIDENCE_ROOT="$BOOTSTRAP_VM_ROOT/evidence"
+mkdir -m 0700 -p -- "$BOOTSTRAP_EVIDENCE_ROOT"
+evidence="$BOOTSTRAP_EVIDENCE_ROOT/preflight-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -m 0700 -- "$evidence"
+: >"$evidence/status.tsv"
+exec > >(tee -a "$evidence/harness.log") 2>&1
+current_stage=bootstrap
+last_completed_stage=none
+failure_status=0
+failure_line=0
+failure_command=unknown
+record_failure() {
+    local status=$1 failure_stage
+    if [[ "$current_stage" == cleanup && "$failure_line" -gt 0 ]]; then
+        failure_stage="cleanup-command-line-$failure_line"
+    elif [[ "$failure_line" -gt 0 ]]; then
+        failure_stage="command-line-$failure_line"
+    else
+        failure_stage=${current_stage:-unknown}
+    fi
+    {
+        printf 'stage=%s\n' "$failure_stage"
+        printf 'last_completed_stage=%s\n' "${last_completed_stage:-none}"
+        printf 'status=%s\n' "$status"
+        printf 'line=%s\n' "$failure_line"
+        printf 'command=%s\n' "$failure_command"
+    } >"$evidence/failure-stage.txt"
+}
+on_error() {
+    local command_status=$?
+    # Expected nonzero commands run under `set +e` and are checked explicitly
+    # by their scenario. Do not turn those expected results into harness
+    # failures or disable the ERR trap for later fatal commands.
+    [[ "$-" == *e* ]] || return "$command_status"
+    failure_status=$command_status
+    failure_line=${BASH_LINENO[0]:-$LINENO}
+    failure_command=$BASH_COMMAND
+    trap - ERR
+    if [[ -n "${issue51_diagnostic_name:-}" ]]; then
+        issue51_collect_failure_diagnostics "$issue51_diagnostic_name" || true
+    fi
+    record_failure "$failure_status"
+    return "$failure_status"
+}
+trap on_error ERR
 # shellcheck source=vm-lib.sh
 source "$SCRIPT_DIR/vm-lib.sh"
+# shellcheck source=ssh-probe.sh
+source "$SCRIPT_DIR/ssh-probe.sh"
+current_stage=preflight
+die() {
+    trap - ERR
+    failure_status=1
+    failure_line=${BASH_LINENO[0]:-0}
+    failure_command="die: $*"
+    printf 'error: %s\n' "$*" >&2
+    if [[ -n "${issue51_diagnostic_name:-}" ]]; then
+        issue51_collect_failure_diagnostics "$issue51_diagnostic_name" || true
+    fi
+    record_failure "$failure_status"
+    exit 1
+}
 check_host_prerequisites
+require_command timeout
+require_command flock
 mkdir -p -- "$VM_ROOT/tmp"
 export MANYFW_VM_SSH_CONNECT_TIMEOUT=${MANYFW_VM_SSH_CONNECT_TIMEOUT:-1}
 [[ -f "$CURRENT_DIR/.manyfw-owned" && -f "$CURRENT_DIR/run-id" ]] \
@@ -12,15 +75,23 @@ export MANYFW_VM_SSH_CONNECT_TIMEOUT=${MANYFW_VM_SSH_CONNECT_TIMEOUT:-1}
 pid=$(cat "$CURRENT_DIR/qemu.pid")
 vm_pid_matches "$pid" || die 'refusing to target a non-harness QEMU process'
 run_id=$(cat "$CURRENT_DIR/run-id")
+mkdir -m 0700 -p -- "$VM_ROOT/locks"
+lock_path="$VM_ROOT/locks/issue24-production-$run_id.lock"
+exec {harness_lock_fd}>"$lock_path"
+flock -n "$harness_lock_fd" || die "an integration harness is already running for guest $run_id"
+ssh_apply_result="/run/manyfw-issue24/ssh-apply-$run_id-result.json"
+ssh_apply_log="/run/manyfw-issue24/ssh-apply-$run_id.log"
 [[ "$(vm_ssh systemd-detect-virt)" == kvm ]] || die 'SSH target is not a KVM guest'
 [[ "$(vm_ssh sudo cat /etc/manyfw-disposable-vm)" == "$run_id" ]] \
     || die 'guest identity marker mismatch'
 vm_ssh sudo docker info --format '{{.ID}}' | grep -q . \
     || die 'real Docker Engine is unavailable in the guest'
+vm_ssh sudo bash -c 'command -v tcpdump >/dev/null && command -v conntrack >/dev/null' \
+    || die 'native Docker packet diagnostics require tcpdump and conntrack in the disposable guest'
 
 evidence="$EVIDENCE_ROOT/issue24-production-$run_id"
-mkdir -m 0700 -p -- "$evidence"
-chmod 0700 "$evidence"
+[[ ! -e "$evidence" ]] || die "evidence already exists for guest run $run_id"
+mv -- "$EVIDENCE_ROOT"/preflight-*-"$$" "$evidence"
 : >"$evidence/status.tsv"
 candidate_commit=$(git -C "$REPO_ROOT" rev-parse HEAD)
 candidate_worktree_digest=$(python3 - "$REPO_ROOT" "$evidence/source-manifest.json" <<'PY'
@@ -41,7 +112,7 @@ for name in sorted(set(filter(None, names))):
     path = root / relative
     if path.is_file():
         entries.append({"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-pathlib.Path(sys.argv[2]).write_text(json.dumps({"contract_version": "issue24-linux-packets-v2", "sources": entries}, indent=2) + "\n")
+pathlib.Path(sys.argv[2]).write_text(json.dumps({"contract_version": "issue24-linux-packets-v3", "sources": entries}, indent=2) + "\n")
 print(h.hexdigest())
 PY
 )
@@ -82,15 +153,18 @@ critical = [
     "reboot_restores_nonempty_checkpoint",
     "timeout_automatic_recovery", "wall_clock_rollback_monotonic_recovery", "reboot_pending_apply",
     "concurrent_manyfw_transaction", "ipv4_real_loopback", "ipv6_real_loopback",
-    "docker_iptables", "docker_container_ip_change",
-    "docker_native_nftables", "ufw_coexistence", "firewalld_coexistence",
+    "docker_iptables", "docker_forward_drop_iptables",
+    "docker_container_ip_change", "docker_forward_ip_change",
+    "docker_forward_ip_change_iptables", "docker_forward_ip_change_nftables",
+    "docker_native_nftables", "docker_forward_drop_native_nftables",
+    "ufw_coexistence", "firewalld_coexistence",
     "concurrent_external_manager_divergence", "no_global_or_table_flush",
 ]
 reported = {scenario: statuses.get(scenario, "NotRun") for scenario in critical}
 completed = len(sys.argv) > 3 and sys.argv[3] == "complete"
 reported["harness_completion"] = "Passed" if completed else "NotRun"
 blocked = [scenario for scenario, status in reported.items() if status != "Passed"]
-target.write_text(json.dumps({"contract_version": "issue24-linux-packets-v2",
+target.write_text(json.dumps({"contract_version": "issue24-linux-packets-v3",
                               "teardown": sys.argv[4], "suite_type": "production_recovery",
                               "critical_scenarios": reported, "recovery_eligible": not blocked,
                               "release_eligible": False,
@@ -105,58 +179,105 @@ PY
 docker_config_existed=no
 docker_native_config_touched=no
 docker_restart_required=no
+docker_native_forward_policy_saved=no
+docker_native_forward_policy_v4=""
+docker_native_forward_policy_v6=""
 guest_clock_skewed=no
 firewall_manager_test_started=no
+ssh_loss_observed=0
+issue51_diagnostic_name=""
+issue51_capture_log=""
+issue51_capture_pid=""
 harness_body_completed=no
 harness_completed=no
 guest_teardown=pending
+record_cleanup_failure() {
+    local line=${BASH_LINENO[0]:-0}
+    cleanup_failed=yes
+    printf 'line=%s operation=%s\n' "$line" "$1" >>"$evidence/cleanup-failures.txt"
+    if [[ "$failure_status" -eq 0 ]]; then
+        current_stage=cleanup
+        failure_status=1
+        failure_line=$line
+        failure_command="cleanup: $1"
+        record_failure 1
+    fi
+}
 cleanup() {
     local status=$?
     local cleanup_failed=no
     trap - EXIT
+    if [[ "$status" -ne 0 ]]; then record_failure "$status"; fi
     if [[ -f "$CURRENT_DIR/.manyfw-owned" ]]; then
+        if [[ "$ssh_loss_observed" == 1 ]]; then
+            if [[ ! -e "$evidence/ssh-loss-apply-result.json" ]] \
+                && ! capture_remote_evidence "$ssh_apply_result" \
+                    "$evidence/ssh-loss-apply-result.json" 2>/dev/null; then
+                rm -f "$evidence/ssh-loss-apply-result.json"
+            fi
+            if [[ ! -e "$evidence/ssh-loss-apply-run.log" ]] \
+                && ! capture_remote_evidence "$ssh_apply_log" \
+                    "$evidence/ssh-loss-apply-run.log" 2>/dev/null; then
+                rm -f "$evidence/ssh-loss-apply-run.log"
+            fi
+        fi
         if [[ "$guest_clock_skewed" == yes ]]; then
-            vm_ssh sudo date -u --set="@$(date +%s)" >/dev/null 2>&1 || cleanup_failed=yes
-            vm_ssh sudo timedatectl set-ntp true >/dev/null 2>&1 || cleanup_failed=yes
+            vm_ssh sudo date -u --set="@$(date +%s)" >/dev/null 2>&1 \
+                || record_cleanup_failure 'restore guest wall clock'
+            vm_ssh sudo timedatectl set-ntp true >/dev/null 2>&1 \
+                || record_cleanup_failure 'restore guest NTP synchronization'
         fi
         if [[ "$docker_native_config_touched" == yes ]]; then
             if [[ "$docker_config_existed" == yes ]]; then
-                vm_ssh sudo cp -p /tmp/issue24-daemon.json.saved /etc/docker/daemon.json >/dev/null 2>&1 || cleanup_failed=yes
+                vm_ssh sudo cp -p /tmp/issue24-daemon.json.saved /etc/docker/daemon.json >/dev/null 2>&1 \
+                    || record_cleanup_failure 'restore Docker daemon configuration'
             else
-                vm_ssh sudo rm -f /etc/docker/daemon.json >/dev/null 2>&1 || cleanup_failed=yes
+                vm_ssh sudo rm -f /etc/docker/daemon.json >/dev/null 2>&1 \
+                    || record_cleanup_failure 'remove temporary Docker daemon configuration'
             fi
             if [[ "$docker_restart_required" == yes ]]; then
-                vm_ssh sudo systemctl restart docker >/dev/null 2>&1 || cleanup_failed=yes
+                vm_ssh sudo systemctl restart docker >/dev/null 2>&1 \
+                    || record_cleanup_failure 'restart Docker after restoring configuration'
             fi
+        fi
+        if [[ "$docker_native_forward_policy_saved" == yes ]]; then
+            issue51_restore_native_docker_forward_baseline \
+                || record_cleanup_failure 'restore and verify original FORWARD policies'
         fi
         if [[ "$firewall_manager_test_started" == yes ]]; then
             # Only these test-owned managers may be stopped. Package/config state
             # is intentionally retained for diagnostics until the guest is destroyed.
             vm_ssh sudo bash -c 'set -e; if command -v ufw >/dev/null; then ufw --force disable; fi; if systemctl cat firewalld.service >/dev/null 2>&1; then systemctl disable --now firewalld.service; fi' \
-                >/dev/null 2>&1 || cleanup_failed=yes
+                >/dev/null 2>&1 || record_cleanup_failure 'disable test-owned UFW/firewalld manager'
         fi
         vm_ssh sudo systemctl stop mfw-issue24-v4-listener.service mfw-issue24-v6-listener.service \
             >/dev/null 2>&1 || true
         if vm_ssh sudo test -f /etc/systemd/system/manyfw-recovery.service; then
-            vm_ssh sudo systemctl stop manyfw-recovery.service >/dev/null 2>&1 || cleanup_failed=yes
-            vm_ssh sudo systemctl disable manyfw-recovery.service >/dev/null 2>&1 || cleanup_failed=yes
+            vm_ssh sudo systemctl stop manyfw-recovery.service >/dev/null 2>&1 \
+                || record_cleanup_failure 'stop ManyFW recovery supervisor'
+            vm_ssh sudo systemctl disable manyfw-recovery.service >/dev/null 2>&1 \
+                || record_cleanup_failure 'disable ManyFW recovery supervisor'
         fi
     fi
-    if [[ "${MANYFW_KEEP_VM:-0}" != 1 ]]; then
+    if [[ "${MANYFW_KEEP_VM:-0}" != 1 && "$status" -eq 0 ]]; then
         if "$SCRIPT_DIR/vm-down.sh" >"$evidence/vm-down.log" 2>&1; then
             guest_teardown=destroyed
         else
             guest_teardown=failed
-            cleanup_failed=yes
+            record_cleanup_failure 'destroy disposable guest'
         fi
     else
         guest_teardown=diagnostic-retained
-        cleanup_failed=yes
+        if [[ "$status" -ne 0 ]]; then
+            record_cleanup_failure 'retain disposable guest after failed run for diagnosis'
+        else
+            record_cleanup_failure 'guest retained by MANYFW_KEEP_VM=1'
+        fi
     fi
     if ! verify_candidate_sources; then
         printf 'candidate source manifest changed during runtime validation\n' \
             >"$evidence/candidate-source-changed.txt"
-        cleanup_failed=yes
+        record_cleanup_failure 'candidate sources changed during runtime validation'
         status=1
     fi
     if [[ "$status" -eq 0 && "$cleanup_failed" == no && "$harness_body_completed" == yes ]]; then
@@ -166,12 +287,25 @@ cleanup() {
         [[ "$status" -ne 0 ]] || status=1
     fi
     if [[ "$harness_completed" == yes ]]; then
-        write_release_gate complete || status=1
+        write_release_gate complete \
+            || { record_cleanup_failure 'write final release gate'; status=1; }
     else
-        write_release_gate || true
+        write_release_gate \
+            || record_cleanup_failure 'write incomplete release gate'
+    fi
+    if [[ "$status" -eq 0 && "$cleanup_failed" == yes ]]; then
+        status=1
+    fi
+    if [[ "$status" -ne 0 && "$failure_status" -eq 0 ]]; then
+        current_stage=cleanup
+        failure_status=$status
+        failure_command=$(paste -sd '; ' "$evidence/cleanup-failures.txt" 2>/dev/null || true)
+        [[ -n "$failure_command" ]] || failure_command='cleanup failed without a recorded operation'
+        record_failure "$status"
     fi
     exit "$status"
 }
+trap cleanup EXIT
 # Require the pinned image baseline before guest mutation. Ubuntu ships UFW
 # installed with an active oneshot service, but its firewall is disabled.
 vm_ssh sudo bash -c '
@@ -183,10 +317,10 @@ grep -qx ENABLED=no /etc/ufw/ufw.conf
 [[ ! -e /etc/firewalld && ! -L /etc/firewalld ]]
 [[ ! -e /var/lib/manyfw && ! -e /usr/bin/manyfw ]]
 ' || die 'fresh disposable guest required: UFW firewall disabled, firewalld and ManyFW absent'
-# MANYFW_KEEP_VM=1 retains a diagnostic guest, not a reusable pristine baseline.
-trap cleanup EXIT
 TMPDIR="$VM_ROOT/tmp" cargo build --locked --quiet --release -p manyfw
+TMPDIR="$VM_ROOT/tmp" cargo build --locked --quiet --release -p manyfw --example issue51_bundle
 built_binary="$REPO_ROOT/target/release/manyfw"
+issue51_bundle_binary="$REPO_ROOT/target/release/examples/issue51_bundle"
 binary=${1:-$built_binary}
 [[ -x "$binary" ]] || die "ManyFW executable missing: $binary"
 binary_sha256=$(sha256sum "$binary" | awk '{print $1}')
@@ -199,14 +333,19 @@ guest_os=$(vm_ssh sudo bash -c '. /etc/os-release; printf "%s" "$PRETTY_NAME"')
     printf 'candidate_commit=%s\n' "$candidate_commit"
     printf 'candidate_worktree_sha256=%s\n' "$candidate_worktree_digest"
     printf 'binary_sha256=%s\n' "$binary_sha256"
+    printf 'issue51_bundle_sha256=%s\n' "$(sha256sum "$issue51_bundle_binary" | awk '{print $1}')"
     printf 'guest=%s\n' "$guest_os"
 } >"$evidence/metadata.txt"
 vm_scp_to "$binary" /tmp/manyfw-issue24
+vm_scp_to "$issue51_bundle_binary" /tmp/issue51-bundle
+vm_scp_to "$SCRIPT_DIR/issue51-forward-packet.py" /tmp/issue51-forward-packet.py
 vm_scp_to "$REPO_ROOT/packaging/systemd/manyfw-recovery.service" /tmp/manyfw-recovery.service
 vm_scp_to "$SCRIPT_DIR/issue24-nft-test-shim.sh" /tmp/issue24-nft-test-shim
 vm_scp_to "$SCRIPT_DIR/issue24-wait-transaction.py" /tmp/issue24-wait-transaction.py
 vm_scp_to "$SCRIPT_DIR/issue24-redacted-apply.py" /tmp/issue24-redacted-apply.py
 vm_ssh sudo install -m 0755 /tmp/manyfw-issue24 /usr/bin/manyfw
+vm_ssh sudo install -m 0755 /tmp/issue51-bundle /usr/local/bin/issue51-bundle
+vm_ssh sudo install -m 0755 /tmp/issue51-forward-packet.py /usr/local/bin/issue51-forward-packet
 installed_binary_sha256=$(vm_ssh sudo sha256sum /usr/bin/manyfw | awk '{print $1}')
 [[ "$installed_binary_sha256" == "$binary_sha256" ]] || die 'guest binary hash mismatch'
 printf '%s  /usr/bin/manyfw\n' "$installed_binary_sha256" >"$evidence/installed-binary.sha256"
@@ -234,6 +373,31 @@ if address.version != 4 or address.is_unspecified or address.is_multicast:
 PY
 TMPDIR="$VM_ROOT/tmp" cargo run --quiet -p manyfw --example issue23_bundle -- ssh "$ssh_source" \
     >"$evidence/bundle-ssh.json"
+runtime_nft_version=$(vm_ssh sudo /usr/sbin/nft --version)
+runtime_kernel_version=$(vm_ssh sudo uname -r)
+vm_ssh sudo /usr/sbin/nft --json list ruleset \
+    >"$evidence/nft-runtime-ruleset.json"
+python3 - "$evidence/nft-runtime-capability.json" "$runtime_nft_version" \
+    "$runtime_kernel_version" <<'PY'
+import json, pathlib, sys
+target = pathlib.Path(sys.argv[1])
+target.write_text(json.dumps({
+    "nf_tables": "supported",
+    "nft_binary": "supported",
+    "nft_version": sys.argv[2],
+    "kernel_version": sys.argv[3],
+}, indent=2) + "\n", encoding="utf-8")
+PY
+python3 - "$evidence/nft-runtime-capability.json" \
+    "$evidence/bundle-v4.json" "$evidence/bundle-v6.json" "$evidence/bundle-ssh.json" <<'PY'
+import json, pathlib, sys
+runtime = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for name in sys.argv[2:]:
+    path = pathlib.Path(name)
+    bundle = json.loads(path.read_text(encoding="utf-8"))
+    bundle["input"]["backend"]["nft_runtime"] = runtime
+    path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+PY
 python3 - "$evidence/bundle-v4.json" "$evidence/plan-input-v4.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as source:
@@ -267,6 +431,20 @@ vm_ssh sudo manyfw plan --diagnostic-input /tmp/issue24-plan-input-v6.json \
     >"$evidence/plan-v6.json"
 vm_ssh sudo manyfw plan --diagnostic-input /tmp/issue24-plan-input-ssh.json \
     >"$evidence/plan-ssh.json"
+python3 - "$evidence/bundle-v4.json" "$evidence/bundle-v6.json" \
+    "$evidence/bundle-ssh.json" "$evidence/plan-v4.json" \
+    "$evidence/plan-v6.json" "$evidence/plan-ssh.json" <<'PY'
+import json, pathlib, sys
+bundles = [pathlib.Path(p) for p in sys.argv[1:4]]
+plans = [pathlib.Path(p) for p in sys.argv[4:7]]
+for bundle_path, plan_path in zip(bundles, plans):
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))["plan"]
+    if plan.get("applicability") != "Applicable":
+        raise SystemExit(f"isolated guest produced a blocked input plan: {plan_path.name}")
+    bundle["plan"] = plan
+    bundle_path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+PY
 vm_scp_to "$evidence/bundle-v4.json" /tmp/issue24-plan-v4.json
 vm_scp_to "$evidence/bundle-v6.json" /tmp/issue24-plan-v6.json
 vm_scp_to "$evidence/bundle-ssh.json" /tmp/issue24-plan-ssh.json
@@ -338,6 +516,241 @@ apply_plan() {
     local plan=$1 timeout=$2
     vm_ssh sudo manyfw apply --experimental --timeout "$timeout" --file "$plan"
 }
+vm_ssh_probe() {
+    local hard_timeout=${1:-45} output rc=0
+    [[ "$hard_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+    MANYFW_VM_SSH_CONNECT_TIMEOUT=3 ssh_options
+    # Keep this probe's connect timeout explicit even if shared SSH defaults
+    # change, and capture the effective OpenSSH value in the run evidence.
+    SSH_OPTIONS+=(-o ConnectTimeout=3)
+    if [[ ! -e "$evidence/ssh-probe-effective-connect-timeout.txt" ]]; then
+        local effective_connect_timeout
+        effective_connect_timeout=$(ssh -G "${SSH_OPTIONS[@]}" \
+            "$GUEST_USER@127.0.0.1" 2>/dev/null \
+            | awk '$1 == "connecttimeout" {print $2; exit}')
+        printf '%s\n' "$effective_connect_timeout" \
+            >"$evidence/ssh-probe-effective-connect-timeout.txt"
+        [[ "$effective_connect_timeout" == 3 ]] \
+            || return 2
+    fi
+    # Prior KVM probes hit the outer bound before ssh returned despite emitting
+    # its banner-timeout diagnostic. Keep the hard ceiling for hangs; an outer
+    # timeout (124) remains a failed probe, never evidence of SSH loss.
+    output=$(LC_ALL=C timeout --kill-after=2s "${hard_timeout}s" \
+        ssh "${SSH_OPTIONS[@]}" "$GUEST_USER@127.0.0.1" true 2>&1) || rc=$?
+    printf 'SSH_PROBE_STATUS=%s\n' "$rc" >&2
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+    return "$rc"
+}
+capture_remote_evidence() {
+    local remote_path=$1 evidence_path=$2 temporary_path
+    temporary_path=$(mktemp "${evidence_path}.tmp.XXXXXX")
+    if vm_ssh sudo cat "$remote_path" >"$temporary_path"; then
+        if mv -f -- "$temporary_path" "$evidence_path"; then
+            return 0
+        fi
+        rm -f -- "$temporary_path"
+        return 1
+    else
+        rm -f -- "$temporary_path"
+        return 1
+    fi
+}
+issue51_collect_failure_diagnostics() {
+    local name=$1
+    if [[ -n "$issue51_capture_pid" ]]; then
+        vm_ssh sudo bash -c \
+            'if [[ -s "$1" ]]; then pid=$(cat "$1"); kill -INT "$pid" 2>/dev/null || true; for _ in $(seq 1 30); do state=$(ps -o stat= -p "$pid" || true); [[ -z "$state" || "$state" == Z* ]] && exit 0; sleep 0.1; done; kill -TERM "$pid" 2>/dev/null || true; for _ in $(seq 1 20); do state=$(ps -o stat= -p "$pid" || true); [[ -z "$state" || "$state" == Z* ]] && exit 0; sleep 0.1; done; kill -KILL "$pid" 2>/dev/null || true; exit 1; fi' \
+            _ "$issue51_capture_pid" >/dev/null 2>&1 || true
+        if [[ ! -e "$evidence/$name-packet-capture.log" ]]; then
+            capture_remote_evidence "$issue51_capture_log" \
+                "$evidence/$name-packet-capture.log" || true
+        fi
+    fi
+    if [[ ! -e "$evidence/$name-container-inspect.json" ]]; then
+        vm_ssh sudo docker inspect issue51-forward \
+            >"$evidence/$name-container-inspect.json" 2>&1 || true
+    fi
+    if [[ ! -e "$evidence/$name-container.log" ]]; then
+        vm_ssh sudo docker logs issue51-forward \
+            >"$evidence/$name-container.log" 2>&1 || true
+    fi
+    if [[ ! -e "$evidence/$name-network-state.txt" ]]; then
+        vm_ssh sudo bash -c \
+            'ip -details address; ip route; ip -6 route; ip netns exec issue51-client ip -details address; ip netns exec issue51-client ip route; ip netns exec issue51-client ip -6 route' \
+            >"$evidence/$name-network-state.txt" 2>&1 || true
+    fi
+    if [[ ! -e "$evidence/$name-ruleset-on-failure.txt" ]]; then
+        vm_ssh sudo nft -a list ruleset \
+            >"$evidence/$name-ruleset-on-failure.txt" 2>&1 || true
+    fi
+    if [[ ! -e "$evidence/$name-conntrack.txt" ]]; then
+        vm_ssh sudo conntrack -L -p tcp \
+            >"$evidence/$name-conntrack.txt" 2>&1 || true
+    fi
+}
+issue51_setup_client_namespace() {
+    # Docker requires forwarding enabled before creating an IPv6-enabled bridge.
+    # Set this explicitly in the disposable guest, including after test reboots.
+    vm_ssh sudo sysctl -w net.ipv6.conf.all.forwarding=1 \
+        net.ipv6.conf.default.forwarding=1 >/dev/null
+    vm_ssh sudo ip netns delete issue51-client >/dev/null 2>&1 || true
+    vm_ssh sudo ip link delete mfw-host >/dev/null 2>&1 || true
+    vm_ssh sudo ip netns add issue51-client
+    vm_ssh sudo ip link add mfw-host type veth peer name mfw-peer
+    vm_ssh sudo ip link set mfw-peer netns issue51-client
+    vm_ssh sudo ip address add 198.18.51.1/24 dev mfw-host
+    # Docker binds published IPv6 ports immediately after the veth is raised;
+    # skip DAD so the test endpoint is usable before the container is started.
+    vm_ssh sudo ip -6 address add 2001:db8:51::1/64 dev mfw-host nodad
+    vm_ssh sudo ip link set mfw-host up
+    vm_ssh sudo ip -n issue51-client address add 198.18.51.2/24 dev mfw-peer
+    vm_ssh sudo ip -n issue51-client address add 198.18.51.3/24 dev mfw-peer
+    vm_ssh sudo ip -n issue51-client -6 address add 2001:db8:51::2/64 dev mfw-peer nodad
+    vm_ssh sudo ip -n issue51-client -6 address add 2001:db8:51::3/64 dev mfw-peer nodad
+    vm_ssh sudo ip -n issue51-client link set lo up
+    vm_ssh sudo ip -n issue51-client link set mfw-peer up
+}
+issue51_start_container() {
+    local network=$1
+    vm_ssh sudo docker network create --ipv6 --subnet fd00:51:1::/64 \
+        "$network" >"$evidence/$network-id.txt"
+    vm_ssh sudo docker run --detach --restart=no --name issue51-forward \
+        --label com.manyfw.service-id=issue51-web \
+        --network "$network" --publish 198.18.51.1:18080:8080 \
+        --publish '[2001:db8:51::1]:18080:8080' python:3.12-alpine \
+        python3 -u -c 'import socket
+s=socket.socket(socket.AF_INET6)
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,0)
+s.bind(("::",8080))
+s.listen()
+while True:
+ c,_=s.accept()
+ with c:
+  pending=bytearray()
+  while True:
+   data=c.recv(1024)
+   if not data: break
+   pending.extend(data)
+   while b"\n" in pending:
+    _, _, pending = pending.partition(b"\n")
+    c.sendall(b"reply\n")' \
+        >"$evidence/$network-container-id.txt"
+}
+issue51_stop_container() {
+    local network=$1
+    vm_ssh sudo docker rm --force issue51-forward >/dev/null
+    vm_ssh sudo docker network rm "$network" >/dev/null
+}
+issue51_plan_from_live_docker() {
+    local mode=$1 evidence_name=$2 family=${3:-ipv4} source
+    if [[ "$family" == ipv6 ]]; then
+        source=2001:db8:51::2/128
+    else
+        source=198.18.51.2/32
+    fi
+    vm_ssh sudo manyfw discover --output /tmp/issue51-observation.json
+    vm_ssh sudo /usr/local/bin/issue51-bundle \
+        /tmp/issue51-observation.json issue51-web "$source" "$mode" \
+        "/tmp/$evidence_name-verified-dnat-rule.json" \
+        >"$evidence/$evidence_name-input.json"
+    vm_ssh sudo cat "/tmp/$evidence_name-verified-dnat-rule.json" \
+        >"$evidence/$evidence_name-verified-dnat-rule.json"
+    vm_scp_to "$evidence/$evidence_name-input.json" /tmp/issue51-planner-input.json
+    vm_ssh sudo manyfw plan --diagnostic-input /tmp/issue51-planner-input.json \
+        >"$evidence/$evidence_name-plan.json"
+    python3 - "$evidence/$evidence_name-plan.json" "$mode" "$family" "$source" <<'PY'
+import json, sys
+bundle = json.load(open(sys.argv[1], encoding="utf-8"))
+plan = bundle["plan"]
+if plan["applicability"] != "Applicable":
+    raise SystemExit(f"live Docker planner input was not applicable: {plan['applicability']}")
+rules = [op["EnsureRule"] for op in plan["operations"] if "EnsureRule" in op]
+if len(rules) != 1:
+    raise SystemExit(f"expected one explicit Docker drop, got {len(rules)}")
+rule, = rules
+expected = {
+    "path": "forward", "family": sys.argv[3], "action": "Deny",
+    "publication": "Nat", "host_port": 18080, "container_port": 8080,
+    "requires_conntrack": True, "requires_dnat_original_destination": False,
+}
+for key, value in expected.items():
+    if rule.get(key) != value:
+        raise SystemExit(f"unexpected FORWARD operation {key}: {rule.get(key)!r}")
+expected_source = {"Cidr": sys.argv[4]}
+if rule.get("source") != expected_source:
+    raise SystemExit(f"FORWARD source selector broadened or changed: {rule.get('source')!r}")
+if rule.get("source_subnets") != [sys.argv[4]]:
+    raise SystemExit(
+        f"FORWARD source subnet scope broadened or changed: {rule.get('source_subnets')!r}"
+    )
+if rule["destination"] != {"Docker": "issue51-web"} or not rule["container_targets"]:
+    raise SystemExit("FORWARD rule lost stable Docker identity or live target addresses")
+docker_mode_explanation = {
+    "iptables": "Docker firewall mode is iptables",
+    "nftables": "Docker firewall mode is native nftables",
+}[sys.argv[2]]
+if not any(docker_mode_explanation in explanation for explanation in plan["explanations"]):
+    raise SystemExit("plan omitted the observed Docker firewall-mode explanation")
+PY
+    vm_scp_to "$evidence/$evidence_name-plan.json" "/tmp/issue51-plan-$evidence_name.json"
+}
+issue51_apply_forward_packet_plan() {
+    local mode=$1 name=$2 family=${3:-ipv4}
+    local address=198.18.51.1 planned_source=198.18.51.2 outside_source=198.18.51.3
+    local capture_log="/run/manyfw-issue24/$name-packet-capture.log"
+    local capture_pid="/run/manyfw-issue24/$name-packet-capture.pid"
+    local packet_status=0 capture_stop_status=0 capture_complete=0
+    if [[ "$family" == ipv6 ]]; then
+        address=2001:db8:51::1
+        planned_source=2001:db8:51::2
+        outside_source=2001:db8:51::3
+    fi
+    issue51_plan_from_live_docker "$mode" "$name" "$family"
+    vm_ssh sudo nft --json list ruleset >"$evidence/$name-ruleset-before.json"
+    if [[ "$mode" == nftables ]]; then
+        vm_ssh sudo bash -c \
+            'set -euo pipefail; rm -f "$1" "$2"; nohup tcpdump -ni any -nn -l "tcp port 18080 or tcp port 8080" >"$1" 2>&1 </dev/null & pid=$!; printf "%s\n" "$pid" >"$2"; for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || { cat "$1"; exit 1; }; grep -F "listening on" "$1" >/dev/null && exit 0; sleep 0.1; done; cat "$1"; exit 1' \
+            _ "$capture_log" "$capture_pid"
+    fi
+    set +e
+    vm_ssh sudo /usr/local/bin/issue51-forward-packet \
+        "/tmp/issue51-plan-$name.json" "$address" "$planned_source" "$outside_source" \
+        >"$evidence/$name-packet-result.json" \
+        2>"$evidence/$name-packet-error.txt"
+    packet_status=$?
+    set -e
+    if [[ "$mode" == nftables ]]; then
+        vm_ssh sudo bash -c \
+            'set -euo pipefail; pid=$(cat "$1"); kill -INT "$pid"; for _ in $(seq 1 30); do state=$(ps -o stat= -p "$pid" || true); [[ -z "$state" || "$state" == Z* ]] && exit 0; sleep 0.1; done; kill -TERM "$pid" 2>/dev/null || true; for _ in $(seq 1 20); do state=$(ps -o stat= -p "$pid" || true); [[ -z "$state" || "$state" == Z* ]] && exit 0; sleep 0.1; done; kill -KILL "$pid" 2>/dev/null || true; exit 1' \
+            _ "$capture_pid" >/dev/null 2>&1 || capture_stop_status=$?
+        if capture_remote_evidence "$capture_log" "$evidence/$name-packet-capture.log"; then
+            grep -F 'packets captured' "$evidence/$name-packet-capture.log" >/dev/null \
+                && capture_complete=1
+        fi
+        if [[ "$capture_stop_status" -ne 0 || "$capture_complete" != 1 ]]; then
+            printf 'tcpdump did not produce a finalized capture (stop_status=%s)\n' \
+                "$capture_stop_status" >"$evidence/$name-packet-capture-error.txt"
+            [[ "$packet_status" -ne 0 ]] || return 1
+        fi
+        if [[ "$packet_status" -ne 0 ]]; then
+            vm_ssh sudo docker inspect issue51-forward \
+                >"$evidence/$name-container-inspect.json" 2>&1 || true
+            vm_ssh sudo docker logs issue51-forward \
+                >"$evidence/$name-container.log" 2>&1 || true
+            vm_ssh sudo bash -c \
+                'ip -details address; ip route; ip -6 route; ip netns exec issue51-client ip -details address; ip netns exec issue51-client ip route; ip netns exec issue51-client ip -6 route' \
+                >"$evidence/$name-network-state.txt" 2>&1 || true
+            vm_ssh sudo nft -a list ruleset \
+                >"$evidence/$name-ruleset-on-failure.txt" 2>&1 || true
+            vm_ssh sudo bash -c \
+                'if command -v conntrack >/dev/null; then conntrack -L -p tcp 2>&1; else echo "conntrack command unavailable"; fi' \
+                >"$evidence/$name-conntrack.txt" 2>&1 || true
+        fi
+    fi
+    return "$packet_status"
+}
 confirm_apply() {
     local transaction_id=$1 token=$2
     printf '%s\n' "$token" | vm_ssh sudo manyfw confirm "$transaction_id"
@@ -363,6 +776,20 @@ wait_table_absent() {
     done
     return 1
 }
+reset_remote_batch_logs() {
+    MANYFW_VM_SSH_CONNECT_TIMEOUT=2 ssh_retry_status_255 12 \
+        vm_ssh sudo bash -c '
+            install -d -m 0700 /run/manyfw-issue24
+            install -m 0600 /dev/null /run/manyfw-issue24/batches.log
+            install -m 0600 /dev/null /run/manyfw-issue24/manyfw-batches.log
+        '
+    MANYFW_VM_SSH_CONNECT_TIMEOUT=2 ssh_retry_status_255 12 \
+        vm_scp_to "$evidence/bundle-v4.json" /tmp/issue24-plan-v4.json
+    MANYFW_VM_SSH_CONNECT_TIMEOUT=2 ssh_retry_status_255 12 \
+        vm_scp_to "$evidence/bundle-v6.json" /tmp/issue24-plan-v6.json
+    MANYFW_VM_SSH_CONNECT_TIMEOUT=2 ssh_retry_status_255 12 \
+        vm_scp_to "$evidence/bundle-ssh.json" /tmp/issue24-plan-ssh.json
+}
 reboot_guest() {
     local old_boot new_boot
     # QMP reset models sudden power loss; flush prior guest filesystem writes
@@ -387,17 +814,14 @@ PY
     done
     [[ -n "$new_boot" && "$new_boot" != "$old_boot" ]] \
         || die 'QEMU guest did not complete a boot-ID change after system_reset'
-    vm_ssh sudo install -d -m 0700 /run/manyfw-issue24
-    vm_ssh sudo touch /run/manyfw-issue24/batches.log
-    vm_ssh sudo chmod 0600 /run/manyfw-issue24/batches.log
-    vm_ssh sudo touch /run/manyfw-issue24/manyfw-batches.log
-    vm_ssh sudo chmod 0600 /run/manyfw-issue24/manyfw-batches.log
-    # Every reset may clear /tmp; subsequent scenarios need fresh plan inputs.
-    vm_scp_to "$evidence/bundle-v4.json" /tmp/issue24-plan-v4.json
-    vm_scp_to "$evidence/bundle-v6.json" /tmp/issue24-plan-v6.json
-    vm_scp_to "$evidence/bundle-ssh.json" /tmp/issue24-plan-ssh.json
+    # A reboot can restore the boot ID before SSH transport is stable. Retry
+    # only idempotent log setup and fixture copies on transport status 255.
+    reset_remote_batch_logs
 }
-mark() { printf '%s\t%s\n' "$1" "$2" >>"$evidence/status.tsv"; }
+mark() {
+    last_completed_stage=$1
+    printf '%s\t%s\n' "$1" "$2" >>"$evidence/status.tsv"
+}
 
 # Restart the guest with no pending transaction. The independent service must
 # come up cleanly and must not invent an owned table or transaction state.
@@ -424,9 +848,14 @@ set +e
 partial_output=$(apply_plan /tmp/issue24-plan-v4.json 20 2>&1)
 partial_status=$?
 set -e
+if [[ "$partial_status" -ne 0 ]]; then
+    save_status partial-apply-error "$partial_output"
+else
+    printf 'apply unexpectedly returned success; confirmation output redacted\n' \
+        >"$evidence/partial-apply-unexpected-success.txt"
+fi
 vm_ssh sudo rm -f /run/manyfw-issue24/truncate-apply
 [[ $partial_status -ne 0 ]] || die 'truncated nft transaction input was reported as success'
-save_status partial-apply-error "$partial_output"
 partial_id=$(wait_state rolled_back 30)
 wait_table_absent "$partial_id" 5 || die 'truncated nft transaction mutated the owned table'
 mark partial_apply Passed
@@ -467,27 +896,109 @@ mark cli_kill_after_batch Passed
 # Apply a narrowly scoped drop for the actual SSH peer address and port. The
 # harness observes the firewall-induced SSH loss externally; the armed worker
 # restores the prior state after timeout, with no SSH service restart.
-vm_ssh sudo bash -c 'nohup /usr/local/sbin/issue24-redacted-apply /tmp/issue24-plan-ssh.json 12 /tmp/issue24-ssh-apply-result.json >/tmp/issue24-ssh-apply-run.log 2>&1 </dev/null &'
-ssh_loss_observed=0
-for _ in $(seq 1 30); do
-    if ! vm_ssh true >/dev/null 2>&1; then ssh_loss_observed=1; break; fi
-    sleep 1
+vm_ssh sudo rm -f "$ssh_apply_result" "$ssh_apply_log"
+vm_ssh sudo install -m 0600 /dev/null "$ssh_apply_log"
+vm_ssh sudo bash -c \
+    'nohup /usr/local/sbin/issue24-redacted-apply /tmp/issue24-plan-ssh.json 180 "$1" >>"$2" 2>&1 </dev/null &' \
+    _ "$ssh_apply_result" "$ssh_apply_log"
+for attempt in $(seq 1 15); do
+    probe_status=0
+    probe_output=$(vm_ssh_probe 8 2>&1) || probe_status=$?
+    if [[ $probe_status == 0 ]]; then
+        :
+    elif ssh_probe_is_expected_timeout "$probe_output"; then
+        ssh_loss_observed=1
+        break
+    elif ssh_probe_is_outer_timeout "$probe_status" "$probe_output"; then
+        # An outer timeout is inconclusive, never SSH-loss evidence.
+        # Retain it and make another bounded attempt while the worker's
+        # longer armed deadline keeps recovery independent of this observer.
+        printf 'process_status=%s\n%s\n' "$probe_status" "$probe_output" \
+            >"$evidence/ssh-probe-inconclusive-$attempt.txt"
+    else
+        die "SSH loss probe failed (process status $probe_status): $probe_output"
+    fi
+    # Each probe is bounded; only ssh status 255 plus its anchored timeout
+    # diagnostic above is acceptance evidence. Status 124 only retries.
+    [[ "$attempt" == 15 ]] || sleep 0.25
 done
-[[ $ssh_loss_observed == 1 ]] || die 'SSH connection loss was not observed externally'
+if [[ $ssh_loss_observed != 1 ]]; then
+    vm_ssh sudo bash -c '
+        for file in "$1" "$2"; do
+            if [[ -f "$file" ]]; then
+                printf "\n--- %s ---\n" "$file"
+                cat "$file"
+            else
+                printf "\n--- %s (missing) ---\n" "$file"
+            fi
+        done
+        printf "\n--- transaction states ---\n"
+        python3 - <<'"'"'PY'"'"'
+import glob, json
+for path in glob.glob("/var/lib/manyfw/transactions/*.json"):
+    try:
+        record = json.load(open(path, encoding="utf-8"))
+        print(record.get("plan", {}).get("transaction_id"), record.get("state"))
+    except (OSError, ValueError) as error:
+        print(path, "unreadable", error)
+PY
+        printf "\n--- recovery supervisor ---\n"
+        systemctl status manyfw-recovery.service --no-pager || true
+        printf "\n--- ManyFW nft table ---\n"
+        nft list table inet manyfw 2>&1 || true
+    ' _ "$ssh_apply_log" "$ssh_apply_result" >"$evidence/ssh-loss-not-observed-diagnostics.txt"
+    die 'SSH connection loss was not observed externally'
+fi
 printf 'Firewall-induced SSH loss observed; peer=%s port=22\n' "$ssh_source" \
     >"$evidence/ssh-loss-observed.txt"
 ssh_reconnected=0
-for _ in $(seq 1 35); do
-    if vm_ssh true >/dev/null 2>&1; then ssh_reconnected=1; break; fi
-    sleep 1
+reconnect_deadline=$((SECONDS + 210))
+reconnect_attempt=0
+while (( SECONDS < reconnect_deadline )); do
+    reconnect_attempt=$((reconnect_attempt + 1))
+    remaining=$((reconnect_deadline - SECONDS))
+    # Keep each probe short and bounded within the recovery observation window;
+    # reserve margin for timeout's two-second kill grace.
+    (( remaining > 12 )) || break
+    probe_status=0
+    probe_output=$(vm_ssh_probe 8 2>&1) || probe_status=$?
+    if [[ $probe_status == 0 ]]; then
+        ssh_reconnected=1
+        break
+    else
+        if ssh_probe_is_expected_timeout "$probe_output"; then
+            :
+        elif ssh_probe_is_outer_timeout "$probe_status" "$probe_output"; then
+            printf '%s\n' "$probe_output" \
+                >"$evidence/ssh-reconnect-inconclusive-$reconnect_attempt.txt"
+        else
+            die "SSH recovery probe failed (process status $probe_status): $probe_output"
+        fi
+    fi
+    # Observe for up to 210 seconds after SSH loss, including the 180s rollback
+    # deadline and recovery margin. Status 124 is recorded and retried, never
+    # mistaken for recovery or SSH-loss evidence.
+    sleep 0.5
 done
 [[ $ssh_reconnected == 1 ]] || die 'ManyFW rollback did not restore the SSH control channel'
-vm_ssh sudo cat /tmp/issue24-ssh-apply-result.json >"$evidence/ssh-loss-apply.json"
+vm_ssh sudo bash -c '
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        [[ -s "$1" ]] && exit 0
+        sleep 0.1
+    done
+    exit 1
+' _ "$ssh_apply_result" || die 'SSH apply result was not persisted after recovery'
+capture_remote_evidence "$ssh_apply_result" "$evidence/ssh-loss-apply.json" \
+    || die 'SSH apply result could not be captured'
+cp "$evidence/ssh-loss-apply.json" "$evidence/ssh-loss-apply-result.json"
+if ! capture_remote_evidence "$ssh_apply_log" "$evidence/ssh-loss-apply-run.log"; then
+    die 'SSH apply log could not be captured'
+fi
 ssh_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["transaction_id"])' \
     "$evidence/ssh-loss-apply.json")
 wait_state rolled_back 20 "$ssh_id" >/dev/null
 wait_table_absent "$ssh_id" 5 || die 'independent recovery failed during observed SSH loss'
-vm_ssh sudo rm -f /tmp/issue24-ssh-apply-result.json /tmp/issue24-ssh-apply-run.log
+vm_ssh sudo rm -f "$ssh_apply_result" "$ssh_apply_log"
 mark ssh_loss_and_recovery Passed
 
 # Inject one real rollback failure, confirm the durable RollbackFailure record,
@@ -497,7 +1008,7 @@ save_apply partial-rollback-apply "$partial_rollback_output"
 partial_rollback_id=$(APPLY_OUTPUT="$partial_rollback_output" python3 -c 'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
 vm_ssh sudo touch /run/manyfw-issue24/fail-rollback
 for _ in $(seq 1 20); do
-    state=$(vm_ssh sudo python3 -c 'import glob,json; r=[json.load(open(p)) for p in glob.glob("/var/lib/manyfw/transactions/*.json")]; print(next((x["state"] for x in r if x["plan"]["transaction_id"]=="'"$partial_rollback_id"'"),"missing"))')
+    state=$(vm_ssh sudo python3 -c 'import glob,json; r=[json.load(open(p)) for p in glob.glob("/var/lib/manyfw/transactions/*.json")]; print(next((x["state"] for x in r if x.get("plan",{}).get("transaction_id")=="'"$partial_rollback_id"'"),"missing"))')
     [[ "$state" == rollback_failure ]] && break
     sleep 1
 done
@@ -543,7 +1054,7 @@ save_apply corrupt-checkpoint-apply "$corrupt_output"
 corrupt_id=$(APPLY_OUTPUT="$corrupt_output" python3 -c 'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
 wait_state confirmation 10 "$corrupt_id" >/dev/null
 vm_ssh sudo nft --json list table inet manyfw >"$evidence/corrupt-checkpoint-before.json"
-corrupt_record_path=$(vm_ssh sudo python3 -c 'import glob,json,sys; print(next(p for p in glob.glob("/var/lib/manyfw/transactions/*.json") if json.load(open(p))["plan"]["transaction_id"]==sys.argv[1]))' "$corrupt_id")
+corrupt_record_path=$(vm_ssh sudo python3 -c 'import glob,json,sys; print(next(p for p in glob.glob("/var/lib/manyfw/transactions/*.json") if json.load(open(p)).get("plan",{}).get("transaction_id")==sys.argv[1]))' "$corrupt_id")
 vm_ssh sudo cp "$corrupt_record_path" "/tmp/$corrupt_id.record-backup"
 vm_ssh sudo python3 -c 'import json,sys; p=sys.argv[1]; r=json.load(open(p)); r["checkpoint"]["owner_fingerprint"]="tampered"; json.dump(r,open(p,"w"))' \
     "$corrupt_record_path"
@@ -721,9 +1232,7 @@ wait_state rolled_back 20 "$applying_id" >/dev/null
 wait_table_absent "$applying_id" 5 || die 'reboot during Applying did not restore checkpoint'
 printf '%s\n%s\n' "$applying_old_boot" "$applying_new_boot" >"$evidence/reboot-applying-boot-ids.txt"
 mark reboot_during_applying Passed
-vm_ssh sudo install -d -m 0700 /run/manyfw-issue24
-vm_ssh sudo install -m 0600 /dev/null /run/manyfw-issue24/batches.log
-vm_ssh sudo install -m 0600 /dev/null /run/manyfw-issue24/manyfw-batches.log
+reset_remote_batch_logs
 
 # Pause the real nft list used by verification only after the post-apply
 # fingerprint has completed, leaving the durable record in Verifying.
@@ -738,9 +1247,7 @@ wait_state rolled_back 20 "$verifying_id" >/dev/null
 wait_table_absent "$verifying_id" 5 || die 'reboot during Verifying did not restore checkpoint'
 printf '%s\n%s\n' "$verifying_old_boot" "$verifying_new_boot" >"$evidence/reboot-verifying-boot-ids.txt"
 mark reboot_during_verifying Passed
-vm_ssh sudo install -d -m 0700 /run/manyfw-issue24
-vm_ssh sudo install -m 0600 /dev/null /run/manyfw-issue24/batches.log
-vm_ssh sudo install -m 0600 /dev/null /run/manyfw-issue24/manyfw-batches.log
+reset_remote_batch_logs
 
 # A guest reboot during confirmation expires the persisted request by boot ID.
 reboot_output=$(apply_plan /tmp/issue24-plan-v4.json 120)
@@ -852,11 +1359,230 @@ if policy(sys.argv[1]) != policy(sys.argv[2]):
     raise SystemExit(1)
 PY
 }
+issue51_snapshot_iptables() {
+    local name=$1 phase=$2
+    vm_ssh sudo iptables-save >"$evidence/$name-$phase-iptables-v4.rules"
+    vm_ssh sudo ip6tables-save >"$evidence/$name-$phase-iptables-v6.rules"
+}
+issue51_assert_iptables_unchanged() {
+    local name=$1
+    compare_iptables_policy "$evidence/$name-before-iptables-v4.rules" \
+        "$evidence/$name-after-iptables-v4.rules" \
+        || die "ManyFW FORWARD operation changed foreign IPv4 iptables state: $name"
+    compare_iptables_policy "$evidence/$name-before-iptables-v6.rules" \
+        "$evidence/$name-after-iptables-v6.rules" \
+        || die "ManyFW FORWARD operation changed foreign IPv6 iptables state: $name"
+}
+issue51_prepare_native_docker_forward_baseline() {
+    local ipv4_policy ipv6_policy
+    ipv4_policy=$(vm_ssh sudo iptables -S FORWARD \
+        | awk '$1 == "-P" && $2 == "FORWARD" {print $3}')
+    ipv6_policy=$(vm_ssh sudo ip6tables -S FORWARD \
+        | awk '$1 == "-P" && $2 == "FORWARD" {print $3}')
+    [[ "$ipv4_policy" == ACCEPT || "$ipv4_policy" == DROP ]] \
+        || die "cannot identify native Docker test IPv4 FORWARD policy: $ipv4_policy"
+    [[ "$ipv6_policy" == ACCEPT || "$ipv6_policy" == DROP ]] \
+        || die "cannot identify native Docker test IPv6 FORWARD policy: $ipv6_policy"
+    docker_native_forward_policy_v4=$ipv4_policy
+    docker_native_forward_policy_v6=$ipv6_policy
+    docker_native_forward_policy_saved=yes
+    {
+        printf 'ipv4_original_policy=%s\n' "$ipv4_policy"
+        printf 'ipv6_original_policy=%s\n' "$ipv6_policy"
+        printf 'temporary_test_policy=ACCEPT\n'
+        printf '%s\n' \
+            'reason=remove stale iptables-backend forwarding default left by switching this disposable guest to Docker native nftables mode; restored after native-mode packet scenarios'
+    } >"$evidence/docker-native-forward-test-baseline.txt"
+    vm_ssh sudo iptables -P FORWARD ACCEPT
+    vm_ssh sudo ip6tables -P FORWARD ACCEPT
+}
+issue51_observed_forward_policy() {
+    local tool=$1
+    case "$tool" in
+        iptables|ip6tables) ;;
+        *) return 2 ;;
+    esac
+    vm_ssh sudo "$tool" -S FORWARD \
+        | awk '$1 == "-P" && $2 == "FORWARD" {print $3}'
+}
+issue51_restore_native_docker_forward_baseline() {
+    [[ "$docker_native_forward_policy_saved" == yes ]] || return 0
+    local status=0 ipv4_restore_status=0 ipv6_restore_status=0
+    local ipv4_observation_status=0 ipv6_observation_status=0
+    local actual_v4 actual_v6
+    vm_ssh sudo iptables -P FORWARD "$docker_native_forward_policy_v4" \
+        || { ipv4_restore_status=$?; status=1; }
+    vm_ssh sudo ip6tables -P FORWARD "$docker_native_forward_policy_v6" \
+        || { ipv6_restore_status=$?; status=1; }
+    actual_v4=$(issue51_observed_forward_policy iptables) \
+        || { ipv4_observation_status=$?; actual_v4=unavailable; status=1; }
+    actual_v6=$(issue51_observed_forward_policy ip6tables) \
+        || { ipv6_observation_status=$?; actual_v6=unavailable; status=1; }
+    [[ -n "$actual_v4" ]] || { actual_v4=missing; status=1; }
+    [[ -n "$actual_v6" ]] || { actual_v6=missing; status=1; }
+    [[ "$actual_v4" == "$docker_native_forward_policy_v4" ]] || status=1
+    [[ "$actual_v6" == "$docker_native_forward_policy_v6" ]] || status=1
+    {
+        printf 'ipv4_restore_command_status=%s\n' "$ipv4_restore_status"
+        printf 'ipv6_restore_command_status=%s\n' "$ipv6_restore_status"
+        printf 'ipv4_observation_command_status=%s\n' "$ipv4_observation_status"
+        printf 'ipv6_observation_command_status=%s\n' "$ipv6_observation_status"
+        printf 'restored_ipv4_policy=%s\nrestored_ipv6_policy=%s\n' \
+            "$actual_v4" "$actual_v6"
+    } >>"$evidence/docker-native-forward-test-baseline.txt" || status=1
+    [[ "$status" == 0 ]] || return 1
+    docker_native_forward_policy_saved=no
+}
+issue51_run_docker_packet_scenario() {
+    local mode=$1 name=$2 network=$3 family=${4:-ipv4}
+    set -E
+    issue51_diagnostic_name=$name
+    issue51_capture_log="/run/manyfw-issue24/$name-packet-capture.log"
+    issue51_capture_pid="/run/manyfw-issue24/$name-packet-capture.pid"
+    issue51_setup_client_namespace
+    issue51_start_container "$network"
+    issue51_snapshot_iptables "$name" before
+    issue51_apply_forward_packet_plan "$mode" "$name" "$family"
+    issue51_snapshot_iptables "$name" after
+    issue51_assert_iptables_unchanged "$name"
+    vm_ssh sudo nft --json list ruleset >"$evidence/$name-ruleset-after.json"
+    assert_foreign_rules_preserved "$evidence/$name-ruleset-before.json" \
+        "$evidence/$name-ruleset-after.json" \
+        || die "ManyFW FORWARD drop changed foreign nftables state: $name"
+    issue51_stop_container "$network"
+    issue51_diagnostic_name=""
+    issue51_capture_log=""
+    issue51_capture_pid=""
+    set +E
+}
+issue51_run_ip_change_scenario() {
+    local mode=$1 name=$2 network_a=issue24-ip-a network_b=issue24-ip-b
+    local docker_ip_a docker_ip_b stale_apply_output stale_apply_status
+    current_stage=$name
+    set -E
+    issue51_diagnostic_name=$name
+    vm_ssh sudo docker network create "$network_a" >"$evidence/$name-network-a.txt"
+    vm_ssh sudo docker network create "$network_b" >"$evidence/$name-network-b.txt"
+    issue51_setup_client_namespace
+    vm_ssh sudo docker run --detach --restart=no --name issue51-forward \
+        --label com.manyfw.service-id=issue51-web --network "$network_a" \
+        --publish 198.18.51.1:18080:8080 python:3.12-alpine python3 -u -c \
+        'import socket
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("0.0.0.0",8080))
+s.listen()
+while True:
+ c,_=s.accept()
+ with c:
+  pending=bytearray()
+  while True:
+   data=c.recv(1024)
+   if not data: break
+   pending.extend(data)
+   while b"\n" in pending:
+    _, _, pending = pending.partition(b"\n")
+    c.sendall(b"reply\n")' \
+        >"$evidence/$name-container-id.txt"
+    docker_ip_a=$(vm_ssh sudo docker inspect --format \
+        "{{(index .NetworkSettings.Networks \"$network_a\").IPAddress}}" issue51-forward)
+    [[ -n "$docker_ip_a" ]] || die "Docker did not assign the initial address: $name"
+    printf '%s\n' "$docker_ip_a" >"$evidence/$name-ip-before.txt"
+    issue51_plan_from_live_docker "$mode" "$name-before"
+    vm_ssh sudo nft --json list ruleset \
+        >"$evidence/$name-ruleset-before.json"
+    issue51_snapshot_iptables "$name-initial" before
+    vm_ssh sudo /usr/local/bin/issue51-forward-packet \
+        "/tmp/issue51-plan-$name-before.json" 198.18.51.1 \
+        198.18.51.2 198.18.51.3 \
+        >"$evidence/$name-initial-packet.json"
+    issue51_snapshot_iptables "$name-initial" after
+    issue51_assert_iptables_unchanged "$name-initial"
+    vm_ssh sudo docker network disconnect "$network_a" issue51-forward
+    vm_ssh sudo docker network connect "$network_b" issue51-forward
+    docker_ip_b=$(vm_ssh sudo docker inspect --format \
+        "{{(index .NetworkSettings.Networks \"$network_b\").IPAddress}}" issue51-forward)
+    [[ -n "$docker_ip_b" && "$docker_ip_b" != "$docker_ip_a" ]] \
+        || die "Docker container IP did not change: before=$docker_ip_a after=$docker_ip_b"
+    printf '%s\n' "$docker_ip_b" >"$evidence/$name-ip-after-change.txt"
+    vm_ssh sudo docker inspect --format '{{.State.Running}}' issue51-forward \
+        | grep -Fx true >"$evidence/$name-container-running-after-ip-change.txt" \
+        || die "Docker container stopped during IP change: $name"
+    vm_ssh sudo nft --json list ruleset >"$evidence/$name-stale-before.json"
+    issue51_snapshot_iptables "$name-stale-plan" before
+    set +e
+    stale_apply_output=$(vm_ssh sudo manyfw apply --experimental --timeout 60 \
+        --file "/tmp/issue51-plan-$name-before.json" 2>&1)
+    stale_apply_status=$?
+    set -e
+    if [[ "$stale_apply_status" -ne 0 ]]; then
+        save_status "$name-stale-apply-output" "$stale_apply_output"
+    else
+        printf 'stale apply unexpectedly returned success; confirmation output redacted\n' \
+            >"$evidence/$name-stale-plan-unexpected-success.txt"
+    fi
+    [[ "$stale_apply_status" -ne 0 ]] \
+        || die "stale Docker FORWARD plan accepted after container IP changed: $name"
+    grep -F 'changed since planning' <<<"$stale_apply_output" \
+        >"$evidence/$name-stale-plan-refusal.txt" \
+        || die "stale Docker refusal did not identify changed Docker state: $name"
+    vm_ssh sudo nft --json list ruleset >"$evidence/$name-stale-after.json"
+    issue51_snapshot_iptables "$name-stale-plan" after
+    issue51_assert_iptables_unchanged "$name-stale-plan"
+    assert_same_json_ignoring_counters "$evidence/$name-stale-before.json" \
+        "$evidence/$name-stale-after.json" \
+        || die "stale Docker plan refusal mutated nftables state: $name"
+    issue51_plan_from_live_docker "$mode" "$name-after"
+    issue51_snapshot_iptables "$name-refresh" before
+    vm_ssh sudo nft --json list ruleset \
+        >"$evidence/$name-ruleset-before-refresh.json"
+    python3 - "/tmp/issue51-plan-$name-before.json" \
+        "/tmp/issue51-plan-$name-after.json" "$docker_ip_a" "$docker_ip_b" <<'PY'
+import json, sys
+before, after = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:3]]
+old, new = sys.argv[3:5]
+targets = lambda bundle: {
+    target["address"]
+    for operation in bundle["plan"]["operations"]
+    for target in operation.get("EnsureRule", {}).get("container_targets", [])
+}
+if old not in targets(before) or new not in targets(after) or old in targets(after):
+    raise SystemExit("stable-identity plan did not reconcile the changed container target")
+PY
+    issue51_apply_forward_packet_plan "$mode" "$name-after"
+    issue51_snapshot_iptables "$name-refresh" after
+    issue51_assert_iptables_unchanged "$name-refresh"
+    vm_ssh sudo nft --json list table inet manyfw \
+        >"$evidence/$name-owned-table-after.json"
+    python3 - "$evidence/$name-owned-table-after.json" "$docker_ip_a" "$docker_ip_b" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+text = json.dumps(data)
+if sys.argv[2] in text or sys.argv[3] not in text:
+    raise SystemExit("ManyFW owned FORWARD state does not contain only the refreshed IP")
+PY
+    vm_ssh sudo nft --json list ruleset >"$evidence/$name-ruleset-after-apply.json"
+    assert_foreign_rules_preserved "$evidence/$name-ruleset-before-refresh.json" \
+        "$evidence/$name-ruleset-after-apply.json" \
+        || die "ManyFW changed foreign nftables state after IP change: $name"
+    vm_ssh sudo docker rm --force issue51-forward >/dev/null
+    vm_ssh sudo docker network rm "$network_a" "$network_b" \
+        >"$evidence/$name-networks-removed.txt"
+    mark "docker_forward_ip_change_$mode" Passed
+    issue51_diagnostic_name=""
+    issue51_capture_log=""
+    issue51_capture_pid=""
+    set +E
+}
 compare_iptables_policy "$evidence/docker-iptables-before-v4.rules" "$evidence/docker-iptables-after-v4.rules" \
     || die 'ManyFW transaction changed Docker/foreign IPv4 iptables state'
 compare_iptables_policy "$evidence/docker-iptables-before-v6.rules" "$evidence/docker-iptables-after-v6.rules" \
     || die 'ManyFW transaction changed Docker/foreign IPv6 iptables state'
 vm_ssh sudo systemctl is-active --quiet docker
+current_stage=docker_forward_drop_iptables
+issue51_run_docker_packet_scenario iptables docker-forward-drop-iptables issue51-forward-iptables
+issue51_run_docker_packet_scenario iptables docker-forward-drop-iptables-v6 issue51-forward-iptables-v6 ipv6
+mark docker_forward_drop_iptables Passed
 mark docker_iptables Passed
 
 # Roll a live non-empty ManyFW policy across a reboot. Exact normalized
@@ -888,6 +1614,7 @@ vm_ssh sudo install -m 0600 /dev/null /run/manyfw-issue24/manyfw-batches.log
 # Attempt Docker's native nftables daemon mode. An unsupported daemon mode is
 # recorded explicitly; when it starts, supported ManyFW operations must apply
 # and confirm while preserving foreign state (not a packet compatibility claim).
+current_stage=docker_forward_drop_native_nftables
 docker_native_status=Passed
 if vm_ssh sudo test -e /etc/docker/daemon.json; then
     docker_config_existed=yes
@@ -900,12 +1627,26 @@ docker_native_config_touched=yes
 vm_ssh sudo bash -c 'printf "%s\n" "{\"firewall-backend\":\"nftables\"}" >/etc/docker/daemon.json'
 docker_restart_required=yes
 if ! vm_ssh sudo systemctl restart docker; then
-    docker_native_status=NotApplicable
     vm_ssh sudo systemctl status --no-pager docker >"$evidence/docker-native-start-failure.txt" 2>&1 || true
+    die 'Docker native nftables mode is unavailable; required for Issue #51 acceptance'
 else
-    vm_ssh sudo docker info --format 'Server={{.ServerVersion}} Driver={{.Driver}}' \
-        >"$evidence/docker-native-info.txt"
+    docker_firewall_backend=$(vm_ssh sudo docker info --format '{{.FirewallBackend.Driver}}')
+    printf 'Server=%s FirewallBackend=%s\n' \
+        "$(vm_ssh sudo docker info --format '{{.ServerVersion}}')" \
+        "$docker_firewall_backend" >"$evidence/docker-native-info.txt"
+    [[ "$docker_firewall_backend" == nftables ]] \
+        || die "Docker did not report native nftables firewall mode: $docker_firewall_backend"
     manager_coexistence docker-native
+    # Switching this already-running test guest from Docker's iptables backend
+    # leaves its prior FORWARD policy behind. Native Docker deliberately does
+    # not manage iptables; temporarily use an accepting baseline so the test
+    # proves ManyFW's FORWARD behavior rather than that stale policy.
+    issue51_prepare_native_docker_forward_baseline
+    issue51_run_docker_packet_scenario nftables docker-forward-drop-native-nftables issue51-forward-native
+    issue51_run_docker_packet_scenario nftables docker-forward-drop-native-nftables-v6 \
+        issue51-forward-native-v6 ipv6
+    issue51_run_ip_change_scenario nftables docker-forward-ip-change-nftables
+    mark docker_forward_drop_native_nftables Passed
     vm_ssh sudo systemctl is-active --quiet docker
 fi
 if [[ "$docker_config_existed" == yes ]]; then
@@ -915,65 +1656,32 @@ else
 fi
 vm_ssh sudo systemctl restart docker
 vm_ssh sudo systemctl is-active --quiet docker
+issue51_restore_native_docker_forward_baseline \
+    || die 'native Docker test baseline FORWARD policies were not restored exactly'
 docker_native_config_touched=no
 docker_restart_required=no
 mark docker_native_nftables "$docker_native_status"
 
-# Exercise a real container address change between distinct bridge subnets;
-# daemon restart is exercised independently by the native-backend transition
-# immediately above. Apply/confirm against the resulting stable manager state.
-vm_ssh sudo docker network create issue24-ip-a >"$evidence/docker-ip-network-a.txt"
-vm_ssh sudo docker network create issue24-ip-b >"$evidence/docker-ip-network-b.txt"
-vm_ssh sudo docker run --detach --restart unless-stopped --name issue24-ip-change \
-    --network issue24-ip-a busybox:1.36 sh -c 'while :; do sleep 3600; done' \
-    >"$evidence/docker-ip-container-id.txt"
-docker_ip_a=$(vm_ssh sudo docker inspect --format \
-    '{{(index .NetworkSettings.Networks "issue24-ip-a").IPAddress}}' issue24-ip-change)
-[[ -n "$docker_ip_a" ]] || die 'Docker did not assign the initial container address'
-printf '%s\n' "$docker_ip_a" >"$evidence/docker-container-ip-before.txt"
-vm_ssh sudo docker network disconnect issue24-ip-a issue24-ip-change
-vm_ssh sudo docker network connect issue24-ip-b issue24-ip-change
-docker_ip_b=$(vm_ssh sudo docker inspect --format \
-    '{{(index .NetworkSettings.Networks "issue24-ip-b").IPAddress}}' issue24-ip-change)
-[[ -n "$docker_ip_b" && "$docker_ip_b" != "$docker_ip_a" ]] \
-    || die "Docker container IP did not change: before=$docker_ip_a after=$docker_ip_b"
-printf '%s\n' "$docker_ip_b" >"$evidence/docker-container-ip-after-change.txt"
-vm_ssh sudo docker inspect --format '{{.State.Running}}' issue24-ip-change \
-    | grep -Fx true >"$evidence/docker-container-running-after-ip-change.txt" \
-    || die 'Docker container did not remain running after its address change'
-vm_ssh sudo nft --json list ruleset >"$evidence/docker-ip-ruleset-before-apply.json"
-docker_ip_apply=$(apply_plan /tmp/issue24-plan-v4.json 60)
-save_apply docker-ip-change-apply "$docker_ip_apply"
-docker_ip_transaction=$(APPLY_OUTPUT="$docker_ip_apply" python3 -c \
-    'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
-docker_ip_token=$(APPLY_OUTPUT="$docker_ip_apply" python3 -c \
-    'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["confirmation_token"])')
-confirm_apply "$docker_ip_transaction" "$docker_ip_token" \
-    >"$evidence/docker-ip-change-confirm.json"
-wait_state confirmed 10 "$docker_ip_transaction" >/dev/null
-vm_ssh sudo nft --json list ruleset >"$evidence/docker-ip-ruleset-after-apply.json"
-assert_foreign_rules_preserved "$evidence/docker-ip-ruleset-before-apply.json" \
-    "$evidence/docker-ip-ruleset-after-apply.json" \
-    || die 'ManyFW changed Docker or other foreign firewall state after container IP change'
-vm_ssh sudo docker rm --force issue24-ip-change >/dev/null
-vm_ssh sudo docker network rm issue24-ip-a issue24-ip-b \
-    >"$evidence/docker-ip-networks-removed.txt"
+# Repeat stable-identity IP-change reconciliation after Docker has been
+# restored to iptables mode; both firewall backends now have lifecycle evidence.
+issue51_run_ip_change_scenario iptables docker-forward-ip-change-iptables
 mark docker_container_ip_change Passed
+mark docker_forward_ip_change Passed
 
 # External manager mutation during the confirmation window must be preserved;
 # ManyFW records critical divergence and refuses destructive rollback. Once the
 # test-owned foreign chain is removed, the operator can retry safely.
+vm_ssh sudo nft --json list table inet manyfw \
+    >"$evidence/concurrent-manager-checkpoint-before.json"
 concurrent_manager_output=$(apply_plan /tmp/issue24-plan-v4.json 8)
 save_apply concurrent-manager-apply "$concurrent_manager_output"
 manager_id=$(APPLY_OUTPUT="$concurrent_manager_output" python3 -c 'import json,os; print(json.loads(os.environ["APPLY_OUTPUT"])["transaction_id"])')
-vm_ssh sudo nft --json list table inet manyfw \
-    >"$evidence/concurrent-manager-checkpoint-before.json"
 vm_ssh sudo nft -f - <<'NFT'
 add table inet issue24_external
 add chain inet issue24_external input { type filter hook input priority -200; policy accept; }
 NFT
 for _ in $(seq 1 20); do
-    manager_state=$(vm_ssh sudo python3 -c 'import glob,json; r=[json.load(open(p)) for p in glob.glob("/var/lib/manyfw/transactions/*.json")]; print(next((x["state"] for x in r if x["plan"]["transaction_id"]=="'"$manager_id"'"),"missing"))')
+    manager_state=$(vm_ssh sudo python3 -c 'import glob,json; r=[json.load(open(p)) for p in glob.glob("/var/lib/manyfw/transactions/*.json")]; print(next((x["state"] for x in r if x.get("plan",{}).get("transaction_id")=="'"$manager_id"'"),"missing"))')
     [[ "$manager_state" == rollback_failure ]] && break
     sleep 1
 done
@@ -986,7 +1694,8 @@ vm_ssh sudo manyfw recover --rollback "$manager_id" \
 wait_state rolled_back 10 "$manager_id" >/dev/null
 vm_ssh sudo nft --json list table inet manyfw \
     >"$evidence/concurrent-manager-checkpoint-after.json"
-cmp -s "$evidence/concurrent-manager-checkpoint-before.json" \
+assert_same_json_ignoring_counters \
+    "$evidence/concurrent-manager-checkpoint-before.json" \
     "$evidence/concurrent-manager-checkpoint-after.json" \
     || die 'manager-divergence retry did not exactly restore the ManyFW checkpoint'
 mark concurrent_external_manager_divergence Passed
@@ -1021,13 +1730,9 @@ printf '%s\n' 'NotApplicable: specialized Tailscale interoperability deferred to
 vm_ssh sudo cat /var/log/manyfw-issue24/production-batches.log >"$evidence/production-nft-batches.txt"
 [[ -s "$evidence/production-nft-batches.txt" ]] \
     || die 'production nft batch evidence is missing or empty'
-grep -Eq '^[[:space:]]*(add|delete) table inet manyfw([[:space:]]|$)' \
+python3 "$SCRIPT_DIR/validate-production-nft-batches.py" \
     "$evidence/production-nft-batches.txt" \
-    || die 'production nft batch evidence contains no ManyFW table transaction'
-if grep -Eq '^[[:space:]]*flush([[:space:]]|$)' \
-    "$evidence/production-nft-batches.txt"; then
-    die 'production adapter attempted an nftables flush operation'
-fi
+    || die 'production nft batch evidence is malformed, contains a flush, or has no ManyFW transaction'
 mark no_global_or_table_flush Passed
 
 printf 'Issue #24 production recovery evidence: %s\n' "$evidence"

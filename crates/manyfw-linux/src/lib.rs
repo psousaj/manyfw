@@ -6,8 +6,9 @@ mod netlink;
 mod procfs;
 
 pub use firewall::{
-    FirewallObservationError, LegacyFirewallObservation, observe_firewall, observe_legacy_firewall,
-    parse_nft_rule_observations,
+    DockerNatEvidence, DockerNatMapping, FirewallObservationError, LegacyFirewallObservation,
+    observe_firewall, observe_legacy_firewall, parse_nft_rule_observations,
+    verify_docker_nat_mapping,
 };
 
 pub(crate) struct SourceDump<T> {

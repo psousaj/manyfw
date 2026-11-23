@@ -20,10 +20,20 @@ inability to override external drop. The bounded experimental INPUT subset was
 validated with candidate-bound packet/recovery evidence and reviewed as
 recorded in ADR-0005; this does not authorize production or claim universal
 Linux path coverage.
-OUTPUT/FORWARD are explicitly unsupported; default reject requires exact
-implementation or pre-mutation refusal. Current schema details below remain
-the current contract. CIDR selectors remain source-only; arbitrary destination
-CIDRs are unsupported and refused, with no destination-CIDR schema expansion.
+OUTPUT remains unsupported. FORWARD is not yet an accepted execution scope.
+The proposed #51 amendment and its candidate implementation cover only explicit
+deny rules for published Docker services: an owned accept-policy chain accepts
+established/related traffic first, then drops matching published flows using
+post-DNAT targets and conntrack original publication mappings. FORWARD allows,
+FORWARD default actions, and OUTPUT rules remain refused. This proposed
+experimental behavior is not enabled as an accepted contract until its
+disposable-KVM evidence and separate Goal Architecture/Security review pass;
+it does not inherit the earlier INPUT-only evidence or authorization. The
+governing proposal is in [ADR-0005](adr/0005-scoped-experimental-nftables-apply.md)
+and [nftables-by-default spec](specs/nftables-by-default.md). Current schema
+details below describe the candidate shape, not broader acceptance. CIDR
+selectors remain source-only; arbitrary destination CIDRs are unsupported and
+refused, with no destination-CIDR schema expansion.
 
 ## Schema version
 

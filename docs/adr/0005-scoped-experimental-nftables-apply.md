@@ -27,11 +27,12 @@ enabled.
 - **Default deny exceptions.** The managed default deny is preceded in the
   owned chain by established/related, loopback ingress, and ICMPv6 neighbor
   discovery/router advertisement accepts.
-- **FORWARD drop-only.** A new owned forward-hook chain (accept policy) carries
-  only drop rules for published Docker destinations, after an
-  established/related accept. FORWARD allows and drop policies remain
-  unsupported. Docker firewall mode is detected for explanation only; no
-  DOCKER-USER or Docker-owned table is written. This reverses the
+- **FORWARD drop-only.** A new owned forward-hook chain at fixed priority
+  `-300` (accept policy) carries only drop rules for published Docker
+  destinations, after an established/related accept. FORWARD allow rules and
+  FORWARD default-drop policies remain unsupported. Docker firewall mode is
+  detected for explanation only; no DOCKER-USER or Docker-owned table is
+  written. This reverses the
   "OUTPUT/FORWARD unsupported" limit for FORWARD drops only.
 - **Exclusive creation and JSON.** First Apply creates the table exclusively;
   apply, checkpoint, and restore move to nftables JSON.

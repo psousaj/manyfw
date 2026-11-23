@@ -5,6 +5,7 @@ import io
 import importlib.util
 import json
 import pathlib
+import subprocess
 import tempfile
 import tarfile
 import unittest
@@ -14,6 +15,104 @@ spec = importlib.util.spec_from_file_location('acceptance', pathlib.Path(__file_
 acceptance = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(acceptance)
 REAL_INVENTORY = acceptance.production_inventory
+batch_spec = importlib.util.spec_from_file_location(
+    'nft_batch_evidence', pathlib.Path(__file__).with_name('validate-production-nft-batches.py'))
+nft_batch_evidence = importlib.util.module_from_spec(batch_spec)
+batch_spec.loader.exec_module(nft_batch_evidence)
+
+
+class NftBatchEvidenceTests(unittest.TestCase):
+    def test_accepts_json_manyfw_table_transactions(self):
+        batch = json.dumps({'nftables': [
+            {'create': {'table': {'family': 'inet', 'name': 'manyfw'}}},
+            {'add': {'rule': {
+                'family': 'inet', 'table': 'manyfw', 'chain': 'forward',
+                'expr': [{'drop': None}],
+            }}},
+            {'delete': {'table': {'family': 'inet', 'name': 'manyfw'}}},
+        ]})
+        nft_batch_evidence.validate(batch)
+
+    def test_rejects_flush_operation_in_json(self):
+        batch = json.dumps({'nftables': [
+            {'flush': {'table': {'family': 'inet', 'name': 'manyfw'}}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'flush operation'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_missing_manyfw_transaction(self):
+        batch = json.dumps({'nftables': [
+            {'add': {'table': {'family': 'inet', 'name': 'docker'}}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'mutates outside inet manyfw'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_nested_metadata_decoy_as_table_evidence(self):
+        batch = json.dumps({'nftables': [
+            {'add': {'metadata': {'family': 'inet', 'name': 'manyfw'}}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'invalid nftables operation'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_unexpected_json_envelope(self):
+        batch = json.dumps({
+            'metadata': {'nftables': [
+                {'create': {'table': {'family': 'inet', 'name': 'manyfw'}}},
+            ]},
+        })
+        with self.assertRaisesRegex(ValueError, 'invalid nftables batch envelope'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_foreign_mutation_in_batch_with_manyfw_operation(self):
+        batch = json.dumps({'nftables': [
+            {'create': {'table': {'family': 'inet', 'name': 'manyfw'}}},
+            {'add': {'rule': {
+                'family': 'inet', 'table': 'docker-bridges', 'chain': 'forward',
+                'expr': [{'drop': None}],
+            }}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'invalid nftables operation'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_foreign_table_mutation_in_batch_with_manyfw(self):
+        batch = json.dumps({'nftables': [
+            {'create': {'table': {'family': 'inet', 'name': 'manyfw'}}},
+            {'delete': {'table': {'family': 'inet', 'name': 'docker-bridges'}}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'mutates outside inet manyfw'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_rule_without_expression(self):
+        batch = json.dumps({'nftables': [
+            {'add': {'rule': {
+                'family': 'inet', 'table': 'manyfw', 'chain': 'input',
+            }}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'invalid nftables operation'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_chain_without_required_name(self):
+        batch = json.dumps({'nftables': [
+            {'add': {'chain': {'family': 'inet', 'table': 'manyfw'}}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'invalid nftables operation'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_boolean_base_chain_priority(self):
+        batch = json.dumps({'nftables': [
+            {'add': {'chain': {
+                'family': 'inet', 'table': 'manyfw', 'name': 'input',
+                'type': 'filter', 'hook': 'input', 'policy': 'accept',
+                'prio': True,
+            }}},
+        ]})
+        with self.assertRaisesRegex(ValueError, 'invalid nftables operation'):
+            nft_batch_evidence.validate(batch)
+
+    def test_rejects_malformed_or_empty_archive(self):
+        for batch in ('not-json\n', '\n'):
+            with self.subTest(batch=batch), self.assertRaises(ValueError):
+                nft_batch_evidence.validate(batch)
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -634,6 +733,138 @@ class AcceptanceTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
                      '<expected packet cases>', 'exec'), namespace)
         self.assertEqual(acceptance.packet_cases(), namespace['expected_cases']())
+
+
+class SshProbeTimeoutTests(unittest.TestCase):
+    probe_helper = pathlib.Path(__file__).with_name('ssh-probe.sh')
+
+    def classifies_as_expected_timeout(self, output):
+        result = subprocess.run(
+            ['bash', '-c', 'source "$1"; ssh_probe_is_expected_timeout "$2"',
+             'ssh-probe-test', str(self.probe_helper), output],
+            check=False, capture_output=True, text=True,
+        )
+        return result.returncode == 0
+
+    def test_outer_timeout_is_retryable_but_never_acceptance_evidence(self):
+        output = (
+            'SSH_PROBE_STATUS=124\n'
+            'Connection timed out during banner exchange\n'
+        )
+        result = subprocess.run(
+            ['bash', '-c', 'source "$1"; ssh_probe_is_outer_timeout "$2" "$3"',
+             'ssh-probe-test', str(self.probe_helper), '124', output],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(self.classifies_as_expected_timeout(output))
+
+        wrong_status = subprocess.run(
+            ['bash', '-c', 'source "$1"; ssh_probe_is_outer_timeout "$2" "$3"',
+             'ssh-probe-test', str(self.probe_helper), '255', output],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertNotEqual(wrong_status.returncode, 0)
+
+    def test_outer_timeout_accepts_crlf_diagnostics_but_requires_marker(self):
+        output = (
+            'SSH_PROBE_STATUS=124\n'
+            'Connection timed out during banner exchange\r\n'
+        )
+        result = subprocess.run(
+            ['bash', '-c', 'source "$1"; ssh_probe_is_outer_timeout "$2" "$3"',
+             'ssh-probe-test', str(self.probe_helper), '124', output],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+
+        missing_marker = subprocess.run(
+            ['bash', '-c', 'source "$1"; ssh_probe_is_outer_timeout "$2" "$3"',
+             'ssh-probe-test', str(self.probe_helper), '124',
+             'Connection timed out during banner exchange\r\n'],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertNotEqual(missing_marker.returncode, 0)
+
+    def test_outer_timeout_marker_only_survives_command_substitution(self):
+        output = 'SSH_PROBE_STATUS=124'
+        result = subprocess.run(
+            ['bash', '-c', 'source "$1"; ssh_probe_is_outer_timeout "$2" "$3"',
+             'ssh-probe-test', str(self.probe_helper), '124', output],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(self.classifies_as_expected_timeout(output))
+
+    def test_status_255_retry_retries_until_success(self):
+        script = r'''
+source "$1"
+calls=0
+fake_ssh() {
+    calls=$((calls + 1))
+    if [[ "$calls" -eq 1 ]]; then
+        return 255
+    fi
+    return 0
+}
+ssh_retry_status_255 3 fake_ssh || exit 1
+[[ "$calls" == 2 ]]
+'''
+        result = subprocess.run(
+            ['bash', '-c', script, 'ssh-retry-test', str(self.probe_helper)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_status_1_remote_command_failure_is_not_retried(self):
+        script = r'''
+source "$1"
+calls=0
+fake_ssh() {
+    calls=$((calls + 1))
+    return 1
+}
+ssh_retry_status_255 3 fake_ssh
+status=$?
+[[ "$status" == 1 && "$calls" == 1 ]]
+'''
+        result = subprocess.run(
+            ['bash', '-c', script, 'ssh-retry-test', str(self.probe_helper)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_requires_ssh_timeout_status_and_diagnostic(self):
+        cases = [
+            ('SSH timeout',
+                'SSH_PROBE_STATUS=255\n'
+                'Connection timed out during banner exchange\n'
+                'Connection to 127.0.0.1 port 47423 timed out', True),
+            ('SSH timeout with carriage-return diagnostics',
+                'SSH_PROBE_STATUS=255\n'
+                'Connection timed out during banner exchange\r\n'
+                'Connection to 127.0.0.1 port 47423 timed out\r', True),
+            ('embedded carriage return is not normalized',
+                'SSH_PROBE_STATUS=255\n'
+                'Connection timed out\r during banner exchange', False),
+            ('outer timeout',
+                'SSH_PROBE_STATUS=124\n'
+                'Connection timed out during banner exchange', False),
+            ('unrelated SSH failure',
+                'SSH_PROBE_STATUS=255\n'
+                'ssh: connect to host 127.0.0.1 port 47423: Connection refused', False),
+            ('unrelated timeout wording',
+                'SSH_PROBE_STATUS=255\n'
+                'Connection to proxy tunnel timed out', False),
+            ('status marker must precede diagnostics',
+                'Connection timed out during banner exchange\n'
+                'SSH_PROBE_STATUS=255', False),
+            ('diagnostic without status',
+                'Connection timed out during banner exchange', False),
+        ]
+        for name, output, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(self.classifies_as_expected_timeout(output), expected)
 
 
 if __name__ == '__main__':

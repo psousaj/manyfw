@@ -1,7 +1,10 @@
 # Spec: nftables as the only enforcement backend, with conflict-aware Apply
 
-Status: ready for agent. Governing decisions: [ADR-0006](../adr/0006-nftables-only-enforcement-backend.md)
-and the amended [ADR-0005](../adr/0005-scoped-experimental-nftables-apply.md).
+Status: ready for agent. The FORWARD extension below is a proposed experimental
+candidate, not an accepted or enabled execution scope; it remains gated on
+candidate-bound disposable-KVM evidence and a separate Goal Architecture/Security
+review under `AGENTS.md`. Governing decisions: [ADR-0006](../adr/0006-nftables-only-enforcement-backend.md)
+and the proposed amendment to [ADR-0005](../adr/0005-scoped-experimental-nftables-apply.md).
 Research basis: [PR #43 investigation](../research/pr-43-investigation.md).
 
 ## Problem Statement
@@ -48,10 +51,11 @@ binary blocks Apply; active iptables-legacy rules are analysed if they can be
 read and otherwise make the result `unknown` and block Apply. Installation
 warns that nftables is required. Apply uses `nft` JSON input, producing a
 versionable artifact per transaction. The managed default deny keeps return
-traffic, loopback and ICMPv6 neighbor discovery working. A new FORWARD
-capability lets operators block traffic to published Docker containers with
+traffic, loopback and ICMPv6 neighbor discovery working. The proposed FORWARD
+candidate lets operators block traffic to published Docker containers with
 explicit drop rules only, and ManyFW explains which Docker firewall mode is in
-effect.
+effect. This does not make FORWARD an accepted execution scope before the
+evidence and review gates above pass.
 
 ## User Stories
 
@@ -113,7 +117,8 @@ effect.
 - **Default deny shape.** The managed default deny is rendered after explicit exceptions in ManyFW's own chain: established/related, loopback ingress, and ICMPv6 neighbor discovery/router advertisement. Exceptions are shown in plan output. The base-chain policy remains accept; deny is expressed as family-matched rules.
 - **Table creation.** First Apply creates the table exclusively and fails if it already exists; existing tables follow the current ownership-marker verification.
 - **JSON apply format.** The adapter emits nftables JSON for apply, checkpoint, and restore. The JSON document is stored with the transaction record as the versioned change artifact. Reads continue using `nft -j list`. Text-script paths are removed once JSON parity is verified.
-- **FORWARD drops.** A new FORWARD operation supports drop-only rules in a ManyFW-owned `inet` base chain on the forward hook with a fixed, documented priority and accept policy. It accepts established/related first, then applies drops matched on post-DNAT destination derived from Docker stable identity and publish mappings, reconciled when containers change. FORWARD allows and drop base-chain policies are refused.
+- **Proposed FORWARD drops.** The candidate FORWARD operation supports drop-only rules in a ManyFW-owned `inet` base chain on the forward hook at fixed priority `-300`, with accept policy. It accepts established/related first, then applies drops matched on post-DNAT destination derived from Docker stable identity and publish mappings, reconciled when containers change. Docker-owned chains, including `DOCKER-USER`, are observed but not written or required as an insertion point. FORWARD allow rules and FORWARD default-drop policies are refused. This proposal does not authorize enabling FORWARD execution before candidate-bound disposable-KVM evidence and the separate Architecture/Security review pass.
+- **Asymmetric FORWARD applicability.** For a verified, explicit drop-only plan targeting an observed Docker NAT publication, uncertainty limited to foreign chain ownership or priority metadata does not itself block applicability: an unknown foreign drop can only make the requested drop redundant, and a foreign accept cannot override ManyFW's terminal drop. Those limitations remain visible in plan diagnostics. Unanalysable foreign rule expressions remain preserved in rule observations and diagnostics; they do not become a global observation-incomplete blocker for this deny-only plan. Incomplete host interface, address, or listener observations still block. The host route collector's specific `CurrentNamespaceOnly`, `PolicyRoutingIncomplete`, and `UnsupportedDimension` limitations may remain visible without blocking this deny-only plan because the plan does not use route observations to claim reachability or infer a packet path; malformed/unavailable route observations and every other unclassified observation limitation still block. The plan also requires owner-bound INPUT default-Allow scopes for both address families; it does not implicitly create INPUT scopes to accompany a FORWARD rule, so a missing/unknown INPUT ownership scope blocks before transaction conversion. Unknown hooks, malformed or incomplete ruleset data, unknown runtime capability, unresolved publication identity/mapping, and unsupported packet paths block. Apply independently revalidates the complete live nftables state, flowtable absence, ownership boundary, and exact publication target before mutation. This is not a claim that traffic outside the verified published path is controlled, nor a reachability guarantee.
 - **Docker mode detection.** The Docker adapter reads Docker Engine `GET /info` `FirewallBackend.Driver` using the API version advertised by that daemon and reports iptables, native nftables, or unknown; absent, unsupported, malformed, or unrecognized data stays unknown. This is informational and never by itself blocks planning. A published NAT endpoint follows DNAT then FORWARD, where a ManyFW-owned drop has the same effect in either Docker mode. In iptables mode DOCKER-USER is mentioned only when its observed presence/absence is known; its name alone does not prove ownership. Native nftables mode does not provide DOCKER-USER. Userland-proxy publications traverse host INPUT instead of the DNAT/FORWARD path. Unknown mode is reported without inferring an unverified Docker path. ManyFW never writes DOCKER-USER or Docker-owned tables.
 - **Input priority.** The input chain keeps priority −300. Behavior after UFW/firewalld reload is validated in KVM.
 - **Out-of-hook bypass.** Flowtable refusal and existing unsupported-path refusals remain.
@@ -130,7 +135,7 @@ effect.
 
 - Making a ManyFW allow override a foreign drop by modifying, removing, or reordering foreign rules.
 - Any iptables execution backend or fallback.
-- FORWARD allows, FORWARD drop policies, NAT, OUTPUT enforcement.
+- FORWARD allow rules, FORWARD default-drop policies, ManyFW NAT enforcement, OUTPUT enforcement.
 - Writing to DOCKER-USER or Docker-owned nftables tables.
 - Historical (multi-version) rollback UX; this spec only produces the versioned JSON artifacts it will need.
 - Tailscale support (tracked separately) and production authorization.

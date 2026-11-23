@@ -27,16 +27,19 @@ foreign drop against a planned allow is reported by `plan` and refuses the
 whole Apply; ManyFW never edits foreign rules to resolve it. The expanded packet suite and dedicated
 runtime review are recorded in ADR-0005 for the bounded experimental subset;
 the historical clean-input-hook approval alone did not cover this change.
-OUTPUT/FORWARD remain unsupported. The experimental adapter supports explicitly
+OUTPUT remains unsupported. The accepted enforcement scope still excludes
+FORWARD; the proposed Issue #51 extension implements only experimental FORWARD
+drops for published Docker destinations. It is authorized only for verified
+disposable-KVM tests and is not approved for development-host or production use;
+KVM evidence and the separate Goal Architecture/Security review are required
+before even that bounded behavior is described as accepted. FORWARD allow rules
+and FORWARD default-drop policies remain refused. The experimental adapter supports explicitly
 installed, verified systemd and OpenRC recovery integrations. It refuses unknown
 service managers and does not claim universal Linux portability.
 
-Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic.
+Docker iptables mode may use DOCKER-USER, while Docker's experimental native nftables mode does not create it. Different hook priorities and packet paths require separate test coverage. Docker port publishing may use NAT, forwarding, or userland proxies. An `INPUT` chain alone cannot protect forwarded traffic. Published Docker DNAT traffic can be protected by the experimental drop-only ManyFW-owned FORWARD chain at priority −300; Docker-owned chains are observed but are not an insertion-point prerequisite or ManyFW write target.
 
 Observing Docker-owned DOCKER-USER does not grant ManyFW write ownership.
-Current planner output remains diagnostic-only when that foreign resource is
-required and no independent ManyFW-owned insertion point and ordering are
-verified.
 
 Service identity must not depend on changing container IPs; use Docker metadata, labels and publish mappings and reconcile on events. Conntrack original-destination matching is a possible backend mechanism, not the service identity model.
 

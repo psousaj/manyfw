@@ -29,6 +29,20 @@ If docs and requested code disagree, document the discrepancy and open or update
 
 These are **documented release milestones**, not currently GitHub native milestone objects.
 
+## KVM integration-test execution environment
+
+The local agent host `POS00191` may expose `/dev/kvm` while lacking usable
+virtualization: an open/ioctl can fail with `ENODEV`, and `/proc/cpuinfo` may
+contain no `vmx`/`svm` flags. This is an environment limitation, not grounds to
+skip required guest evidence or use TCG. When that occurs, verify the dedicated
+WSL KVM runner with `ssh jose@psousaj` (check `/dev/kvm`, CPU flags, QEMU, and
+Docker there), sync the exact candidate into a separate directory such as
+`~/projects/manyfw-<task>-candidate`, and run `vm-up.sh` and the required
+integration scripts on that runner. Do not use or overwrite its primary
+`~/projects/manyfw` checkout. Re-check the runner after session compaction or
+resumption. Keep ordinary builds/tests local where possible, and never run
+firewall mutation tests against the local development host.
+
 ## Per-issue workflow
 
 1. Read the issue and linked docs; state assumptions, hazards and affected traits.

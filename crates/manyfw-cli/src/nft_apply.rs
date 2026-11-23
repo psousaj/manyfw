@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 const TABLE: &str = "manyfw";
 const TABLE_MARKER: &str = "manyfw-owner-v1";
 const CHAIN_PRIORITY: i32 = -300;
+const FORWARD_CHAIN_PRIORITY: i32 = manyfw_core::backend::MANAGED_FORWARD_CHAIN_PRIORITY;
 const STORE: &str = "/var/lib/manyfw";
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -163,8 +164,9 @@ impl NftBackend {
         }
         let ruleset = self.ruleset()?;
         let has_own_input = compatible_input_hook(&ruleset)?;
+        let has_own_forward = compatible_forward_hook(&ruleset)?;
         let owned = self.owned_table()?;
-        if has_own_input && owned.is_none() {
+        if (has_own_input || has_own_forward) && owned.is_none() {
             return Err(TransactionError::OwnershipChanged);
         }
         let mut defaults = BTreeMap::new();
@@ -189,6 +191,14 @@ impl NftBackend {
                     if defaults.insert(*family, *action).is_some() {
                         return Err(backend_error("duplicate input default operation"));
                     }
+                }
+                PlanOperation::SetManagedDefault {
+                    path: manyfw_core::backend::PacketPath::Forward,
+                    ..
+                } => {
+                    return Err(backend_error(
+                        "FORWARD default-drop policies are unsupported; use an explicit published-Docker drop rule",
+                    ));
                 }
                 PlanOperation::EnsureRule {
                     source,
@@ -229,6 +239,48 @@ impl NftBackend {
                 {
                     let _ = action;
                 }
+                PlanOperation::EnsureRule {
+                    source,
+                    source_subnets,
+                    destination,
+                    path: manyfw_core::backend::PacketPath::Forward,
+                    family,
+                    action: Action::Deny,
+                    protocol,
+                    ports,
+                    source_interfaces,
+                    host_port: Some(host_port),
+                    container_port: Some(container_port),
+                    host_address,
+                    requires_dnat_original_destination: false,
+                    requires_conntrack: true,
+                    publication: Some(manyfw_core::docker::PublicationMechanism::Nat),
+                    container_targets,
+                    managed_resource: Some(resource),
+                    ..
+                } if resource == &operation.resource
+                    && matches!(source, Selector::Cidr(_) | Selector::Zone(_))
+                    && (!source_subnets.is_empty() || !source_interfaces.is_empty())
+                    && matches!(destination, Selector::Docker(_))
+                    && matches!(protocol, Protocol::Tcp | Protocol::Udp)
+                    && *host_port > 0
+                    && *container_port > 0
+                    && !container_targets.is_empty()
+                    && container_targets.iter().all(|target| match family {
+                        AddressFamily::Ipv4 => target.address.is_ipv4(),
+                        AddressFamily::Ipv6 => target.address.is_ipv6(),
+                    })
+                    && source_interfaces.iter().all(|interface| matches!(interface, manyfw_core::InterfaceSelector::Exact(name) if valid_interface_name(name)))
+                    && source_subnets.iter().all(|network| match family {
+                        AddressFamily::Ipv4 => network.addr().is_ipv4(),
+                        AddressFamily::Ipv6 => network.addr().is_ipv6(),
+                    })
+                    && host_address.as_ref().is_none_or(|address| match family {
+                        AddressFamily::Ipv4 => address.is_ipv4(),
+                        AddressFamily::Ipv6 => address.is_ipv6(),
+                    })
+                    && valid_protocol_ports(*protocol, ports, *family) =>
+                {}
                 _ => return Err(backend_error("unsupported typed operation")),
             }
         }
@@ -247,6 +299,7 @@ impl NftBackend {
     pub(crate) fn transaction_fingerprint(&self) -> TxResult<String> {
         let mut ruleset = self.ruleset()?;
         strip_volatile_counters(&mut ruleset);
+        normalize_ruleset_object_order(&mut ruleset);
         let serialized = serde_json::to_string(&ruleset).map_err(|error| {
             backend_error(&format!("cannot canonicalize nftables state: {error}"))
         })?;
@@ -356,9 +409,30 @@ fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> Tx
         "prio":CHAIN_PRIORITY,
         "policy":"accept"
     }}}));
+    let has_forward_rules = plan.operations.iter().any(|operation| {
+        matches!(
+            operation.planned_operation.as_ref(),
+            Some(PlanOperation::EnsureRule {
+                path: manyfw_core::backend::PacketPath::Forward,
+                ..
+            })
+        )
+    });
+    if has_forward_rules {
+        commands.push(json!({"add":{"chain":{
+            "family":"inet",
+            "table":TABLE,
+            "name":"forward",
+            "type":"filter",
+            "hook":"forward",
+            "prio":FORWARD_CHAIN_PRIORITY,
+            "policy":"accept"
+        }}}));
+    }
 
     let default_denied_families = managed_input_default_denied_families(plan);
     let mut defaults = Vec::new();
+    let mut forward_rules = Vec::new();
     for operation in &plan.operations {
         let Some(typed) = operation.planned_operation.as_ref() else {
             return Err(backend_error("missing typed planner operation"));
@@ -370,13 +444,30 @@ fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> Tx
                     fingerprint(&serde_json::to_string(typed).unwrap_or_default())
                 );
                 let expressions = expected_rule_expression(typed)?;
-                commands.push(json!({"add":{"rule":{
+                let chain = match typed {
+                    PlanOperation::EnsureRule {
+                        path: manyfw_core::backend::PacketPath::Input,
+                        ..
+                    } => "input",
+                    PlanOperation::EnsureRule {
+                        path: manyfw_core::backend::PacketPath::Forward,
+                        action: Action::Deny,
+                        ..
+                    } => "forward",
+                    _ => return Err(backend_error("unsupported typed rule path or action")),
+                };
+                let rule = json!({"add":{"rule":{
                     "family":"inet",
                     "table":TABLE,
-                    "chain":"input",
+                    "chain":chain,
                     "expr":expressions,
                     "comment":comment
-                }}}));
+                }}});
+                if chain == "forward" {
+                    forward_rules.push(rule);
+                } else {
+                    commands.push(rule);
+                }
             }
             PlanOperation::SetManagedDefault { action, family, .. } => {
                 if default_rule(*family, *action)?.is_some() {
@@ -425,9 +516,30 @@ fn build_apply_document(plan: &TransactionPlan, replace_owned_table: bool) -> Tx
         }
     }
     commands.extend(defaults);
+    if has_forward_rules {
+        commands.push(serde_json::json!({"add":{"rule":{
+            "family":"inet",
+            "table":TABLE,
+            "chain":"forward",
+            "expr":forward_established_related_expression(),
+            "comment":"manyfw-forward-exception-v1-established-related"
+        }}}));
+        commands.extend(forward_rules);
+    }
 
     serde_json::to_string(&json!({"nftables":commands}))
         .map_err(|error| backend_error(&format!("cannot serialize nftables JSON: {error}")))
+}
+
+fn forward_established_related_expression() -> serde_json::Value {
+    serde_json::json!([
+        {"match":{
+            "op":"in",
+            "left":{"ct":{"key":"state"}},
+            "right":{"set":["established","related"]}
+        }},
+        {"accept":null}
+    ])
 }
 
 fn default_rule(family: AddressFamily, action: Action) -> TxResult<Option<&'static str>> {
@@ -492,6 +604,192 @@ fn default_deny_exception_rules(
         ));
     }
     rules
+}
+
+fn plan_has_forward_rules(plan: &TransactionPlan) -> bool {
+    plan.operations
+        .iter()
+        .filter_map(|operation| operation.planned_operation.as_ref())
+        .any(|operation| {
+            matches!(
+                operation,
+                PlanOperation::EnsureRule {
+                    path: manyfw_core::backend::PacketPath::Forward,
+                    ..
+                }
+            )
+        })
+}
+
+fn validate_live_forward_targets(plan: &TransactionPlan) -> TxResult<()> {
+    if !plan_has_forward_rules(plan) {
+        return Ok(());
+    }
+    let docker = manyfw_core::docker::DockerDiscovery::new(
+        super::docker_engine::local_docker_transport(),
+        super::DiscoveryClock,
+    )
+    .collect();
+    validate_forward_docker_targets(plan, &docker)
+}
+
+fn run_after_forward_revalidation<T>(
+    plan: &TransactionPlan,
+    revalidate: impl FnOnce() -> TxResult<()>,
+    mutate: impl FnOnce() -> TxResult<T>,
+) -> TxResult<T> {
+    if plan_has_forward_rules(plan) {
+        revalidate()?;
+    }
+    mutate()
+}
+
+fn validate_forward_docker_targets(
+    plan: &TransactionPlan,
+    observed: &manyfw_core::docker::DockerDiscoveryResult,
+) -> TxResult<()> {
+    validate_forward_docker_targets_with(plan, observed, |mapping| {
+        manyfw_linux::verify_docker_nat_mapping(mapping)
+            .map(|evidence| evidence.is_some())
+            .map_err(|error| {
+                backend_error(&format!("live Docker DNAT verification failed: {error:?}"))
+            })
+    })
+}
+
+fn validate_forward_docker_targets_with(
+    plan: &TransactionPlan,
+    observed: &manyfw_core::docker::DockerDiscoveryResult,
+    verify_nat: impl Fn(&manyfw_linux::DockerNatMapping) -> TxResult<bool>,
+) -> TxResult<()> {
+    let forward_rules = plan
+        .operations
+        .iter()
+        .filter_map(|operation| operation.planned_operation.as_ref())
+        .filter(|operation| {
+            matches!(
+                operation,
+                PlanOperation::EnsureRule {
+                    path: manyfw_core::backend::PacketPath::Forward,
+                    ..
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    if forward_rules.is_empty() {
+        return Ok(());
+    }
+
+    if observed.completeness != manyfw_core::docker::Completeness::Complete
+        || observed.outcome != manyfw_core::docker::CollectionOutcome::Complete
+    {
+        return Err(backend_error(
+            "live Docker observation is incomplete; rediscover and re-plan before Apply",
+        ));
+    }
+
+    for operation in forward_rules {
+        let PlanOperation::EnsureRule {
+            destination: Selector::Docker(selector),
+            action: Action::Deny,
+            family,
+            path: manyfw_core::backend::PacketPath::Forward,
+            host_port: Some(host_port),
+            container_port: Some(container_port),
+            publication: Some(manyfw_core::docker::PublicationMechanism::Nat),
+            protocol,
+            container_targets,
+            host_address,
+            source_subnets,
+            ..
+        } = operation
+        else {
+            return Err(backend_error(
+                "FORWARD operation is not bound to a supported published Docker mapping",
+            ));
+        };
+        let expected_protocol = match protocol {
+            Protocol::Tcp => manyfw_core::docker::TransportProtocol::Tcp,
+            Protocol::Udp => manyfw_core::docker::TransportProtocol::Udp,
+            _ => {
+                return Err(backend_error(
+                    "FORWARD operation has an unsupported Docker transport protocol",
+                ));
+            }
+        };
+        let mut observed_targets = observed
+            .containers
+            .iter()
+            .filter(|container| {
+                container.operational_status == manyfw_core::docker::OperationalStatus::Running
+                    && container.lifecycle == manyfw_core::docker::LifecycleState::Running
+                    && container.logical_identity.as_ref().is_some_and(|identity| {
+                        identity.value == *selector
+                            || identity.value == format!("docker:{selector}")
+                    })
+            })
+            .flat_map(|container| {
+                container
+                    .observed_endpoints
+                    .iter()
+                    .filter(move |endpoint| {
+                        endpoint.instance_id == container.instance.id
+                            && matches!(
+                                endpoint.mechanism,
+                                manyfw_core::docker::PublicationMechanism::Nat
+                                    | manyfw_core::docker::PublicationMechanism::Unknown(_)
+                            )
+                            && matches!(
+                                endpoint.network_mode,
+                                manyfw_core::docker::NetworkMode::Bridge
+                                    | manyfw_core::docker::NetworkMode::Custom(_)
+                            )
+                            && endpoint.protocol == expected_protocol
+                            && endpoint.host.port == *host_port
+                            && endpoint.container_port == *container_port
+                            && endpoint.host.address.as_ref() == host_address.as_ref().as_ref()
+                            && match family {
+                                AddressFamily::Ipv4 => {
+                                    endpoint.family == manyfw_core::docker::IpFamily::Ipv4
+                                }
+                                AddressFamily::Ipv6 => {
+                                    endpoint.family == manyfw_core::docker::IpFamily::Ipv6
+                                }
+                            }
+                    })
+                    .flat_map(|endpoint| endpoint.container_addresses.iter())
+                    .filter(move |target| match family {
+                        AddressFamily::Ipv4 => target.address.is_ipv4(),
+                        AddressFamily::Ipv6 => target.address.is_ipv6(),
+                    })
+                    .map(|target| target.address)
+            })
+            .collect::<BTreeSet<_>>();
+        let planned_targets = container_targets
+            .iter()
+            .map(|target| target.address)
+            .collect::<BTreeSet<_>>();
+        if planned_targets.is_empty() || observed_targets != planned_targets {
+            return Err(backend_error(
+                "Docker identity, publication, or target addresses changed since planning; rediscover and re-plan before FORWARD Apply",
+            ));
+        }
+        let mapping = manyfw_linux::DockerNatMapping {
+            host_address: **host_address,
+            host_port: *host_port,
+            protocol: expected_protocol,
+            container_port: *container_port,
+            source_subnets: source_subnets.clone(),
+            targets: planned_targets.iter().copied().collect(),
+        };
+        if !verify_nat(&mapping)? {
+            return Err(backend_error(
+                "live firewall state does not verify the planned Docker DNAT mapping",
+            ));
+        }
+        observed_targets.clear();
+    }
+    Ok(())
 }
 
 impl TransactionBackend for NftBackend {
@@ -559,6 +857,7 @@ impl TransactionBackend for NftBackend {
         Self::require_isolated_guest()?;
         Self::verify_recovery_arm_directory()?;
         self.validate_plan(plan)?;
+        validate_live_forward_targets(plan)?;
         Ok(())
     }
 
@@ -581,6 +880,7 @@ impl TransactionBackend for NftBackend {
         let ruleset = self.ruleset()?;
         let mut normalized = ruleset.clone();
         strip_volatile_counters(&mut normalized);
+        normalize_ruleset_object_order(&mut normalized);
         let owner_fingerprint = fingerprint(
             &serde_json::to_string(&normalized)
                 .map_err(|_| backend_error("cannot canonicalize checkpoint state"))?,
@@ -628,7 +928,11 @@ impl TransactionBackend for NftBackend {
     fn apply(&self, plan: &TransactionPlan) -> TxResult<ApplyReport> {
         self.validate_plan(plan)?;
         let artifact = self.change_artifact_for(plan)?;
-        run_nft_json(&artifact.document)?;
+        run_after_forward_revalidation(
+            plan,
+            || validate_live_forward_targets(plan),
+            || run_nft_json(&artifact.document),
+        )?;
         Ok(ApplyReport {
             complete: true,
             ownership_fingerprint: self.transaction_fingerprint()?,
@@ -655,7 +959,11 @@ impl TransactionBackend for NftBackend {
         if current_artifact != *artifact {
             return Err(TransactionError::OwnershipChanged);
         }
-        run_nft_json(&artifact.document)?;
+        run_after_forward_revalidation(
+            &record.plan,
+            || validate_live_forward_targets(&record.plan),
+            || run_nft_json(&artifact.document),
+        )?;
         Ok(ApplyReport {
             complete: true,
             ownership_fingerprint: self.transaction_fingerprint()?,
@@ -771,16 +1079,19 @@ impl NftBackend {
     fn verify_interrupted_plan(plan: &TransactionPlan, state: &serde_json::Value) -> TxResult<()> {
         verify_owned_table_json(state)?;
         let mut expected = Vec::new();
+        let mut forward_expected = Vec::new();
         let mut defaults = Vec::new();
         let default_denied_families = managed_input_default_denied_families(plan);
         for operation in &plan.operations {
             match operation.planned_operation.as_ref() {
                 Some(PlanOperation::SetManagedDefault {
                     action: Action::Allow,
+                    path: manyfw_core::backend::PacketPath::Input,
                     ..
                 }) => {}
                 Some(PlanOperation::EnsureRule {
                     source_subnets,
+                    path: manyfw_core::backend::PacketPath::Input,
                     family,
                     action: Action::Deny,
                     protocol: Protocol::Tcp,
@@ -834,11 +1145,32 @@ impl NftBackend {
                     );
                     expected.push((format!("{comment_prefix}{marker}"), expression));
                 }
-                Some(typed @ PlanOperation::EnsureRule { .. }) => {
+                Some(
+                    typed @ PlanOperation::EnsureRule {
+                        path: manyfw_core::backend::PacketPath::Input,
+                        ..
+                    },
+                ) => {
                     let marker = fingerprint(&serde_json::to_string(typed).unwrap_or_default());
                     expected.push((format!("manyfw-rule-v1-{marker}"), expected_rule_expression(typed)?));
                 }
-                Some(typed @ PlanOperation::SetManagedDefault { action: Action::Deny, family, .. }) => {
+                Some(
+                    typed @ PlanOperation::EnsureRule {
+                        path: manyfw_core::backend::PacketPath::Forward,
+                        action: Action::Deny,
+                        ..
+                    },
+                ) => {
+                    let marker = fingerprint(&serde_json::to_string(typed).unwrap_or_default());
+                    forward_expected
+                        .push((format!("manyfw-rule-v1-{marker}"), expected_rule_expression(typed)?));
+                }
+                Some(typed @ PlanOperation::SetManagedDefault {
+                    action: Action::Deny,
+                    path: manyfw_core::backend::PacketPath::Input,
+                    family,
+                    ..
+                }) => {
                     let marker = fingerprint(&serde_json::to_string(typed).unwrap_or_default());
                     defaults.push((format!("manyfw-default-v1-{marker}"), serde_json::json!([
                         {"match":{"op":"==","left":{"meta":{"key":"nfproto"}},"right":if *family == AddressFamily::Ipv4 {"ipv4"} else {"ipv6"}}},
@@ -858,6 +1190,13 @@ impl NftBackend {
             );
         }
         expected.extend(defaults);
+        if !forward_expected.is_empty() {
+            expected.push((
+                "manyfw-forward-exception-v1-established-related".into(),
+                forward_established_related_expression(),
+            ));
+            expected.extend(forward_expected);
+        }
         let mut actual = Vec::new();
         let mut comments = BTreeSet::new();
         for rule in state["nftables"].as_array().into_iter().flatten() {
@@ -878,7 +1217,11 @@ impl NftBackend {
                     actual_comment != expected_comment
                         || if actual_comment == "manyfw-exception-v1-icmpv6-control" {
                             !verified_icmpv6_control_expression(actual_expr)
-                        } else if actual_comment == "manyfw-exception-v1-established-related" {
+                        } else if matches!(
+                            actual_comment.as_str(),
+                            "manyfw-exception-v1-established-related"
+                                | "manyfw-forward-exception-v1-established-related"
+                        ) {
                             !verified_established_related_expression(actual_expr)
                         } else {
                             actual_expr != expected_expr
@@ -920,6 +1263,10 @@ fn verified_icmpv6_control_expression(expression: &serde_json::Value) -> bool {
 }
 
 fn verified_established_related_expression(expression: &serde_json::Value) -> bool {
+    // `nft --json list` canonicalizes the emitted `in`-set match to `==` with
+    // the same set. Accept that listed representation only with the exact
+    // established/related set and terminal accept; live packet evidence covers
+    // the kernel semantics of this canonical form.
     let Some(expressions) = expression.as_array() else {
         return false;
     };
@@ -951,7 +1298,11 @@ fn expected_rule_expression(operation: &PlanOperation) -> TxResult<serde_json::V
         source_subnets,
         source_interfaces,
         family,
+        path,
         host_address,
+        host_port,
+        container_targets,
+        container_port,
         protocol,
         ports,
         action,
@@ -1017,13 +1368,56 @@ fn expected_rule_expression(operation: &PlanOperation) -> TxResult<serde_json::V
             collection(names),
         ));
     }
-    if let Some(address) = host_address.as_ref() {
+    if *path == manyfw_core::backend::PacketPath::Forward {
+        if *action != Action::Deny || container_targets.is_empty() || host_port.is_none() {
+            return Err(TransactionError::PostApplyFingerprintUnavailable);
+        }
+        let host_port = host_port.ok_or(TransactionError::PostApplyFingerprintUnavailable)?;
+        if let Some(host_address) = (**host_address).filter(|address| !address.is_unspecified()) {
+            expressions.push(condition(
+                json!({"ct":{"dir":"original","key":format!("{address_protocol} daddr")}}),
+                json!(host_address.to_string()),
+            ));
+        }
+        let targets = container_targets
+            .iter()
+            .map(|target| {
+                if target.address.is_ipv4() != (*family == AddressFamily::Ipv4) {
+                    return Err(TransactionError::PostApplyFingerprintUnavailable);
+                }
+                Ok(json!(target.address.to_string()))
+            })
+            .collect::<TxResult<Vec<_>>>()?;
+        expressions.push(condition(
+            json!({"payload":{"protocol":address_protocol,"field":"daddr"}}),
+            collection(targets),
+        ));
+        expressions.push(json!({"match":{
+            "op":"in",
+            "left":{"ct":{"key":"status"}},
+            "right":"dnat"
+        }}));
+        expressions.push(condition(
+            json!({"ct":{"dir":"original","key":"proto-dst"}}),
+            json!(host_port),
+        ));
+    } else if let Some(address) = host_address.as_ref() {
         expressions.push(condition(
             json!({"payload":{"protocol":address_protocol,"field":"daddr"}}),
             json!(address.to_string()),
         ));
     }
     match protocol {
+        Protocol::Tcp | Protocol::Udp if *path == manyfw_core::backend::PacketPath::Forward => {
+            let port = container_port.ok_or(TransactionError::PostApplyFingerprintUnavailable)?;
+            expressions.push(condition(
+                json!({"payload":{
+                    "protocol":if *protocol == Protocol::Tcp {"tcp"} else {"udp"},
+                    "field":"dport"
+                }}),
+                json!(port),
+            ));
+        }
         Protocol::Tcp | Protocol::Udp if matches!(ports, PortScope::Any) => {
             expressions.push(condition(
                 json!({"meta":{"key":"l4proto"}}),
@@ -1083,6 +1477,7 @@ fn foreign_ruleset_fingerprint(state: &serde_json::Value) -> TxResult<String> {
         .ok_or(TransactionError::OwnershipChanged)?
         .retain(|entry| !is_owned_object(entry));
     strip_volatile_counters(&mut foreign);
+    normalize_ruleset_object_order(&mut foreign);
     let serialized = serde_json::to_string(&foreign)
         .map_err(|_| backend_error("cannot canonicalize foreign ruleset"))?;
     Ok(fingerprint(&serialized))
@@ -1179,6 +1574,36 @@ fn compatible_input_hook(ruleset: &serde_json::Value) -> TxResult<bool> {
     Ok(has_own_input)
 }
 
+fn compatible_forward_hook(ruleset: &serde_json::Value) -> TxResult<bool> {
+    let entries = ruleset["nftables"]
+        .as_array()
+        .ok_or_else(|| backend_error("nftables ruleset lacks object list"))?;
+    let mut has_own_forward = false;
+    for entry in entries {
+        if entry.get("flowtable").is_some() {
+            return Err(backend_error(
+                "unsupported nftables flowtable/offload composition",
+            ));
+        }
+        let Some(chain) = entry.get("chain") else {
+            continue;
+        };
+        if chain["hook"] != "forward" {
+            continue;
+        }
+        if chain["family"] == "inet" && chain["table"] == TABLE {
+            has_own_forward = true;
+        } else if !matches!(chain["family"].as_str(), Some("ip" | "ip6" | "inet"))
+            || chain["type"] != "filter"
+            || chain["prio"].as_i64().is_none()
+            || !matches!(chain["policy"].as_str(), Some("accept" | "drop"))
+        {
+            return Err(backend_error("unsupported foreign forward chain structure"));
+        }
+    }
+    Ok(has_own_forward)
+}
+
 fn valid_interface_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() < 16
@@ -1202,6 +1627,7 @@ fn absent_reboot_fingerprint(mut ruleset: serde_json::Value) -> TxResult<String>
         return Err(TransactionError::OwnershipChanged);
     }
     strip_volatile_counters(&mut ruleset);
+    normalize_ruleset_object_order(&mut ruleset);
     let serialized = serde_json::to_string(&ruleset)
         .map_err(|_| backend_error("cannot canonicalize reboot state"))?;
     Ok(fingerprint(&serialized))
@@ -1212,7 +1638,9 @@ fn verify_owned_table_json(value: &serde_json::Value) -> TxResult<()> {
         .as_array()
         .ok_or_else(|| backend_error("ManyFW JSON lacks nftables objects"))?;
     let mut table_count = 0;
-    let mut chain_count = 0;
+    let mut input_chain_count = 0;
+    let mut forward_chain_count = 0;
+    let mut forward_rule_count = 0;
     for object in objects {
         if object.as_object().is_none_or(|fields| fields.len() != 1) {
             return Err(TransactionError::OwnershipChanged);
@@ -1227,13 +1655,21 @@ fn verify_owned_table_json(value: &serde_json::Value) -> TxResult<()> {
                 return Err(TransactionError::OwnershipChanged);
             }
         } else if let Some(chain) = object.get("chain") {
-            chain_count += 1;
+            let (name, hook, priority) = if chain["name"] == "input" {
+                input_chain_count += 1;
+                ("input", "input", CHAIN_PRIORITY)
+            } else if chain["name"] == "forward" {
+                forward_chain_count += 1;
+                ("forward", "forward", FORWARD_CHAIN_PRIORITY)
+            } else {
+                return Err(TransactionError::OwnershipChanged);
+            };
             if chain["family"] != "inet"
                 || chain["table"] != TABLE
-                || chain["name"] != "input"
-                || chain["hook"] != "input"
+                || chain["name"] != name
+                || chain["hook"] != hook
                 || chain["type"] != "filter"
-                || chain["prio"].as_i64() != Some(i64::from(CHAIN_PRIORITY))
+                || chain["prio"].as_i64() != Some(i64::from(priority))
                 || chain["policy"] != "accept"
                 || !only_object_fields(
                     chain,
@@ -1246,16 +1682,23 @@ fn verify_owned_table_json(value: &serde_json::Value) -> TxResult<()> {
             }
         } else if let Some(rule) = object.get("rule") {
             let comment = rule["comment"].as_str().unwrap_or_default();
+            let valid_input_comment = rule["chain"] == "input"
+                && (comment.starts_with("manyfw-rule-v1-")
+                    || comment.starts_with("manyfw-default-v1-")
+                    || comment.starts_with("manyfw-exception-v1-"));
+            let valid_forward_comment = rule["chain"] == "forward"
+                && (comment.starts_with("manyfw-rule-v1-")
+                    || comment == "manyfw-forward-exception-v1-established-related");
+            if rule["chain"] == "forward" {
+                forward_rule_count += 1;
+            }
             if rule["family"] != "inet"
                 || rule["table"] != TABLE
-                || rule["chain"] != "input"
+                || !(valid_input_comment || valid_forward_comment)
                 || !only_object_fields(
                     rule,
                     &["family", "table", "chain", "comment", "expr", "handle"],
                 )
-                || !(comment.starts_with("manyfw-rule-v1-")
-                    || comment.starts_with("manyfw-default-v1-")
-                    || comment.starts_with("manyfw-exception-v1-"))
             {
                 return Err(TransactionError::OwnershipChanged);
             }
@@ -1265,7 +1708,11 @@ fn verify_owned_table_json(value: &serde_json::Value) -> TxResult<()> {
             return Err(TransactionError::OwnershipChanged);
         }
     }
-    if table_count != 1 || chain_count != 1 {
+    if table_count != 1
+        || input_chain_count != 1
+        || forward_chain_count > 1
+        || (forward_rule_count > 0 && forward_chain_count != 1)
+    {
         return Err(TransactionError::OwnershipChanged);
     }
     Ok(())
@@ -1325,6 +1772,18 @@ fn expected_owned_comments(plan: &TransactionPlan) -> BTreeSet<String> {
                 .map(|(comment, _)| comment.to_owned()),
         );
     }
+    if plan.operations.iter().any(|operation| {
+        matches!(
+            operation.planned_operation.as_ref(),
+            Some(PlanOperation::EnsureRule {
+                path: manyfw_core::backend::PacketPath::Forward,
+                action: Action::Deny,
+                ..
+            })
+        )
+    }) {
+        comments.insert("manyfw-forward-exception-v1-established-related".into());
+    }
     comments
 }
 
@@ -1360,6 +1819,116 @@ fn strip_volatile_counters(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+/// nft list ruleset may move an otherwise unchanged table when an owned table
+/// is deleted and recreated. Canonicalize independent objects while preserving
+/// the order of rules within each chain, where order changes packet semantics.
+fn normalize_ruleset_object_order(value: &mut serde_json::Value) {
+    let Some(entries) = value
+        .get_mut("nftables")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut base_chain_order = BTreeMap::new();
+    let mut next_base_chain_order = BTreeMap::<(String, i64), usize>::new();
+    for entry in entries.iter() {
+        let Some(chain) = entry.get("chain") else {
+            continue;
+        };
+        let (Some(family), Some(hook), Some(priority)) = (
+            chain.get("family").and_then(serde_json::Value::as_str),
+            chain.get("hook").and_then(serde_json::Value::as_str),
+            chain.get("prio").and_then(serde_json::Value::as_i64),
+        ) else {
+            continue;
+        };
+        // Preserve ordering across families too: an inet chain and an ip/ip6
+        // chain at the same hook and priority can both see the same packets.
+        let group = (hook.to_owned(), priority);
+        let order = next_base_chain_order.entry(group.clone()).or_default();
+        let key = (
+            family.to_owned(),
+            chain
+                .get("table")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            chain
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        base_chain_order.insert(key, (group, *order));
+        *order += 1;
+    }
+
+    entries.sort_by_key(|entry| {
+        let Some(objects) = entry.as_object() else {
+            return (u8::MAX, String::new(), String::new(), String::new());
+        };
+        if objects.len() != 1 {
+            return (u8::MAX, String::new(), String::new(), entry.to_string());
+        }
+        let (kind, object) = objects.iter().next().expect("one nft object");
+        if kind == "metainfo" {
+            return (0, String::new(), String::new(), object.to_string());
+        }
+        let family = object
+            .get("family")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let table = object
+            .get("table")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                (kind == "table")
+                    .then(|| object.get("name").and_then(serde_json::Value::as_str))
+                    .flatten()
+            })
+            .unwrap_or_default()
+            .to_owned();
+        let name = object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let chain = object
+            .get("chain")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if kind == "chain" {
+            if let Some((group, order)) =
+                base_chain_order.get(&(family.clone(), table.clone(), name.clone()))
+            {
+                return (
+                    1,
+                    format!("base:{}:{}", group.0, group.1),
+                    format!("{order:020}"),
+                    format!("{family}\0{table}\0{name}"),
+                );
+            }
+        }
+        let category = match kind.as_str() {
+            "table" => 0,
+            "chain" => 1,
+            "set" | "map" | "flowtable" | "counter" | "quota" | "ct helper" => 2,
+            "element" => 3,
+            "rule" => 4,
+            _ => 5,
+        };
+        let stable_group = format!("{family}\0{table}\0{category}\0{name}\0{chain}");
+        let tie_breaker = if kind == "rule" && !chain.is_empty() {
+            String::new()
+        } else {
+            object.to_string()
+        };
+        (2, stable_group, String::new(), tie_breaker)
+    });
 }
 
 fn checkpoint_is_restored(checkpoint: &Checkpoint, owned_table_present: bool) -> bool {
@@ -1404,7 +1973,9 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
     verify_owned_table_json(&value).map_err(|_| invalid())?;
     let objects = value["nftables"].as_array().ok_or_else(invalid)?;
     let mut exception_positions = Vec::new();
+    let mut forward_exception_positions = Vec::new();
     let mut default_positions = Vec::new();
+    let mut forward_rule_positions = Vec::new();
     for (position, object) in objects.iter().enumerate() {
         if let Some(chain) = object.get("chain") {
             if chain["prio"].as_i64() != Some(i64::from(CHAIN_PRIORITY)) {
@@ -1415,6 +1986,14 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
             continue;
         };
         let comment = rule["comment"].as_str().ok_or_else(invalid)?;
+        if comment == "manyfw-forward-exception-v1-established-related" {
+            forward_exception_positions.push(position);
+            if rule["chain"] != "forward" || !verified_established_related_expression(&rule["expr"])
+            {
+                return Err(invalid());
+            }
+            continue;
+        }
         if comment.starts_with("manyfw-exception-v1-") {
             exception_positions.push(position);
             let expected = default_deny_exception_rules(true)
@@ -1460,6 +2039,9 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
                 return Err(invalid());
             }
         } else {
+            if rule["chain"] == "forward" {
+                forward_rule_positions.push(position);
+            }
             let mut ranks = Vec::new();
             let mut family = None;
             let mut has_transport = false;
@@ -1489,6 +2071,12 @@ fn validate_reboot_checkpoint_json(saved: &str) -> TxResult<serde_json::Value> {
     {
         return Err(invalid());
     }
+    if !forward_rule_positions.is_empty()
+        && (forward_exception_positions.len() != 1
+            || forward_exception_positions[0] >= *forward_rule_positions.iter().min().unwrap())
+    {
+        return Err(invalid());
+    }
     Ok(value)
 }
 
@@ -1499,8 +2087,12 @@ enum CheckpointMatch {
     Source4,
     Source6,
     Interface,
+    OriginalDestination4,
+    OriginalDestination6,
     Destination4,
     Destination6,
+    DnatStatus,
+    OriginalPort,
     Transport4,
     Transport6,
     TransportEither,
@@ -1514,11 +2106,15 @@ impl CheckpointMatch {
             Self::Source4 => (1, Some(4), false),
             Self::Source6 => (1, Some(6), false),
             Self::Interface => (2, None, false),
-            Self::Destination4 => (3, Some(4), false),
-            Self::Destination6 => (3, Some(6), false),
-            Self::Transport4 => (4, Some(4), true),
-            Self::Transport6 => (4, Some(6), true),
-            Self::TransportEither => (4, None, true),
+            Self::OriginalDestination4 => (3, Some(4), false),
+            Self::OriginalDestination6 => (3, Some(6), false),
+            Self::Destination4 => (4, Some(4), false),
+            Self::Destination6 => (4, Some(6), false),
+            Self::DnatStatus => (5, None, false),
+            Self::OriginalPort => (6, None, true),
+            Self::Transport4 => (7, Some(4), true),
+            Self::Transport6 => (7, Some(6), true),
+            Self::TransportEither => (7, None, true),
         }
     }
 }
@@ -1574,7 +2170,7 @@ fn validate_checkpoint_match(expression: &serde_json::Value) -> TxResult<Checkpo
         .get("match")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(invalid)?;
-    if matcher.len() != 3 || matcher.get("op").and_then(serde_json::Value::as_str) != Some("==") {
+    if matcher.len() != 3 {
         return Err(invalid());
     }
     let left = matcher
@@ -1585,6 +2181,42 @@ fn validate_checkpoint_match(expression: &serde_json::Value) -> TxResult<Checkpo
         return Err(invalid());
     }
     let right = matcher.get("right").ok_or_else(invalid)?;
+    if matcher.get("op").and_then(serde_json::Value::as_str) == Some("in")
+        && left.get("ct") == Some(&serde_json::json!({"key":"status"}))
+        && right == "dnat"
+    {
+        return Ok(CheckpointMatch::DnatStatus);
+    }
+    if matcher.get("op").and_then(serde_json::Value::as_str) != Some("==") {
+        return Err(invalid());
+    }
+    if let Some(ct) = left.get("ct").and_then(serde_json::Value::as_object) {
+        if left.len() != 1 || ct.len() != 2 {
+            return Err(invalid());
+        }
+        if ct.get("dir").and_then(serde_json::Value::as_str) != Some("original") {
+            return Err(invalid());
+        }
+        return match ct.get("key").and_then(serde_json::Value::as_str) {
+            Some("ip daddr") => {
+                let address = right.as_str().ok_or_else(invalid)?;
+                let parsed = address.parse::<std::net::IpAddr>().map_err(|_| invalid())?;
+                match parsed {
+                    std::net::IpAddr::V4(_) => Ok(CheckpointMatch::OriginalDestination4),
+                    std::net::IpAddr::V6(_) => Ok(CheckpointMatch::OriginalDestination6),
+                }
+            }
+            Some("ip6 daddr") => {
+                validate_checkpoint_address(right, 6)?;
+                Ok(CheckpointMatch::OriginalDestination6)
+            }
+            Some("proto-dst") => {
+                validate_checkpoint_ports(right)?;
+                Ok(CheckpointMatch::OriginalPort)
+            }
+            _ => Err(invalid()),
+        };
+    }
     let Some(meta) = left.get("meta").and_then(serde_json::Value::as_object) else {
         let payload = left
             .get("payload")
@@ -2018,6 +2650,17 @@ fn reject_forward_allow(operation: &PlanOperation) -> TxResult<()> {
     ) {
         return Err(backend_error("FORWARD allows are unsupported"));
     }
+    if matches!(
+        operation,
+        PlanOperation::SetManagedDefault {
+            path: manyfw_core::backend::PacketPath::Forward,
+            ..
+        }
+    ) {
+        return Err(backend_error(
+            "FORWARD base-chain policies are unsupported; only published-Docker drop rules are supported",
+        ));
+    }
     Ok(())
 }
 
@@ -2056,6 +2699,444 @@ mod tests {
 
         let error = reject_forward_allow(&operation).unwrap_err();
         assert!(error.to_string().contains("FORWARD allows are unsupported"));
+    }
+
+    #[test]
+    fn crafted_forward_default_drop_is_rejected_by_apply_preflight_guard() {
+        let operation = PlanOperation::SetManagedDefault {
+            action: Action::Deny,
+            path: manyfw_core::backend::PacketPath::Forward,
+            family: AddressFamily::Ipv4,
+            managed_resource: Some("forward".into()),
+        };
+        let error = reject_forward_allow(&operation).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("FORWARD base-chain policies are unsupported")
+        );
+    }
+
+    #[test]
+    fn forward_json_is_drop_only_post_dnat_and_preserves_established_flows() {
+        use manyfw_core::docker::{ContainerAddress, FieldProvenance, PublicationMechanism};
+        let (mut plan, _, _) = interrupted_fixture();
+        let rule = plan
+            .operations
+            .iter_mut()
+            .find_map(|operation| {
+                operation
+                    .planned_operation
+                    .as_mut()
+                    .filter(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            })
+            .unwrap();
+        let PlanOperation::EnsureRule {
+            destination,
+            path,
+            action,
+            requires_dnat_original_destination,
+            requires_conntrack,
+            publication,
+            host_address,
+            host_port,
+            container_port,
+            container_targets,
+            ..
+        } = rule
+        else {
+            unreachable!()
+        };
+        *destination = Selector::Docker("web".into());
+        *path = manyfw_core::backend::PacketPath::Forward;
+        *action = Action::Deny;
+        *requires_dnat_original_destination = false;
+        *requires_conntrack = true;
+        *publication = Some(PublicationMechanism::Nat);
+        **host_address = Some("192.0.2.10".parse().unwrap());
+        *host_port = Some(18080);
+        *container_port = Some(8080);
+        **container_targets = vec![ContainerAddress {
+            network: "bridge".into(),
+            address: "172.18.0.20".parse().unwrap(),
+            provenance: FieldProvenance::DockerInspection,
+        }];
+
+        let document = build_apply_document(&plan, false).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        let objects = value["nftables"].as_array().unwrap();
+        let forward_chain = objects
+            .iter()
+            .filter_map(|object| object.get("add").and_then(|add| add.get("chain")))
+            .find(|chain| chain["hook"] == "forward")
+            .unwrap();
+        assert_eq!(forward_chain["name"], "forward");
+        assert_eq!(forward_chain["prio"], FORWARD_CHAIN_PRIORITY);
+        assert_eq!(forward_chain["policy"], "accept");
+
+        let forward_rules = objects
+            .iter()
+            .filter_map(|object| object.get("add").and_then(|add| add.get("rule")))
+            .filter(|rule| rule["chain"] == "forward")
+            .collect::<Vec<_>>();
+        assert_eq!(forward_rules.len(), 2);
+        assert_eq!(
+            forward_rules[0]["comment"],
+            "manyfw-forward-exception-v1-established-related"
+        );
+        assert_eq!(
+            forward_rules[0]["expr"][1],
+            serde_json::json!({"accept":null})
+        );
+        let drop = forward_rules[1];
+        assert_eq!(
+            drop["expr"].as_array().unwrap().last().unwrap(),
+            &serde_json::json!({"drop":null})
+        );
+        assert!(drop["expr"].as_array().unwrap().iter().any(|expression| {
+            expression["match"]["left"]["payload"]["field"] == "daddr"
+                && expression["match"]["right"] == "172.18.0.20"
+        }));
+        assert!(drop["expr"].as_array().unwrap().iter().any(|expression| {
+            expression["match"]["left"]["payload"]["field"] == "dport"
+                && expression["match"]["right"] == 8080
+        }));
+        assert!(drop["expr"].as_array().unwrap().iter().any(|expression| {
+            expression["match"]["left"]["ct"]["dir"] == "original"
+                && expression["match"]["left"]["ct"]["key"] == "ip daddr"
+                && expression["match"]["right"] == "192.0.2.10"
+        }));
+        assert!(drop["expr"].as_array().unwrap().iter().any(|expression| {
+            expression["match"]["left"]["ct"]["dir"] == "original"
+                && expression["match"]["left"]["ct"]["key"] == "proto-dst"
+                && expression["match"]["right"] == 18080
+        }));
+        assert!(drop["expr"].as_array().unwrap().iter().any(|expression| {
+            expression["match"]["left"]["ct"]["key"] == "status"
+                && expression["match"]["op"] == "in"
+                && expression["match"]["right"] == "dnat"
+        }));
+        assert_eq!(
+            expected_owned_comments(&plan).len(),
+            2,
+            "forward rule and established exception are verified"
+        );
+        let mut listed_objects = vec![serde_json::json!({"table":{
+            "family":"inet",
+            "name":TABLE,
+            "comment":TABLE_MARKER
+        }})];
+        for command in objects {
+            if let Some(add) = command.get("add") {
+                for kind in ["chain", "rule"] {
+                    if let Some(object) = add.get(kind) {
+                        listed_objects.push(serde_json::json!({kind:object}));
+                    }
+                }
+            }
+        }
+        listed_objects
+            .iter_mut()
+            .find(|object| {
+                object["rule"]["comment"] == "manyfw-forward-exception-v1-established-related"
+            })
+            .unwrap()["rule"]["expr"][0]["match"]["op"] = serde_json::json!("==");
+        let listed = serde_json::json!({"nftables":listed_objects});
+        verify_owned_table_json(&listed).unwrap();
+        NftBackend::verify_interrupted_plan(&plan, &listed).unwrap();
+        validate_reboot_checkpoint_json(&listed.to_string()).unwrap();
+    }
+
+    #[test]
+    fn forward_ipv6_udp_rule_renders_original_destination_and_transport_port() {
+        use manyfw_core::docker::{ContainerAddress, FieldProvenance, PublicationMechanism};
+        let (mut plan, _, _) = interrupted_fixture();
+        let operation = plan
+            .operations
+            .iter_mut()
+            .find_map(|operation| {
+                operation
+                    .planned_operation
+                    .as_mut()
+                    .filter(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            })
+            .unwrap();
+        let PlanOperation::EnsureRule {
+            destination,
+            source_subnets,
+            path,
+            family,
+            action,
+            protocol,
+            requires_conntrack,
+            publication,
+            host_address,
+            host_port,
+            container_port,
+            container_targets,
+            ..
+        } = operation
+        else {
+            unreachable!()
+        };
+        *destination = Selector::Docker("web".into());
+        *source_subnets = vec!["2001:db8:51::1/128".parse().unwrap()];
+        *path = manyfw_core::backend::PacketPath::Forward;
+        *family = manyfw_core::backend::AddressFamily::Ipv6;
+        *action = Action::Deny;
+        *protocol = manyfw_core::Protocol::Udp;
+        *requires_conntrack = true;
+        *publication = Some(PublicationMechanism::Nat);
+        **host_address = Some("2001:db8::80".parse().unwrap());
+        *host_port = Some(18080);
+        *container_port = Some(8080);
+        **container_targets = vec![ContainerAddress {
+            network: "bridge".into(),
+            address: "2001:db8:1::20".parse().unwrap(),
+            provenance: FieldProvenance::DockerInspection,
+        }];
+
+        let document = build_apply_document(&plan, false).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        let forward_rule = value["nftables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|object| object.get("add").and_then(|add| add.get("rule")))
+            .find(|rule| {
+                rule["chain"] == "forward"
+                    && rule["comment"] != "manyfw-forward-exception-v1-established-related"
+            })
+            .unwrap();
+        let expressions = forward_rule["expr"].as_array().unwrap();
+        assert!(expressions.iter().any(|expression| {
+            expression["match"]["left"]["ct"]["dir"] == "original"
+                && expression["match"]["left"]["ct"]["key"] == "ip6 daddr"
+                && expression["match"]["right"] == "2001:db8::80"
+        }));
+        assert!(expressions.iter().any(|expression| {
+            expression["match"]["left"]["payload"]["protocol"] == "udp"
+                && expression["match"]["left"]["payload"]["field"] == "dport"
+                && expression["match"]["right"] == 8080
+        }));
+    }
+
+    #[test]
+    fn forward_wildcard_host_binding_omits_original_destination_match() {
+        let (mut plan, _, _) = interrupted_fixture();
+        let operation = plan
+            .operations
+            .iter_mut()
+            .find_map(|operation| {
+                operation
+                    .planned_operation
+                    .as_mut()
+                    .filter(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            })
+            .unwrap();
+        let PlanOperation::EnsureRule {
+            destination,
+            path,
+            action,
+            requires_conntrack,
+            publication,
+            host_address,
+            host_port,
+            container_port,
+            container_targets,
+            ..
+        } = operation
+        else {
+            unreachable!()
+        };
+        *destination = Selector::Docker("web".into());
+        *path = manyfw_core::backend::PacketPath::Forward;
+        *action = Action::Deny;
+        *requires_conntrack = true;
+        *publication = Some(manyfw_core::docker::PublicationMechanism::Nat);
+        **host_address = None;
+        *host_port = Some(18080);
+        *container_port = Some(8080);
+        **container_targets = vec![manyfw_core::docker::ContainerAddress {
+            network: "bridge".into(),
+            address: "172.18.0.20".parse().unwrap(),
+            provenance: manyfw_core::docker::FieldProvenance::DockerInspection,
+        }];
+
+        let document = build_apply_document(&plan, false).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        let forward_rule = value["nftables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|object| object.get("add").and_then(|add| add.get("rule")))
+            .find(|rule| {
+                rule["chain"] == "forward"
+                    && rule["comment"] != "manyfw-forward-exception-v1-established-related"
+            })
+            .unwrap();
+        let expressions = forward_rule["expr"].as_array().unwrap();
+        assert!(!expressions.iter().any(|expression| {
+            expression["match"]["left"]["ct"]["dir"] == "original"
+                && (expression["match"]["left"]["ct"]["key"] == "ip daddr"
+                    || expression["match"]["left"]["ct"]["key"] == "ip6 daddr")
+        }));
+        assert!(expressions.iter().any(|expression| {
+            expression["match"]["left"]["ct"]["key"] == "proto-dst"
+                && expression["match"]["right"] == 18080
+        }));
+    }
+
+    #[test]
+    fn forward_preflight_refuses_container_address_change_after_planning() {
+        use manyfw_core::docker::{
+            CollectionInterval, CollectionOutcome, Completeness, ContainerAddress,
+            ContainerInstance, ContainerObservation, DockerDiscoveryResult, DockerFirewallMode,
+            FieldProvenance, HostBinding, IpFamily, LifecycleState, LogicalIdentity, NetworkMode,
+            ObservedPublishedEndpoint, OperationalStatus, Provenance, PublicationMechanism,
+            TransportProtocol,
+        };
+        let (mut plan, _, _) = interrupted_fixture();
+        let operation = plan
+            .operations
+            .iter_mut()
+            .filter_map(|operation| operation.planned_operation.as_mut())
+            .find(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            .unwrap();
+        let PlanOperation::EnsureRule {
+            destination,
+            path,
+            action,
+            publication,
+            host_address,
+            host_port,
+            container_port,
+            container_targets,
+            ..
+        } = operation
+        else {
+            panic!("fixture contains an explicit rule operation");
+        };
+        *destination = Selector::Docker("web".into());
+        *path = manyfw_core::backend::PacketPath::Forward;
+        *action = Action::Deny;
+        *publication = Some(PublicationMechanism::Nat);
+        **host_address = Some("192.0.2.10".parse().unwrap());
+        *host_port = Some(18080);
+        *container_port = Some(8080);
+        **container_targets = vec![ContainerAddress {
+            network: "bridge".into(),
+            address: "172.18.0.20".parse().unwrap(),
+            provenance: FieldProvenance::DockerInspection,
+        }];
+        let instance_id = "container-instance-1";
+        let make_observation =
+            |address: &str, host_address: Option<std::net::IpAddr>| DockerDiscoveryResult {
+                collected_at: CollectionInterval {
+                    started_at: 1,
+                    finished_at: 2,
+                },
+                outcome: CollectionOutcome::Complete,
+                completeness: Completeness::Complete,
+                firewall_mode: DockerFirewallMode::Iptables,
+                containers: vec![ContainerObservation {
+                    logical_identity: Some(LogicalIdentity {
+                        value: "docker:web".into(),
+                        source: manyfw_core::docker::IdentitySource::ManyfwLabel,
+                    }),
+                    instance: ContainerInstance {
+                        id: instance_id.into(),
+                        replica_key: instance_id.into(),
+                    },
+                    lifecycle: LifecycleState::Running,
+                    operational_status: OperationalStatus::Running,
+                    network_mode: NetworkMode::Bridge,
+                    configured_publications: vec![],
+                    observed_endpoints: vec![ObservedPublishedEndpoint {
+                        instance_id: instance_id.into(),
+                        host: HostBinding {
+                            address: host_address,
+                            port: 18080,
+                        },
+                        container_port: 8080,
+                        container_addresses: vec![ContainerAddress {
+                            network: "bridge".into(),
+                            address: address.parse().unwrap(),
+                            provenance: FieldProvenance::DockerInspection,
+                        }],
+                        protocol: TransportProtocol::Tcp,
+                        family: IpFamily::Ipv4,
+                        network_mode: NetworkMode::Custom("issue51-test-bridge".into()),
+                        mechanism: PublicationMechanism::Unknown(
+                            "Engine binding does not identify the packet path".into(),
+                        ),
+                        provenance: FieldProvenance::DockerInspection,
+                    }],
+                }],
+                diagnostics: vec![],
+                provenance: Provenance {
+                    source: "test".into(),
+                    operation: "inspect".into(),
+                },
+                limitations: vec![],
+            };
+        let explicit_host = Some("192.0.2.10".parse().unwrap());
+        validate_forward_docker_targets_with(
+            &plan,
+            &make_observation("172.18.0.20", explicit_host),
+            |_| Ok(true),
+        )
+        .unwrap();
+        let error = validate_forward_docker_targets_with(
+            &plan,
+            &make_observation("172.18.0.21", explicit_host),
+            |_| Ok(true),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("target addresses changed"));
+        let mut mutation_started = false;
+        let error = run_after_forward_revalidation(
+            &plan,
+            || {
+                validate_forward_docker_targets_with(
+                    &plan,
+                    &make_observation("172.18.0.21", explicit_host),
+                    |_| Ok(true),
+                )
+            },
+            || {
+                mutation_started = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("target addresses changed"));
+        assert!(
+            !mutation_started,
+            "stale target must not reach nft mutation"
+        );
+
+        let PlanOperation::EnsureRule { host_address, .. } = plan
+            .operations
+            .iter_mut()
+            .filter_map(|operation| operation.planned_operation.as_mut())
+            .find(|operation| matches!(operation, PlanOperation::EnsureRule { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        **host_address = None;
+        validate_forward_docker_targets_with(&plan, &make_observation("172.18.0.20", None), |_| {
+            Ok(true)
+        })
+        .unwrap();
+        let error = validate_forward_docker_targets_with(
+            &plan,
+            &make_observation("172.18.0.20", explicit_host),
+            |_| Ok(true),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("target addresses changed"));
     }
 
     #[test]
@@ -3378,6 +4459,65 @@ mod tests {
         let mut state = serde_json::json!({"rule":{"packets":9,"bytes":300,"comment":"owned"}});
         strip_volatile_counters(&mut state);
         assert_eq!(state, serde_json::json!({"rule":{"comment":"owned"}}));
+    }
+
+    #[test]
+    fn ruleset_fingerprints_ignore_object_listing_order_but_preserve_rule_order() {
+        let mut original = serde_json::json!({"nftables":[
+            {"metainfo":{"version":"1.0.9"}},
+            {"table":{"family":"inet","name":"manyfw"}},
+            {"chain":{"family":"inet","table":"manyfw","name":"input"}},
+            {"rule":{"family":"inet","table":"manyfw","chain":"input","expr":[{"drop":null}]}},
+            {"rule":{"family":"inet","table":"manyfw","chain":"input","expr":[{"accept":null}]}},
+            {"table":{"family":"ip","name":"raw"}},
+            {"chain":{"family":"ip","table":"raw","name":"PREROUTING"}}
+        ]});
+        let mut reordered = serde_json::json!({"nftables":[
+            {"metainfo":{"version":"1.0.9"}},
+            {"table":{"family":"ip","name":"raw"}},
+            {"chain":{"family":"ip","table":"raw","name":"PREROUTING"}},
+            {"table":{"family":"inet","name":"manyfw"}},
+            {"chain":{"family":"inet","table":"manyfw","name":"input"}},
+            {"rule":{"family":"inet","table":"manyfw","chain":"input","expr":[{"drop":null}]}},
+            {"rule":{"family":"inet","table":"manyfw","chain":"input","expr":[{"accept":null}]}}
+        ]});
+        normalize_ruleset_object_order(&mut original);
+        normalize_ruleset_object_order(&mut reordered);
+        assert_eq!(original, reordered);
+
+        reordered["nftables"].as_array_mut().unwrap().swap(3, 4);
+        normalize_ruleset_object_order(&mut reordered);
+        assert_ne!(
+            original, reordered,
+            "reordering rules within one chain changes packet semantics"
+        );
+    }
+
+    #[test]
+    fn ruleset_fingerprints_preserve_base_chain_registration_order() {
+        let make_state = |reverse: bool| {
+            let first = serde_json::json!({"chain":{
+                "family":"ip","table":"first","name":"hook","type":"nat",
+                "hook":"prerouting","prio":-100
+            }});
+            let second = serde_json::json!({"chain":{
+                "family":"inet","table":"second","name":"hook","type":"nat",
+                "hook":"prerouting","prio":-100
+            }});
+            serde_json::json!({"nftables": if reverse {
+                vec![second, first]
+            } else {
+                vec![first, second]
+            }})
+        };
+        let mut first = make_state(false);
+        let mut reordered = make_state(true);
+        normalize_ruleset_object_order(&mut first);
+        normalize_ruleset_object_order(&mut reordered);
+        assert_ne!(
+            first, reordered,
+            "same-hook, same-priority base chains across ip/inet may see the same packets"
+        );
     }
 
     #[test]

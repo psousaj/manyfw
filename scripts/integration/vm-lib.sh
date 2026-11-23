@@ -117,6 +117,7 @@ vm_scp_to() {
     ssh_options
     scp -F /dev/null -P "$(cat "$CURRENT_DIR/ssh-port")" \
         -i "$CURRENT_DIR/ssh/id_ed25519" -o BatchMode=yes \
+        -o "ConnectTimeout=${MANYFW_VM_SSH_CONNECT_TIMEOUT:-5}" \
         -o StrictHostKeyChecking=accept-new \
         -o "UserKnownHostsFile=$CURRENT_DIR/ssh/known_hosts" \
         -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes \

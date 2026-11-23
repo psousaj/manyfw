@@ -370,6 +370,39 @@ fn run_apply(
     if current_plan != bundle.plan || !bundle.plan.matches_input(&bundle.input) {
         return Err("planner bundle is stale or does not match its normalized input".into());
     }
+    if bundle.plan.operations.iter().any(|operation| {
+        matches!(
+            operation,
+            manyfw_core::backend::PlanOperation::EnsureRule {
+                path: manyfw_core::backend::PacketPath::Forward,
+                ..
+            }
+        )
+    }) {
+        #[cfg(target_os = "linux")]
+        {
+            let observed = bundle.input.observation.docker();
+            let current = manyfw_core::docker::DockerDiscovery::new(
+                docker_engine::local_docker_transport(),
+                DiscoveryClock,
+            )
+            .collect();
+            if observed.completeness != manyfw_core::docker::Completeness::Complete
+                || current.completeness != manyfw_core::docker::Completeness::Complete
+                || observed.outcome != manyfw_core::docker::CollectionOutcome::Complete
+                || current.outcome != manyfw_core::docker::CollectionOutcome::Complete
+                || observed.firewall_mode != current.firewall_mode
+                || !docker_observations_match_for_forward(&observed, &current)
+            {
+                return Err(
+                    "Docker identity, publication, or target addresses changed since planning; rediscover and re-plan"
+                        .into(),
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err("FORWARD Apply requires live Linux Docker revalidation".into());
+    }
     let backend = nft_apply::NftBackend;
     nft_apply::NftBackend::prepare_recovery_storage()?;
     let token_source = OsTokenSource;
@@ -379,6 +412,8 @@ fn run_apply(
     let plan = TransactionPlan::from_diagnostic_plan(
         &bundle.plan,
         transaction_id.clone(),
+        // Keep the established lock key: pending transactions created before
+        // FORWARD support protect the same owned inet table.
         "nft:inet:input".into(),
         fingerprint,
         timeout,
@@ -395,10 +430,60 @@ fn run_apply(
             "deadline_seconds": timeout,
             "experimental": true,
             "environment": "disposable-kvm-guest",
-            "composition": "INPUT only: drop is terminal for packets reaching this hook; accept does not override foreign drops or guarantee reachability"
+            "composition": if bundle.plan.operations.iter().any(|operation| matches!(operation, manyfw_core::backend::PlanOperation::EnsureRule { path: manyfw_core::backend::PacketPath::Forward, .. })) {
+                "INPUT and FORWARD: drops are terminal for packets reaching their hook; accepts do not override foreign drops or guarantee reachability"
+            } else {
+                "INPUT only: drop is terminal for packets reaching this hook; accept does not override foreign drops or guarantee reachability"
+            }
         })
     );
     Ok(())
+}
+
+fn docker_observations_match_for_forward(
+    observed: &manyfw_core::docker::DockerDiscoveryResult,
+    current: &manyfw_core::docker::DockerDiscoveryResult,
+) -> bool {
+    let mut observed = observed.clone();
+    let mut current = current.clone();
+    if observed.containers.len() != current.containers.len() {
+        return false;
+    }
+    // Collection timestamps are necessarily different between planning and
+    // Apply; compare the observed Docker state, not when each snapshot ran.
+    observed.collected_at = current.collected_at;
+    for (observed_container, current_container) in
+        observed.containers.iter_mut().zip(&mut current.containers)
+    {
+        if observed_container.observed_endpoints.len() != current_container.observed_endpoints.len()
+        {
+            return false;
+        }
+        for (observed_endpoint, current_endpoint) in observed_container
+            .observed_endpoints
+            .iter_mut()
+            .zip(&mut current_container.observed_endpoints)
+        {
+            if observed_endpoint.mechanism != current_endpoint.mechanism
+                && !matches!(
+                    (&observed_endpoint.mechanism, &current_endpoint.mechanism),
+                    (
+                        manyfw_core::docker::PublicationMechanism::Nat,
+                        manyfw_core::docker::PublicationMechanism::Unknown(_)
+                    ) | (
+                        manyfw_core::docker::PublicationMechanism::Unknown(_),
+                        manyfw_core::docker::PublicationMechanism::Unknown(_)
+                    )
+                )
+            {
+                return false;
+            }
+            // Exact live DNAT evidence for this tuple is checked again by the
+            // backend preflight; Docker Engine bindings alone stay unknown.
+            observed_endpoint.mechanism = current_endpoint.mechanism.clone();
+        }
+    }
+    observed == current
 }
 
 fn run_confirm(transaction_id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1484,13 +1569,65 @@ fn print_diagnostics(diagnostics: &[manyfw_core::Diagnostic], color: bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscoveryFormat, escape_terminal_text, render_discovery_human, resolve_discovery_format,
+        DiscoveryFormat, docker_observations_match_for_forward, escape_terminal_text,
+        render_discovery_human, resolve_discovery_format,
     };
     use crate::nft_apply::recovery_arm_matches_record;
     use manyfw_core::snapshot::ObservationSnapshot;
     use manyfw_core::transaction::{
         Checkpoint, ConfirmationDeadline, TransactionPlan, TransactionRecord, TransactionState,
     };
+
+    #[test]
+    fn forward_revalidation_ignores_unknown_reason_text_but_not_target_changes() {
+        let mut snapshot: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/empty-snapshot.json")).unwrap();
+        snapshot["docker"]["outcome"] = serde_json::json!("Complete");
+        snapshot["docker"]["completeness"] = serde_json::json!("Complete");
+        snapshot["docker"]["firewall_mode"] = serde_json::json!("iptables");
+        snapshot["docker"]["containers"] = serde_json::json!([{
+            "logical_identity": {"value": "docker:web", "source": "ManyfwLabel"},
+            "instance": {"id": "container-id", "replica_key": "container-id"},
+            "lifecycle": "Running",
+            "operational_status": "Running",
+            "network_mode": {"Custom": "issue51-test"},
+            "configured_publications": [],
+            "observed_endpoints": [{
+                "instance_id": "container-id",
+                "host": {"address": "198.18.51.1", "port": 18080},
+                "container_port": 8080,
+                "container_addresses": [{
+                    "network": "issue51-test", "address": "172.18.0.2",
+                    "provenance": "DockerInspection"
+                }],
+                "protocol": "Tcp", "family": "Ipv4",
+                "network_mode": {"Custom": "issue51-test"},
+                "mechanism": {"Unknown": "different reason"},
+                "provenance": "PortBinding"
+            }]
+        }]);
+        let observed: manyfw_core::docker::DockerDiscoveryResult =
+            serde_json::from_value(snapshot["docker"].clone()).unwrap();
+        snapshot["docker"]["containers"][0]["observed_endpoints"][0]["mechanism"] =
+            serde_json::json!({"Unknown": "another transient reason"});
+        let current: manyfw_core::docker::DockerDiscoveryResult =
+            serde_json::from_value(snapshot["docker"].clone()).unwrap();
+        let mut current = current;
+        current.collected_at.finished_at += 100;
+        assert!(docker_observations_match_for_forward(&observed, &current));
+
+        snapshot["docker"]["containers"][0]["observed_endpoints"][0]["mechanism"] =
+            serde_json::json!("Nat");
+        let planned: manyfw_core::docker::DockerDiscoveryResult =
+            serde_json::from_value(snapshot["docker"].clone()).unwrap();
+        assert!(docker_observations_match_for_forward(&planned, &current));
+
+        snapshot["docker"]["containers"][0]["observed_endpoints"][0]["container_addresses"][0]["address"] =
+            serde_json::json!("172.18.0.3");
+        let changed: manyfw_core::docker::DockerDiscoveryResult =
+            serde_json::from_value(snapshot["docker"].clone()).unwrap();
+        assert!(!docker_observations_match_for_forward(&planned, &changed));
+    }
 
     #[test]
     fn recovery_arm_is_bound_to_persisted_deadline_not_current_wall_clock() {

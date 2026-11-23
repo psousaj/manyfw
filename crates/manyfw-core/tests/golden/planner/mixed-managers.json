@@ -124,11 +124,6 @@
       "resource": "ufw-user-input",
       "owner": "ufw",
       "reason": "foreign resources are never rewritten"
-    },
-    {
-      "resource": "r1",
-      "owner": "manyfw",
-      "reason": "planned operation is scoped to the ManyFW ownership boundary"
     }
   ],
   "unknowns": [],
